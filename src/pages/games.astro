@@ -1,0 +1,37 @@
+---
+import Base from '../layouts/Base.astro';
+import GameCard from '../components/GameCard.astro';
+import { games } from '../data/games';
+---
+
+<Base title="Games" description="Every game from GeurtsGaming: Cool Typing Games for kids and classrooms, and Earl vs. The Mutants on Steam.">
+  <section class="page-hero">
+    <div class="wrap">
+      <p class="eyebrow">Our games</p>
+      <h1>Pick your world</h1>
+      <p class="lede muted">
+        From classroom-friendly typing races to a mutant-blasting road trip. Every game is built to be fun first, and good for you second.
+      </p>
+    </div>
+  </section>
+  <section class="section" style="padding-top: 0">
+    <div class="wrap grid">
+      {games.map((g, i) => <GameCard game={g} featured={i === 0} />)}
+    </div>
+  </section>
+</Base>
+
+<style>
+  .page-hero {
+    padding-block: 150px 48px;
+    background:
+      radial-gradient(ellipse 60% 60% at 80% 0%, color-mix(in srgb, var(--plum) 50%, transparent), transparent 70%),
+      linear-gradient(180deg, #050f33, var(--navy));
+  }
+  .lede { max-width: 620px; font-size: 1.15rem; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+    gap: 28px;
+  }
+</style>

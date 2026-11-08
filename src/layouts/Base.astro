@@ -1,0 +1,81 @@
+---
+import '../styles/global.css';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+
+interface Props {
+  title?: string;
+  description?: string;
+  image?: string;
+}
+const site = 'GeurtsGaming';
+const {
+  title,
+  description = 'GeurtsGaming makes educational and fun games for kids and teenagers — including Cool Typing Games and Earl vs. The Mutants.',
+  image = '/og.png',
+} = Astro.props;
+const fullTitle = title ? `${title} · ${site}` : `${site} — Games kids love. Skills that stick.`;
+const canonical = new URL(Astro.url.pathname, Astro.site ?? 'https://geurtsgaming.com');
+const ogImage = new URL(image, Astro.site ?? 'https://geurtsgaming.com');
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <meta name="theme-color" content="#081849" />
+    <meta name="generator" content={Astro.generator} />
+
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="sitemap" href="/sitemap-index.xml" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={site} />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={fullTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;800&family=Orbitron:wght@700;900&display=swap"
+      rel="stylesheet"
+    />
+
+    <script type="application/ld+json" set:html={JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'Organization',
+      name: site,
+      url: 'https://geurtsgaming.com',
+      logo: 'https://geurtsgaming.com/logo.svg',
+      description,
+    })} />
+  </head>
+  <body>
+    <a class="skip visually-hidden" href="#main">Skip to content</a>
+    <Nav />
+    <main id="main">
+      <slot />
+    </main>
+    <Footer />
+  </body>
+</html>
+
+<style is:global>
+  .skip:focus {
+    position: fixed; left: 16px; top: 16px; z-index: 100;
+    width: auto; height: auto; margin: 0; padding: 12px 16px;
+    clip: auto; overflow: visible; white-space: normal;
+    background: var(--accent); color: var(--sand); border-radius: 8px; font-weight: 800;
+  }
+</style>

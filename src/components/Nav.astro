@@ -1,0 +1,86 @@
+---
+import Logo from './Logo.astro';
+const links = [
+  { href: '/games/', label: 'Games' },
+  { href: '/about/', label: 'About' },
+  { href: '/contact/', label: 'Contact' },
+];
+const path = Astro.url.pathname;
+---
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a href="/" class="brand" aria-label="GeurtsGaming home">
+      <Logo size={40} />
+      <span class="brand-text">Geurts<span>Gaming</span></span>
+    </a>
+    <nav aria-label="Primary">
+      <ul>
+        {links.map((l, i) => (
+          <li>
+            <a href={l.href} aria-current={path.startsWith(l.href) ? 'page' : undefined}>{l.label}</a>
+            {i < links.length - 1 && <span class="plus" aria-hidden="true">+</span>}
+          </li>
+        ))}
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<style>
+  .nav {
+    position: absolute;
+    inset: 0 0 auto 0;
+    z-index: 10;
+    padding-block: 18px;
+  }
+  .nav-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+  }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .brand-text {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .brand-text span { color: var(--accent); }
+
+  ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  li { display: flex; align-items: center; gap: 6px; }
+  nav a {
+    font-family: var(--font-display);
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    padding: 10px 14px;
+    border-radius: 8px;
+    color: var(--text-muted);
+    transition: color 0.15s ease, background 0.15s ease;
+  }
+  nav a:hover, nav a[aria-current='page'] { color: var(--sand); }
+  nav a[aria-current='page'] { background: color-mix(in srgb, var(--sand) 8%, transparent); }
+  .plus { color: var(--accent); font-weight: 900; opacity: 0.8; }
+
+  @media (max-width: 640px) {
+    .brand-text { display: none; }
+    .plus { display: none; }
+    nav a { padding: 10px 8px; letter-spacing: 0.14em; font-size: 0.75rem; }
+  }
+</style>

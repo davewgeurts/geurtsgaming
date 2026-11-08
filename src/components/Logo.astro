@@ -1,0 +1,59 @@
+---
+/**
+ * GeurtsGaming "GG" monogram.
+ * Two interlocking G rings — sand in back, magenta in front — on a lapis→plum badge.
+ * variant="badge" draws the rounded-square background; variant="mark" is just the letters.
+ */
+interface Props {
+  size?: number | string;
+  variant?: 'badge' | 'mark';
+  class?: string;
+  title?: string;
+}
+const { size = 64, variant = 'badge', class: className = '', title = 'GeurtsGaming' } = Astro.props;
+const id = `gg-${Math.random().toString(36).slice(2, 8)}`;
+
+// G geometry: ring radius 19, open mouth at upper-right, bar from centre to the right edge.
+const G = (cx: number, cy: number) =>
+  `M ${cx + 14.56} ${cy - 12.21} A 19 19 0 1 0 ${cx + 19} ${cy} M ${cx + 1.5} ${cy} L ${cx + 19} ${cy}`;
+const leftG = G(34, 50);
+const rightG = G(66, 50);
+---
+
+<svg
+  class={`logo ${className}`}
+  width={size}
+  height={size}
+  viewBox="0 0 100 100"
+  role="img"
+  aria-labelledby={`${id}-t`}
+  xmlns="http://www.w3.org/2000/svg"
+>
+  <title id={`${id}-t`}>{title}</title>
+  <defs>
+    <linearGradient id={`${id}-bg`} x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#213885" />
+      <stop offset="1" stop-color="#5F3475" />
+    </linearGradient>
+  </defs>
+
+  {variant === 'badge' && (
+    <>
+      <rect x="2" y="2" width="96" height="96" rx="24" fill={`url(#${id}-bg)`} />
+      <rect x="2" y="2" width="96" height="96" rx="24" fill="none" stroke="#ECDFD2" stroke-opacity="0.18" stroke-width="2" />
+    </>
+  )}
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- back G (magenta) -->
+    <path d={rightG} stroke="#081849" stroke-width="14" />
+    <path d={rightG} stroke="#893172" stroke-width="8" />
+    <!-- front G (sand) with navy knockout so the rings read as interlocked -->
+    <path d={leftG} stroke="#081849" stroke-width="14" />
+    <path d={leftG} stroke="#ECDFD2" stroke-width="8" />
+  </g>
+</svg>
+
+<style>
+  .logo { flex: none; }
+</style>

@@ -1,0 +1,75 @@
+---
+import Logo from './Logo.astro';
+import { games } from '../data/games';
+const year = new Date().getFullYear();
+---
+
+<footer class="footer">
+  <div class="wrap grid">
+    <div class="col brand">
+      <a href="/" class="lockup" aria-label="GeurtsGaming home">
+        <Logo size={56} />
+        <span>Geurts<b>Gaming</b></span>
+      </a>
+      <p class="muted">Educational games kids actually want to play.</p>
+    </div>
+    <div class="col">
+      <h4>Games</h4>
+      <ul>
+        {games.map((g) => <li><a href={g.url} target="_blank" rel="noopener">{g.title}</a></li>)}
+      </ul>
+    </div>
+    <div class="col">
+      <h4>Studio</h4>
+      <ul>
+        <li><a href="/about/">About</a></li>
+        <li><a href="/contact/">Contact</a></li>
+        <li><a href="https://github.com/davewgeurts" target="_blank" rel="noopener">GitHub</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="wrap legal muted">
+    <span>© {year} GeurtsGaming. All rights reserved.</span>
+    <span>Made with care for curious kids.</span>
+  </div>
+</footer>
+
+<style>
+  .footer {
+    border-top: 1px solid var(--surface-border);
+    background: linear-gradient(180deg, var(--bg) 0%, #050f33 100%);
+    padding-block: 56px 28px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1.6fr 1fr 1fr;
+    gap: 32px;
+  }
+  .lockup { display: inline-flex; align-items: center; gap: 14px; margin-bottom: 12px; }
+  .lockup span {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1.1rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .lockup b { color: var(--accent); font-weight: 700; }
+  h4 { font-size: 0.8rem; letter-spacing: 0.25em; color: var(--text-muted); margin-bottom: 14px; }
+  ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+  ul a { color: var(--text); font-weight: 700; }
+  ul a:hover { color: var(--accent-hover); }
+  .legal {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid color-mix(in srgb, var(--sand) 10%, transparent);
+    font-size: 0.9rem;
+  }
+  @media (max-width: 720px) {
+    .grid { grid-template-columns: 1fr 1fr; }
+    .brand { grid-column: 1 / -1; }
+  }
+</style>

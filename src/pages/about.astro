@@ -1,0 +1,118 @@
+---
+import Base from '../layouts/Base.astro';
+import { Image } from 'astro:assets';
+import Logo from '../components/Logo.astro';
+import earl from '../assets/earl.png';
+import edna from '../assets/edna.png';
+---
+
+<Base title="About" description="GeurtsGaming is an indie studio making educational and fun games for kids and teenagers.">
+  <section class="page-hero">
+    <div class="wrap">
+      <p class="eyebrow">About the studio</p>
+      <h1>Small team.<br />Big imagination.</h1>
+      <p class="lede muted">
+        GeurtsGaming is an indie game studio with one simple belief: kids learn best when they forget they're learning.
+      </p>
+    </div>
+  </section>
+
+  <section class="section" style="padding-top: 0">
+    <div class="wrap story">
+      <div class="text">
+        <h2>Why we make games</h2>
+        <p>
+          Most "educational" games feel like homework with a coat of paint. We started GeurtsGaming to flip that around:
+          take the stuff kids already love about games — competition, progress, friends, a little chaos — and let real skills
+          ride along for free.
+        </p>
+        <p>
+          <strong>Cool Typing Games</strong> came first: live multiplayer typing races and battles that teachers can drop
+          straight into a classroom. <strong>Earl vs. The Mutants</strong> is our love letter to teens who want something
+          bigger — a full wasteland road trip on Steam.
+        </p>
+        <p>
+          We build everything in-house, from code to characters, and we playtest with the people who matter most: actual kids.
+        </p>
+      </div>
+      <div class="art" aria-hidden="true">
+        <Image src={edna} alt="" width={240} class="edna" />
+        <Image src={earl} alt="" width={240} class="earl" />
+        <Logo size={120} class="badge" />
+      </div>
+    </div>
+  </section>
+
+  <section class="section values">
+    <div class="wrap">
+      <p class="eyebrow">What we care about</p>
+      <h2>Our promises</h2>
+      <ul class="list">
+        <li><strong>Kid-safe.</strong> No ads aimed at children, no manipulative purchases, no selling data.</li>
+        <li><strong>Teacher-friendly.</strong> Easy to set up, easy to supervise, works on whatever the school already has.</li>
+        <li><strong>Genuinely fun.</strong> If it doesn't pass the "one more round" test with real kids, it doesn't ship.</li>
+        <li><strong>Always improving.</strong> We listen to players and parents and keep shipping updates.</li>
+      </ul>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .page-hero {
+    padding-block: 150px 48px;
+    background:
+      radial-gradient(ellipse 60% 60% at 20% 0%, color-mix(in srgb, var(--lapis) 70%, transparent), transparent 70%),
+      linear-gradient(180deg, #050f33, var(--navy));
+  }
+  .lede { max-width: 620px; font-size: 1.15rem; }
+
+  .story {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    gap: 48px;
+    align-items: center;
+  }
+  .text p { font-size: 1.08rem; }
+  .art {
+    position: relative;
+    min-height: 420px;
+    display: grid;
+    place-items: center;
+    border-radius: var(--radius);
+    background: linear-gradient(135deg, var(--lapis), var(--plum));
+    overflow: hidden;
+  }
+  .art :global(img) {
+    position: absolute;
+    bottom: -10px;
+    width: 46%;
+    height: auto;
+    filter: drop-shadow(0 20px 30px rgba(0, 0, 0, 0.45));
+  }
+  .art :global(.edna) { left: 2%; }
+  .art :global(.earl) { right: 2%; }
+  .art :global(.badge) { position: relative; z-index: 1; transform: translateY(-80px); filter: drop-shadow(0 20px 40px rgba(0, 0, 0, 0.5)); }
+
+  .values { background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--lapis) 25%, transparent)); }
+  .list {
+    list-style: none;
+    padding: 0;
+    margin: 24px 0 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr));
+    gap: 18px;
+  }
+  .list li {
+    padding: 22px 24px;
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    border: 1px solid var(--surface-border);
+    color: var(--text-muted);
+  }
+  .list strong { color: var(--sand); display: block; margin-bottom: 4px; font-family: var(--font-display); letter-spacing: 0.05em; text-transform: uppercase; font-size: 0.9rem; }
+
+  @media (max-width: 800px) {
+    .story { grid-template-columns: 1fr; }
+    .art { min-height: 340px; }
+  }
+</style>
