@@ -19,14 +19,14 @@ const email = 'hello@geurtsgaming.com';
     <div class="wrap cards">
       <a class="card contact" href={`mailto:${email}`}>
         <span class="icon" aria-hidden="true">✉</span>
-        <h3>Email</h3>
+        <h2>Email</h2>
         <p class="muted">Partnerships, press and anything else.</p>
         <span class="link">{email}</span>
       </a>
       {games.map((g) => (
         <a class="card contact" href={g.url} target="_blank" rel="noopener">
           <span class="icon" aria-hidden="true">🎮</span>
-          <h3>{g.title}</h3>
+          <h2>{g.title}</h2>
           <p class="muted">Support, bugs and feedback for this game.</p>
           <span class="link">{g.url.replace('https://', '')}</span>
         </a>
@@ -57,6 +57,7 @@ const email = 'hello@geurtsgaming.com';
   }
   .contact:hover { transform: translateY(-4px); border-color: var(--accent); }
   .icon { font-size: 1.8rem; margin-bottom: 8px; }
+  .contact h2 { font-size: clamp(1.15rem, 2vw, 1.4rem); }
   .contact p { flex: 1; }
   .link { font-weight: 800; color: var(--accent-text); word-break: break-all; }
 </style>
