@@ -14,13 +14,13 @@ const year = new Date().getFullYear();
       <p class="muted">Educational games kids actually want to play.</p>
     </div>
     <div class="col">
-      <h4>Games</h4>
+      <h2>Games</h2>
       <ul>
         {games.map((g) => <li><a href={g.url} target="_blank" rel="noopener">{g.title}</a></li>)}
       </ul>
     </div>
     <div class="col">
-      <h4>Studio</h4>
+      <h2>Studio</h2>
       <ul>
         <li><a href="/about/">About</a></li>
         <li><a href="/contact/">Contact</a></li>
@@ -53,11 +53,11 @@ const year = new Date().getFullYear();
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
-  .lockup b { color: var(--accent); font-weight: 700; }
-  h4 { font-size: 0.8rem; letter-spacing: 0.25em; color: var(--text-muted); margin-bottom: 14px; }
+  .lockup b { color: var(--accent-bright); font-weight: 700; }
+  h2 { font-size: 0.8rem; letter-spacing: 0.25em; color: var(--text-muted); margin-bottom: 14px; }
   ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
   ul a { color: var(--text); font-weight: 700; }
-  ul a:hover { color: var(--accent-hover); }
+  ul a:hover { color: var(--accent-text); }
   .legal {
     display: flex;
     justify-content: space-between;

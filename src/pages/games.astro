@@ -16,7 +16,7 @@ import { games } from '../data/games';
   </section>
   <section class="section" style="padding-top: 0">
     <div class="wrap grid">
-      {games.map((g, i) => <GameCard game={g} featured={i === 0} />)}
+      {games.map((g, i) => <GameCard game={g} featured={i === 0} headingLevel={2} />)}
     </div>
   </section>
 </Base>

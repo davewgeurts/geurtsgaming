@@ -124,7 +124,7 @@ const pillars = [
     text-shadow: 0 0 40px rgba(236, 223, 210, 0.15);
   }
   .line { display: block; }
-  .accent { color: var(--accent); text-shadow: 0 0 50px color-mix(in srgb, var(--accent) 60%, transparent); }
+  .accent { color: var(--accent-bright); text-shadow: 0 0 50px color-mix(in srgb, var(--accent) 60%, transparent); }
 
   .sub {
     margin-top: 22px;
@@ -148,7 +148,7 @@ const pillars = [
   @keyframes bob { 0%, 100% { transform: translate(-50%, 0); } 50% { transform: translate(-50%, 8px); } }
 
   .heading-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-  .more { font-weight: 800; color: var(--accent-hover); }
+  .more { font-weight: 800; color: var(--accent-text); }
   .games-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
@@ -168,7 +168,7 @@ const pillars = [
     font-family: var(--font-display);
     font-weight: 900;
     font-size: 2.4rem;
-    color: color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--accent-bright);
     line-height: 1;
     display: block;
     margin-bottom: 14px;
