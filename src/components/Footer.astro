@@ -54,10 +54,10 @@ const year = new Date().getFullYear();
     text-transform: uppercase;
   }
   .lockup b { color: var(--accent-bright); font-weight: 700; }
-  h2 { font-size: 0.8rem; letter-spacing: 0.25em; color: var(--text-muted); margin-bottom: 14px; }
-  ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
-  ul a { color: var(--text); font-weight: 700; }
-  ul a:hover { color: var(--accent-text); }
+  h2 { font-size: 0.8rem; letter-spacing: 0.25em; color: var(--text-muted); margin-bottom: 6px; }
+  ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 2px; }
+  ul a { display: inline-block; padding: 10px 0; color: var(--text); font-weight: 700; }
+  @media (hover: hover) { ul a:hover { color: var(--accent-text); } }
   .legal {
     display: flex;
     justify-content: space-between;
@@ -69,7 +69,9 @@ const year = new Date().getFullYear();
     font-size: 0.9rem;
   }
   @media (max-width: 720px) {
-    .grid { grid-template-columns: 1fr 1fr; }
+    .footer { padding-block: 44px calc(24px + env(safe-area-inset-bottom)); }
+    .grid { grid-template-columns: 1fr 1fr; gap: 24px; }
     .brand { grid-column: 1 / -1; }
+    .legal { flex-direction: column; gap: 6px; margin-top: 32px; }
   }
 </style>

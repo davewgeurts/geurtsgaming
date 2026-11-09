@@ -37,12 +37,11 @@ const email = 'hello@geurtsgaming.com';
 
 <style>
   .page-hero {
-    padding-block: 150px 48px;
     background:
       radial-gradient(ellipse 60% 60% at 50% 0%, color-mix(in srgb, var(--magenta) 40%, transparent), transparent 70%),
       linear-gradient(180deg, #050f33, var(--navy));
   }
-  .lede { max-width: 560px; font-size: 1.15rem; }
+  .lede { max-width: 560px; font-size: clamp(1.02rem, 1.6vw, 1.15rem); }
   .cards {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
@@ -55,7 +54,10 @@ const email = 'hello@geurtsgaming.com';
     gap: 6px;
     transition: transform 0.2s ease, border-color 0.2s ease;
   }
-  .contact:hover { transform: translateY(-4px); border-color: var(--accent); }
+  @media (hover: hover) {
+    .contact:hover { transform: translateY(-4px); border-color: var(--accent); }
+  }
+  @media (max-width: 480px) { .contact { padding: 22px; } }
   .icon { font-size: 1.8rem; margin-bottom: 8px; }
   .contact h2 { font-size: clamp(1.15rem, 2vw, 1.4rem); }
   .contact p { flex: 1; }

@@ -59,12 +59,11 @@ import edna from '../assets/edna.png';
 
 <style>
   .page-hero {
-    padding-block: 150px 48px;
     background:
       radial-gradient(ellipse 60% 60% at 20% 0%, color-mix(in srgb, var(--lapis) 70%, transparent), transparent 70%),
       linear-gradient(180deg, #050f33, var(--navy));
   }
-  .lede { max-width: 620px; font-size: 1.15rem; }
+  .lede { max-width: 620px; font-size: clamp(1.02rem, 1.6vw, 1.15rem); }
 
   .story {
     display: grid;
@@ -112,7 +111,9 @@ import edna from '../assets/edna.png';
   .list strong { color: var(--sand); display: block; margin-bottom: 4px; font-family: var(--font-display); letter-spacing: 0.05em; text-transform: uppercase; font-size: 0.9rem; }
 
   @media (max-width: 800px) {
-    .story { grid-template-columns: 1fr; }
-    .art { min-height: 340px; }
+    .story { grid-template-columns: 1fr; gap: 32px; }
+    .art { min-height: 300px; }
+    .art :global(.badge) { width: 96px; height: 96px; transform: translateY(-56px); }
+    .list li { padding: 18px 20px; }
   }
 </style>
