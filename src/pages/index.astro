@@ -47,8 +47,8 @@ const pillars = [
 
   <section id="games" class="section">
     <div class="wrap">
-      <p class="eyebrow">Our games</p>
-      <div class="heading-row">
+      <div class="section-head">
+        <p class="eyebrow">Our games</p>
         <h2>Two worlds, one mission</h2>
         <a href="/games/" class="more">All games →</a>
       </div>
@@ -60,8 +60,10 @@ const pillars = [
 
   <section class="section pillars-wrap">
     <div class="wrap">
-      <p class="eyebrow">How we build</p>
-      <h2>Play is the point</h2>
+      <div class="section-head">
+        <p class="eyebrow">How we build</p>
+        <h2>Play is the point</h2>
+      </div>
       <div class="pillars">
         {pillars.map((p, i) => (
           <div class="pillar card">
@@ -76,7 +78,7 @@ const pillars = [
 
   <section class="section cta-band">
     <div class="wrap band card">
-      <div>
+      <div class="band-copy">
         <p class="eyebrow">Teachers, parents, players</p>
         <h2>Want to work with us?</h2>
         <p class="muted">Classroom pilots, feedback, press, or just to say hi — we'd love to hear from you.</p>
@@ -157,8 +159,7 @@ const pillars = [
   }
   @keyframes bob { 0%, 100% { transform: translate(-50%, 0); } 50% { transform: translate(-50%, 8px); } }
 
-  .heading-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-  .more { font-weight: 800; color: var(--accent-text); padding: 10px 0; }
+  .more { display: inline-block; font-weight: 800; color: var(--accent-text); padding: 6px 0; }
   .games-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
@@ -185,15 +186,15 @@ const pillars = [
   }
 
   .band {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 28px;
-    flex-wrap: wrap;
+    display: grid;
+    justify-items: center;
+    text-align: center;
+    gap: 24px;
     padding: clamp(28px, 5vw, 56px);
     background: linear-gradient(135deg, var(--lapis), var(--plum));
     border-color: color-mix(in srgb, var(--sand) 20%, transparent);
   }
+  .band-copy { max-width: 560px; }
   .band .eyebrow { color: var(--sand); opacity: 0.8; }
   .band h2 { margin-bottom: 8px; }
   .band p:last-child { margin: 0; color: var(--sand); opacity: 0.85; }

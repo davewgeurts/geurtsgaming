@@ -45,8 +45,10 @@ import edna from '../assets/edna.png';
 
   <section class="section values">
     <div class="wrap">
-      <p class="eyebrow">What we care about</p>
-      <h2>Our promises</h2>
+      <div class="section-head">
+        <p class="eyebrow">What we care about</p>
+        <h2>Our promises</h2>
+      </div>
       <ul class="list">
         <li><strong>Kid-safe.</strong> No ads aimed at children, no manipulative purchases, no selling data.</li>
         <li><strong>Teacher-friendly.</strong> Easy to set up, easy to supervise, works on whatever the school already has.</li>
@@ -60,16 +62,18 @@ import edna from '../assets/edna.png';
 <style>
   .page-hero {
     background:
-      radial-gradient(ellipse 60% 60% at 20% 0%, color-mix(in srgb, var(--lapis) 70%, transparent), transparent 70%),
+      radial-gradient(ellipse 60% 60% at 50% 0%, color-mix(in srgb, var(--lapis) 70%, transparent), transparent 70%),
       linear-gradient(180deg, #050f33, var(--navy));
   }
   .lede { max-width: 620px; font-size: clamp(1.02rem, 1.6vw, 1.15rem); }
 
   .story {
     display: grid;
-    grid-template-columns: 1.2fr 1fr;
-    gap: 48px;
-    align-items: center;
+    grid-template-columns: 1fr;
+    gap: 40px;
+    max-width: 720px;
+    margin-inline: auto;
+    text-align: center;
   }
   .text p { font-size: 1.08rem; }
   .art {

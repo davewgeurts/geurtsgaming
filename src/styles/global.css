@@ -78,7 +78,19 @@ p { margin: 0 0 1em; text-wrap: pretty; }
 .section { padding-block: clamp(56px, 10vw, 120px); }
 
 /* Inner-page header shared by /games/, /about/, /contact/ */
-.page-hero { padding-block: clamp(112px, 24vw, 150px) clamp(32px, 6vw, 48px); }
+.page-hero {
+  padding-block: clamp(112px, 24vw, 150px) clamp(32px, 6vw, 48px);
+  text-align: center;
+}
+.page-hero .lede {
+  margin-inline: auto;
+}
+
+.section-head {
+  text-align: center;
+  max-width: 680px;
+  margin-inline: auto;
+}
 
 .eyebrow {
   font-family: var(--font-display);
@@ -87,6 +99,7 @@ p { margin: 0 0 1em; text-wrap: pretty; }
   text-transform: uppercase;
   color: var(--accent-text);
   margin-bottom: 1rem;
+  text-align: center;
 }
 
 .btn {
