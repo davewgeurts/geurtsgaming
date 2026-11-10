@@ -1,10 +1,35 @@
 ---
 import Base from '../layouts/Base.astro';
 import GameCard from '../components/GameCard.astro';
+import { getImage } from 'astro:assets';
 import { games } from '../data/games';
+
+// Structured data: one VideoGame entry per game, generated from games.ts.
+const site = Astro.site ?? 'https://geurtsgaming.com';
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'ItemList',
+  name: 'GeurtsGaming games',
+  itemListElement: await Promise.all(
+    games.map(async (g, i) => ({
+      '@type': 'ListItem',
+      position: i + 1,
+      item: {
+        '@type': 'VideoGame',
+        name: g.title,
+        description: g.description,
+        url: g.url,
+        image: new URL((await getImage({ src: g.image, width: 1200 })).src, site).href,
+        gamePlatform: g.platform.split(' · '),
+        publisher: { '@type': 'Organization', name: 'GeurtsGaming', url: 'https://geurtsgaming.com' },
+      },
+    })),
+  ),
+};
 ---
 
 <Base title="Games" description="Every game from GeurtsGaming: Cool Typing Games for kids and classrooms, and Earl vs. The Mutants on Steam.">
+  <script type="application/ld+json" slot="head" set:html={JSON.stringify(jsonLd).replace(/</g, '\\u003c')} />
   <section class="page-hero">
     <div class="wrap">
       <p class="eyebrow">Our games</p>
@@ -30,7 +55,7 @@ import { games } from '../data/games';
   .lede { max-width: 620px; font-size: clamp(1.02rem, 1.6vw, 1.15rem); }
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
     gap: 28px;
   }
 </style>

@@ -63,6 +63,7 @@ const ogImage = new URL(image, Astro.site ?? 'https://geurtsgaming.com');
       logo: 'https://geurtsgaming.com/logo.svg',
       description,
     })} />
+    <slot name="head" />
   </head>
   <body>
     <a class="skip visually-hidden" href="#main">Skip to content</a>

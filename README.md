@@ -9,7 +9,8 @@ Built with [Astro](https://astro.build), deployed to GitHub Pages via `.github/w
 ```sh
 npm install
 npm run dev        # http://localhost:4321
-npm run build      # outputs to dist/
+npm run check      # type-check .astro and .ts files
+npm run build      # type-check, then output to dist/ (a type error fails the deploy)
 npm run preview    # serve the production build locally
 ```
 
