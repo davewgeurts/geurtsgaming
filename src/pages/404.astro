@@ -1,0 +1,37 @@
+---
+import Base from '../layouts/Base.astro';
+---
+
+<Base title="Page not found" description="That page doesn't exist. Head back to GeurtsGaming to find our games." noindex>
+  <section class="page-hero lost">
+    <div class="wrap">
+      <p class="eyebrow">Error 404</p>
+      <h1>Lost in space</h1>
+      <p class="lede muted">
+        We couldn't find that page. It may have moved, or the link might be mistyped.
+      </p>
+      <div class="cta">
+        <a href="/" class="btn">Back to home</a>
+        <a href="/games/" class="btn ghost">See our games</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .lost {
+    min-height: 72svh;
+    display: grid;
+    align-content: center;
+    padding-bottom: clamp(56px, 10vw, 120px);
+    background:
+      radial-gradient(ellipse 60% 60% at 50% 0%, color-mix(in srgb, var(--plum) 50%, transparent), transparent 70%),
+      linear-gradient(180deg, #050f33, var(--navy));
+  }
+  .lede { max-width: 520px; font-size: clamp(1.02rem, 1.6vw, 1.15rem); }
+  .cta { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; margin-top: 18px; }
+  @media (max-width: 420px) {
+    .cta { flex-direction: column; }
+    .cta .btn { justify-content: center; }
+  }
+</style>

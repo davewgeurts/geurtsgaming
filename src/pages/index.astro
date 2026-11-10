@@ -159,7 +159,7 @@ const pillars = [
   }
   @keyframes bob { 0%, 100% { transform: translate(-50%, 0); } 50% { transform: translate(-50%, 8px); } }
 
-  .more { display: inline-block; font-weight: 800; color: var(--accent-text); padding: 6px 0; }
+  .more { display: inline-flex; align-items: center; min-height: 44px; font-weight: 800; color: var(--accent-text); padding: 6px 0; }
   .games-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));

@@ -7,12 +7,15 @@ interface Props {
   title?: string;
   description?: string;
   image?: string;
+  /** Keep the page out of search results (used by the 404 page). */
+  noindex?: boolean;
 }
 const site = 'GeurtsGaming';
 const {
   title,
   description = 'GeurtsGaming makes educational and fun games for kids and teenagers — including Cool Typing Games and Earl vs. The Mutants.',
   image = '/og.png',
+  noindex = false,
 } = Astro.props;
 const fullTitle = title ? `${title} · ${site}` : `${site} — Games kids love. Skills that stick.`;
 const canonical = new URL(Astro.url.pathname, Astro.site ?? 'https://geurtsgaming.com');
@@ -26,7 +29,7 @@ const ogImage = new URL(image, Astro.site ?? 'https://geurtsgaming.com');
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>{fullTitle}</title>
     <meta name="description" content={description} />
-    <link rel="canonical" href={canonical} />
+    {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
     <meta name="theme-color" content="#081849" />
     <meta name="generator" content={Astro.generator} />
 

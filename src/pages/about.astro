@@ -85,15 +85,19 @@ import edna from '../assets/edna.png';
     background: linear-gradient(135deg, var(--lapis), var(--plum));
     overflow: hidden;
   }
+  /* Sized by the panel's height so the characters are never cropped; they flank the badge from the centre. */
   .art :global(img) {
     position: absolute;
     bottom: -10px;
-    width: 46%;
-    height: auto;
+    height: 94%;
+    width: auto;
+    max-width: 46%;
+    object-fit: contain;
+    object-position: bottom;
     filter: drop-shadow(0 20px 30px rgba(0, 0, 0, 0.45));
   }
-  .art :global(.edna) { left: 2%; }
-  .art :global(.earl) { right: 2%; }
+  .art :global(.edna) { right: 52%; }
+  .art :global(.earl) { left: 52%; }
   .art :global(.badge) { position: relative; z-index: 1; transform: translateY(-80px); filter: drop-shadow(0 20px 40px rgba(0, 0, 0, 0.5)); }
 
   .values { background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--lapis) 25%, transparent)); }
