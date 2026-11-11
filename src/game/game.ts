@@ -1,16 +1,26 @@
 /**
  * Hero arcade game: a small top-down shooter drawn as glowing line art.
  *
- * Phase one is fly + shoot. The ship's hull is tracked on its own so later phases
- * (typing to charge or repair, maths to steer) have something to plug into.
+ * Phase one is fly + shoot. Phase two adds a typing break between waves: typing the line
+ * charges the ship's twin cannons, and typing it cleanly repairs the hull. Hull and charge
+ * are tracked on their own so a later phase (maths to steer) has something to plug into.
  */
-import { textWidth, traceText } from './font';
+import { advance, textWidth, traceText } from './font';
+import { LINES } from './lines';
 import { DART, DRIFTER, HEX, SHIP, segments, trace, type Shape } from './shapes';
 
 const SAND = '#ecdfd2';
 const PINK = '#d98ac0';
 const BEST_KEY = 'gg-arcade-best';
 const MAX_HULL = 3;
+/** Seconds of twin fire that a full charge buys. */
+const CHARGE_SECONDS = 14;
+/** Accuracy needed on a finished line to repair one point of hull. */
+const REPAIR_ACCURACY = 0.9;
+/** Points for a clean line when the hull has nothing to repair. */
+const FULL_HULL_BONUS = 250;
+/** Seconds at the start of a typing break when keys are ignored, so a last tap of Space is not a typo. */
+const TYPING_GRACE = 0.6;
 const GAME_KEYS = new Set([
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
   'KeyW', 'KeyA', 'KeyS', 'KeyD',
@@ -46,6 +56,22 @@ interface Shot { x: number; y: number; vx: number; vy: number; hostile: boolean;
 interface Debris { x: number; y: number; vx: number; vy: number; rot: number; spin: number; len: number; age: number; ttl: number; pink: boolean }
 interface Star { x: number; y: number; speed: number; streak: boolean; tier: number }
 interface Spawn { at: number; kind: Kind; x: number; phase: number }
+interface TypingResult { finished: boolean; accuracy: number; charge: number; repaired: boolean; bonus: number }
+/** The break between waves: the ship holds still while the player types a line. */
+interface Typing {
+  line: string;
+  /** Characters typed correctly so far. A wrong key does not move this on. */
+  index: number;
+  misses: number;
+  age: number;
+  limit: number;
+  timeLeft: number;
+  /** Counts down after a wrong key, for the flash. */
+  error: number;
+  /** Set once the break is scored; it then stays on screen for `hold` seconds. */
+  result: TypingResult | null;
+  hold: number;
+}
 
 export interface GameOptions {
   /** Where the ship flies in from, e.g. the launch button: viewport position, and how large it is drawn there. */
@@ -59,6 +85,7 @@ export interface GameOptions {
 const rand = (min: number, max: number) => min + Math.random() * (max - min);
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 const pad6 = (n: number) => String(n).padStart(6, '0');
+const percent = (v: number) => Math.round(v * 100);
 
 export class Game {
   private readonly ctx: CanvasRenderingContext2D;
@@ -80,6 +107,8 @@ export class Game {
   private stateTime = 0;
   private paused = false;
   private keys = new Set<string>();
+  /** How the player last steered. Typing breaks are for players at a keyboard. */
+  private input: 'keys' | 'touch' = this.coarse ? 'touch' : 'keys';
   private touchId: number | null = null;
   private touch = { x: 0, y: 0 };
 
@@ -87,6 +116,10 @@ export class Game {
   /** Size the ship is drawn at. Starts at the launch button's size and eases to the game's. */
   private shipScale = 1;
   private hull = MAX_HULL;
+  /** 0 to 1. While there is any, the ship fires twin shots and the charge drains. */
+  private charge = 0;
+  private typing: Typing | null = null;
+  private lastLine = '';
   private score = 0;
   private best = 0;
   private newBest = false;
@@ -220,12 +253,21 @@ export class Game {
       e.preventDefault();
       return;
     }
-    if (!GAME_KEYS.has(code)) return;
     // Enter still activates a focused button (Exit). Space always belongs to the game,
     // so tabbing to Exit and then firing cannot end a run by accident.
     if (e.target instanceof HTMLButtonElement && code === 'Enter') return;
+    if (this.typing && !this.typing.result && !this.paused && e.key.length === 1) {
+      // In a typing break every printable key is an answer. Matching on the character, not the
+      // physical key, means the line can be typed on any keyboard layout. Arrow keys, and any key
+      // once the result is showing, fall through, so a key held ready for the next wave still counts.
+      e.preventDefault();
+      if (!e.repeat) this.typeKey(e.key);
+      return;
+    }
+    if (!GAME_KEYS.has(code)) return;
     e.preventDefault();
     if (e.repeat) return;
+    this.input = 'keys';
 
     if (this.paused) {
       if (code === 'KeyP' || code === 'Space' || code === 'Enter') this.paused = false;
@@ -263,6 +305,9 @@ export class Game {
 
   private onPointerDown = (e: PointerEvent): void => {
     if (e.pointerType !== 'mouse') {
+      this.input = 'touch';
+      // Someone on a touch screen has no keys to type with, so a touch skips the break.
+      if (this.typing) this.endTyping();
       this.touchId = e.pointerId;
       this.trackTouch(e);
       try {
@@ -300,6 +345,8 @@ export class Game {
 
   private begin(): void {
     this.hull = MAX_HULL;
+    this.charge = 0;
+    this.typing = null;
     this.score = 0;
     this.newBest = false;
     this.enemies = [];
@@ -372,6 +419,72 @@ export class Game {
     this.enemies.push(e);
   }
 
+  private startTyping(): void {
+    const tier = LINES[Math.min(LINES.length - 1, Math.floor((this.wave - 1) / 2))]!;
+    let line = tier[Math.floor(Math.random() * tier.length)]!;
+    if (line === this.lastLine) line = tier[(tier.indexOf(line) + 1) % tier.length]!;
+    this.lastLine = line;
+    // Generous enough for a beginner (about 15 words a minute); a fast typist simply finishes early.
+    const limit = 5 + line.length * 0.6;
+    this.typing = { line, index: 0, misses: 0, age: 0, limit, timeLeft: limit, error: 0, result: null, hold: 0 };
+    this.keys.clear();
+    this.shots = [];
+    this.opts.onStatus?.(`Wave ${this.wave} cleared. Type this line to charge and repair the ship: ${line}`);
+  }
+
+  private typeKey(key: string): void {
+    const t = this.typing;
+    if (!t || t.result || t.age < TYPING_GRACE) return;
+    if (key.toUpperCase() === t.line[t.index]) {
+      t.index += 1;
+      if (t.index === t.line.length) this.scoreTyping();
+    } else {
+      t.misses += 1;
+      t.error = 0.2;
+    }
+  }
+
+  /** Turn the typing into rewards: charge for how much was typed and how cleanly, a repair for a clean finish. */
+  private scoreTyping(): void {
+    const t = this.typing;
+    if (!t || t.result) return;
+    const finished = t.index === t.line.length;
+    const accuracy = t.index > 0 ? t.index / (t.index + t.misses) : 0;
+    const charge = (t.index / t.line.length) * accuracy;
+    const clean = finished && accuracy >= REPAIR_ACCURACY;
+    const repaired = clean && this.hull < MAX_HULL;
+    const bonus = clean && !repaired ? FULL_HULL_BONUS : 0;
+    if (repaired) this.hull += 1;
+    this.score += bonus;
+    this.charge = Math.min(1, this.charge + charge);
+    t.result = { finished, accuracy, charge, repaired, bonus };
+    t.hold = 2.2;
+    this.opts.onStatus?.(
+      `${finished ? `Accuracy ${percent(accuracy)} percent.` : 'Out of time.'} Charge plus ${percent(charge)} percent.` +
+        (repaired ? ` Hull repaired: ${this.hull} of ${MAX_HULL}.` : bonus ? ` Bonus ${bonus}.` : ''),
+    );
+  }
+
+  private endTyping(): void {
+    this.typing = null;
+    this.startWave(this.wave + 1);
+    this.opts.onStatus?.(`Wave ${this.wave}.`);
+  }
+
+  private updateTyping(dt: number): void {
+    const t = this.typing;
+    if (!t) return;
+    t.age += dt;
+    t.error = Math.max(0, t.error - dt);
+    if (t.result) {
+      t.hold -= dt;
+      if (t.hold <= 0) this.endTyping();
+    } else if (t.age >= TYPING_GRACE) {
+      t.timeLeft -= dt;
+      if (t.timeLeft <= 0) this.scoreTyping();
+    }
+  }
+
   private destroyEnemy(e: Enemy): void {
     e.dead = true;
     this.score += KINDS[e.kind].points;
@@ -442,7 +555,7 @@ export class Game {
     this.banner = Math.max(0, this.banner - dt);
 
     // Stars speed up once the ship launches, which is what sells the feeling of flying.
-    const targetWarp = this.state === 'playing' ? 3.2 : this.state === 'over' ? 0.6 : 1;
+    const targetWarp = this.state === 'playing' ? (this.typing ? 1 : 3.2) : this.state === 'over' ? 0.6 : 1;
     this.warp += (targetWarp - this.warp) * (1 - Math.exp(-dt * 1.8));
     for (const star of this.stars) {
       star.y += star.speed * this.warp * dt;
@@ -458,7 +571,10 @@ export class Game {
     this.debris = this.debris.filter((d) => d.age < d.ttl);
 
     this.updateShip(dt);
-    if (this.state === 'playing') this.updateWave(dt);
+    if (this.state === 'playing') {
+      if (this.typing) this.updateTyping(dt);
+      else this.updateWave(dt);
+    }
     this.updateEnemies(dt);
     this.updateShots(dt);
     if (this.state === 'playing') this.collide();
@@ -471,8 +587,8 @@ export class Game {
     const ship = this.ship;
     const k = 1 - Math.exp(-dt * 4);
     this.shipScale += (1.15 * this.scale - this.shipScale) * k;
-    if (this.state === 'ready') {
-      // Glide in from wherever the launch button was.
+    if (this.state === 'ready' || this.typing) {
+      // Glide in from wherever the launch button was, or back to base for a typing break.
       ship.x += (this.homeX - ship.x) * k;
       ship.y += (this.homeY - ship.y) * k;
       return;
@@ -508,8 +624,12 @@ export class Game {
     // On touch the ship fires for as long as a finger is down, so letting go is never a free ride.
     if ((keys.has('Space') || this.touchId !== null) && ship.cooldown <= 0) {
       ship.cooldown = 0.17;
-      this.shots.push({ x: ship.x, y: ship.y - 18 * this.scale, vx: 0, vy: -680 * this.pace, hostile: false, dead: false });
+      // A charged ship fires from both wings instead of the nose.
+      for (const side of this.charge > 0 ? [-8, 8] : [0]) {
+        this.shots.push({ x: ship.x + side * this.scale, y: ship.y - (side ? 6 : 18) * this.scale, vx: 0, vy: -680 * this.pace, hostile: false, dead: false });
+      }
     }
+    this.charge = Math.max(0, this.charge - dt / CHARGE_SECONDS);
   }
 
   private updateWave(dt: number): void {
@@ -517,7 +637,9 @@ export class Game {
     while (this.queue.length && this.queue[0]!.at <= this.waveTime) this.spawn(this.queue.shift()!);
     if (!this.queue.length && !this.enemies.length) {
       this.rest += dt;
-      if (this.rest > 1.4) {
+      if (this.input === 'keys') {
+        if (this.rest > 0.9) this.startTyping();
+      } else if (this.rest > 1.4) {
         this.startWave(this.wave + 1);
         this.opts.onStatus?.(`Wave ${this.wave}.`);
       }
@@ -760,6 +882,19 @@ export class Game {
       if (this.w >= 640) traceText(ctx, `BEST ${pad6(this.best)}`, this.w / 2, top, 12, 'center');
     });
     this.ink(SAND, 0.7, 1.2, () => traceText(ctx, `WAVE ${this.wave}`, left, top + 52, 9));
+
+    // Charge gauge: ten ticks beside the hull, lit while there is charge left.
+    if (this.charge > 0) {
+      const lit = Math.ceil(this.charge * 10);
+      const tick = (from: number, to: number) => () => {
+        for (let i = from; i < to; i++) {
+          ctx.moveTo(left + 84 + i * 5, top + 28);
+          ctx.lineTo(left + 84 + i * 5, top + 40);
+        }
+      };
+      this.ink(PINK, 1, 1.6, tick(0, lit));
+      if (lit < 10) this.ink(SAND, 0.3, 1.2, tick(lit, 10), false);
+    }
   }
 
   private renderMessages(): void {
@@ -781,7 +916,13 @@ export class Game {
         if (blink) this.centred('PRESS SPACE TO START', mid, 20, alpha);
         this.centred('WASD OR ARROWS TO FLY - SPACE TO FIRE', mid + 46, 11, alpha * 0.8);
         this.centred('P TO PAUSE - ESC TO EXIT', mid + 70, 11, alpha * 0.8);
+        this.centred('TYPE BETWEEN WAVES TO CHARGE AND REPAIR', mid + 94, 11, alpha * 0.8, PINK);
       }
+      return;
+    }
+
+    if (this.typing) {
+      this.renderTyping(this.typing, mid);
       return;
     }
 
@@ -799,5 +940,47 @@ export class Game {
         this.centred(this.coarse ? 'TAP TO RETRY' : 'PRESS SPACE TO RETRY - ESC TO EXIT', mid + 104, 11, 0.9);
       }
     }
+  }
+
+  private renderTyping(t: Typing, mid: number): void {
+    const { ctx } = this;
+
+    if (t.result) {
+      const r = t.result;
+      const alpha = Math.min(1, t.hold / 0.4);
+      this.centred(r.finished ? `ACCURACY ${percent(r.accuracy)}%` : 'OUT OF TIME', mid - 24, 24, alpha);
+      this.centred(`CHARGE +${percent(r.charge)}%`, mid + 26, 13, alpha);
+      if (r.repaired) this.centred('HULL REPAIRED', mid + 58, 13, alpha, PINK);
+      else if (r.bonus) this.centred(`HULL IS FULL - BONUS ${r.bonus}`, mid + 58, 11, alpha, PINK);
+      else if (r.finished) this.centred(`${percent(REPAIR_ACCURACY)}% ACCURACY REPAIRS THE HULL`, mid + 58, 11, alpha * 0.8);
+      else this.centred('FINISH THE LINE TO REPAIR THE HULL', mid + 58, 11, alpha * 0.8);
+      return;
+    }
+
+    const alpha = Math.min(1, t.age / TYPING_GRACE);
+    const wrong = t.error > 0;
+    this.centred('TYPE TO CHARGE AND REPAIR', mid - 44, 11, alpha * 0.8);
+
+    // The line is laid out once, so typed and untyped letters keep their places as the colour moves across.
+    const size = this.fit(t.line, 20);
+    const step = advance(size);
+    const x = this.w / 2 - textWidth(t.line, size) / 2 + (wrong && !this.reduceMotion ? rand(-3, 3) : 0);
+    const next = x + t.index * step;
+    if (t.index > 0) this.ink(PINK, alpha, 1.8, () => traceText(ctx, t.line.slice(0, t.index), x, mid, size));
+    this.ink(SAND, alpha * (wrong ? 1 : 0.85), 1.6, () => traceText(ctx, t.line.slice(t.index), next, mid, size));
+    // Cursor under the next letter; it thickens and turns pink on a wrong key.
+    this.ink(wrong ? PINK : SAND, alpha, wrong ? 3 : 1.8, () => {
+      ctx.moveTo(next, mid + size + 7);
+      ctx.lineTo(next + (size / 6) * 4, mid + size + 7);
+    });
+
+    // Time left, as a line that shrinks toward the centre.
+    const half = Math.min(170, (this.w - this.inset.left - this.inset.right - 64) / 2) * Math.max(0, t.timeLeft / t.limit);
+    this.ink(SAND, alpha * 0.6, 1.4, () => {
+      ctx.moveTo(this.w / 2 - half, mid + size + 30);
+      ctx.lineTo(this.w / 2 + half, mid + size + 30);
+    }, false);
+    const typed = t.index + t.misses;
+    this.centred(`ACCURACY ${typed ? percent(t.index / typed) : 100}%`, mid + size + 46, 9, alpha * 0.7);
   }
 }

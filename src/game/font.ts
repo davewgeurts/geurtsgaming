@@ -49,6 +49,7 @@ const RAW: Record<string, string> = {
   '!': '2,0 2,4|2,5.4 2,6',
   '?': '0,1 0,0 4,0 4,2.5 2,3 2,4|2,5.4 2,6',
   "'": '2,0 2,1.6',
+  '%': '4,0 0,6|0.3,0.3 1.3,0.3 1.3,1.5 0.3,1.5 0.3,0.3|2.7,4.5 3.7,4.5 3.7,5.7 2.7,5.7 2.7,4.5',
 };
 
 const CELL_HEIGHT = 6;
@@ -58,6 +59,11 @@ const ADVANCE = 5.6;
 const GLYPHS = new Map<string, number[][]>(
   Object.entries(RAW).map(([ch, def]) => [ch, def.split('|').map((stroke) => stroke.trim().split(/[ ,]+/).map(Number))]),
 );
+
+/** Distance in px from the start of one character to the start of the next, at the given cap height. */
+export function advance(size: number): number {
+  return ADVANCE * (size / CELL_HEIGHT);
+}
 
 /** Width in px of a line of text drawn at the given cap height. */
 export function textWidth(text: string, size: number): number {
