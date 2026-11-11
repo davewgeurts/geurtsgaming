@@ -1,5 +1,5 @@
 /**
- * Lines for the typing break between waves. Upper case letters and single spaces only:
+ * Lines for the typing break before each wave. Upper case letters and single spaces only:
  * that is all the stroke font draws, and it keeps the match fair on any keyboard layout.
  * Grouped short to long; later waves draw from the longer groups.
  */
@@ -32,4 +32,10 @@ export const LINES: readonly (readonly string[])[] = [
     'SLOW IS SMOOTH AND SMOOTH IS FAST',
     'THE BEST PILOTS TYPE WITHOUT LOOKING',
   ],
+];
+
+/** Single words for the quick typing question a boost capsule can ask in the middle of a wave. */
+export const WORDS: readonly string[] = [
+  'STAR', 'NOVA', 'LASER', 'COMET', 'ORBIT', 'PILOT', 'TURBO', 'BLAST', 'POWER',
+  'ROCKET', 'PLANET', 'SHIELD', 'ENGINE', 'GALAXY', 'METEOR', 'THRUST',
 ];

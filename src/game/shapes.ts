@@ -32,6 +32,12 @@ export const DART: Shape = [closed([0, 15], [8, -11], [0, -5], [-8, -11]), open(
 /** Tough enemy that holds position, spins and fires aimed shots. */
 export const HEX: Shape = [closed(...ngon(6, 15)), closed(...ngon(3, 7, -Math.PI / 2))];
 
+/** Boost capsule: the ring, and the mark inside that says what it holds. */
+export const CAPSULE: Shape = [closed(...ngon(8, 13, Math.PI / 8))];
+export const MARK_HULL: Shape = [open([-6, 0], [6, 0]), open([0, -6], [0, 6])];
+export const MARK_ENERGY: Shape = [open([3, -8], [-4, 1], [3, 1], [-3, 8])];
+export const MARK_BOMB: Shape = [open([-5, -5], [5, 5]), open([5, -5], [-5, 5]), open([0, -8], [0, 8]), open([-8, 0], [8, 0])];
+
 /** Add a shape to the current canvas path, moved to (x, y), scaled and rotated. */
 export function trace(ctx: CanvasRenderingContext2D, shape: Shape, x: number, y: number, scale = 1, rot = 0): void {
   const c = Math.cos(rot) * scale;
