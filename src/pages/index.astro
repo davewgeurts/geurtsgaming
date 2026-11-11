@@ -32,14 +32,14 @@ const pillars = [
         <span class="line">Geurts</span>
         <span class="line accent">Gaming</span>
       </h1>
-      <p class="sub">Games kids love. Skills that stick.</p>
+      <p class="sub">Games kids love, learning that sticks</p>
       <p class="lede muted">
         We're an indie studio making educational and seriously fun games for kids and teenagers.
       </p>
       <div class="cta">
+        <HeroGame />
         <a href="#games" class="btn">See our games</a>
         <a href="/about/" class="btn ghost">About the studio</a>
-        <HeroGame />
       </div>
     </div>
     <a href="#games" class="scroll" aria-label="Scroll to games">
@@ -154,6 +154,12 @@ const pillars = [
   @media (max-width: 420px) {
     .cta { width: 100%; flex-direction: column; }
     .cta .btn { justify-content: center; }
+  }
+
+  /* Short laptop screens: a smaller logo and title, so the buttons sit clear of the bottom edge. */
+  @media (min-width: 641px) and (max-height: 720px) {
+    :global(.hero-logo) { width: 84px; margin-bottom: 4px; }
+    h1 { font-size: 4rem; }
   }
 
   /* Small phones (iPhone SE size): the nav already shows the logo, so the hero's copy gives up its space

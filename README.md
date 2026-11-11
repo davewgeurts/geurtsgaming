@@ -19,7 +19,7 @@ npm run preview    # serve the production build locally
 - `src/pages/` — one `.astro` file per route (`/`, `/games/`, `/about/`, `/contact/`)
 - `src/layouts/Base.astro` — HTML shell, meta/OG tags, fonts, nav + footer
 - `src/components/` — `Logo` (GG monogram), `Nav`, `Footer`, `GameCard`, `Starfield`, `HeroGame` (the "Play the demo" launcher and the full-screen overlay the game plays in)
-- `src/game/` — the hero arcade game, downloaded only when someone presses "Play the demo": `game.ts` (loop, waves, input, drawing), `boss.ts` (the mini boss that ends each wave), `challenge.ts` (rules for the typing and maths questions), `maths.ts` (problem generator), `lines.ts` (lines and words to type), `shapes.ts` (line-art ships), `font.ts` (stroke font)
+- `src/game/` — the hero arcade game, downloaded only when someone presses "Play the demo": `game.ts` (loop, waves, input, drawing), `boss.ts` (the mini boss that ends each wave), `challenge.ts` (rules for the typing and maths questions), `maths.ts` (problem generator), `lines.ts` (lines and words to type), `shapes.ts` (line-art ships), `font.ts` (stroke font), `sound.ts` (synthesised sound effects, no audio files)
 - `src/data/games.ts` — the list of games; add a game here and it shows up everywhere
 - `src/styles/global.css` — design tokens ("Lapis velvet evening" palette) and base styles
 - `public/` — favicon, logo.svg, og.png, CNAME

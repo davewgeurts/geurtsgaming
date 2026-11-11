@@ -18,7 +18,7 @@ const {
   image = '/og.png',
   noindex = false,
 } = Astro.props;
-const fullTitle = title ? `${title} · ${site}` : `${site} — Games kids love. Skills that stick.`;
+const fullTitle = title ? `${title} · ${site}` : `${site} — Games Kids Love, Learning That Sticks`;
 const canonical = new URL(Astro.url.pathname, Astro.site ?? 'https://geurtsgaming.com');
 const ogImage = new URL(image, Astro.site ?? 'https://geurtsgaming.com');
 ---
