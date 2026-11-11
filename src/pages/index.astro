@@ -3,6 +3,7 @@ import Base from '../layouts/Base.astro';
 import Logo from '../components/Logo.astro';
 import Starfield from '../components/Starfield.astro';
 import GameCard from '../components/GameCard.astro';
+import HeroGame from '../components/HeroGame.astro';
 import { games } from '../data/games';
 
 const pillars = [
@@ -38,6 +39,7 @@ const pillars = [
       <div class="cta">
         <a href="#games" class="btn">See our games</a>
         <a href="/about/" class="btn ghost">About the studio</a>
+        <HeroGame />
       </div>
     </div>
     <a href="#games" class="scroll" aria-label="Scroll to games">
@@ -99,7 +101,14 @@ const pillars = [
     background:
       radial-gradient(ellipse 70% 50% at 50% 110%, color-mix(in srgb, var(--plum) 55%, transparent), transparent 70%),
       linear-gradient(180deg, #050f33 0%, var(--navy) 45%, #12245f 100%);
-    padding-block: clamp(104px, 22vw, 120px) clamp(88px, 14vw, 100px);
+    padding-block: clamp(92px, 22vw, 120px) clamp(88px, 14vw, 100px);
+  }
+  /* Short laptop screens: tighten the hero so the demo launcher stays above the fold. */
+  @media (min-width: 641px) and (max-height: 880px) {
+    .hero { padding-block: 100px 84px; }
+  }
+  @media (min-width: 641px) and (max-height: 720px) {
+    .hero { padding-block: 92px 76px; }
   }
   .glow {
     position: absolute;

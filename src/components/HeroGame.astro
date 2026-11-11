@@ -1,0 +1,230 @@
+---
+/**
+ * Launch button for the hero arcade game, plus the full-screen overlay it plays in.
+ * The game code (src/game/) is only downloaded when someone presses the button.
+ */
+---
+<div class="launch-slot">
+  <button class="launch" type="button" data-game-launch aria-haspopup="dialog">
+    <svg class="launch-ship" viewBox="-16 -19 32 42" width="40" height="52" aria-hidden="true">
+      <path d="M0 -16 L4 -4 L13 10 L5 7 L3 12 L-3 12 L-5 7 L-13 10 L-4 -4 Z M0 -8 L2 -3 L0 1 L-2 -3 Z" />
+      <path class="flame" d="M-3 13 L0 20 L3 13" />
+    </svg>
+    <span class="launch-label">Play the demo</span>
+  </button>
+</div>
+
+<div class="arcade" data-game-overlay hidden role="dialog" aria-modal="true" aria-label="Arcade demo: fly the ship and shoot the enemies" tabindex="-1">
+  <canvas class="arcade-canvas"></canvas>
+  <button class="arcade-exit" type="button" data-game-exit>Exit</button>
+  <p class="visually-hidden" aria-live="polite" data-game-status></p>
+</div>
+
+<style>
+  /* Sits in the hero's button group. By default it takes a line of its own under the buttons. */
+  .launch-slot {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+  }
+  /* Compact row by default, so it stays above the fold on phones and short laptop screens. */
+  .launch {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 16px;
+    min-height: 48px;
+    background: none;
+    border: 0;
+    border-radius: 12px;
+    color: var(--sand);
+    font: inherit;
+    cursor: pointer;
+  }
+  .launch-ship {
+    width: 26px;
+    height: auto;
+    overflow: visible;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    filter: drop-shadow(0 0 6px rgba(236, 223, 210, 0.55));
+    animation: hover 2.4s ease-in-out infinite;
+  }
+  .flame {
+    stroke: var(--accent-text);
+    transform-box: fill-box;
+    transform-origin: top;
+    animation: flicker 0.16s steps(2, jump-none) infinite;
+  }
+  .launch-label {
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: var(--silver);
+    animation: blink 1.5s steps(2, jump-none) infinite;
+  }
+  @media (hover: hover) {
+    .launch:hover .launch-label { color: var(--sand); animation: none; }
+    .launch:hover .launch-ship { filter: drop-shadow(0 0 10px rgba(236, 223, 210, 0.9)); }
+  }
+  /* With room to spare, the ship hovers on its own above the label. */
+  @media (min-width: 641px) and (min-height: 881px) {
+    .launch { display: grid; justify-items: center; gap: 8px; margin-top: clamp(4px, 1vw, 10px); padding: 8px 18px; }
+    .launch-ship { width: 36px; }
+  }
+  /* On very short, wide screens it joins the buttons' own row, so it costs no height at all. */
+  @media (min-width: 641px) and (max-height: 720px) {
+    .launch-slot { width: auto; }
+  }
+  @keyframes hover { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+  @keyframes flicker { from { transform: scaleY(1); } to { transform: scaleY(0.55); } }
+  @keyframes blink { from { opacity: 1; } to { opacity: 0.35; } }
+
+  /* While the game is open the ship has "left" the hero and the page behind is frozen. */
+  :global(html.game-active) .launch { visibility: hidden; }
+  :global(html.game-active .hero *) { animation-play-state: paused; }
+
+  .arcade {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    touch-action: none;
+    outline: none;
+  }
+  .arcade[hidden] { display: none; }
+  /* The backdrop is nearly opaque, so the site fades into the background instead of vanishing. */
+  .arcade::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 80% 55% at 50% 105%, rgba(95, 52, 117, 0.3), transparent 70%),
+      rgba(3, 7, 26, 0.93);
+    opacity: 0;
+    transition: opacity 0.6s ease;
+  }
+  .arcade.on::before { opacity: 1; }
+  /* The canvas shows at once on open, so the ship carries straight over from the button; it fades on close. */
+  .arcade-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    opacity: 0;
+    transition: opacity 0.5s ease;
+  }
+  .arcade.on .arcade-canvas { opacity: 1; transition: none; }
+  .arcade-exit {
+    position: absolute;
+    top: calc(12px + env(safe-area-inset-top));
+    right: calc(12px + env(safe-area-inset-right));
+    min-width: 64px;
+    min-height: 44px;
+    padding: 0 16px;
+    background: transparent;
+    color: var(--sand);
+    border: 1px solid color-mix(in srgb, var(--sand) 55%, transparent);
+    border-radius: 4px;
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.6s ease, background 0.15s ease, border-color 0.15s ease;
+  }
+  .arcade.on .arcade-exit { opacity: 1; }
+  @media (hover: hover) {
+    .arcade-exit:hover { background: color-mix(in srgb, var(--sand) 12%, transparent); border-color: var(--sand); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .launch-ship, .flame, .launch-label { animation: none; }
+  }
+</style>
+
+<script>
+  import type { Game } from '../game/game';
+
+  const launch = document.querySelector<HTMLButtonElement>('[data-game-launch]');
+  const overlay = document.querySelector<HTMLElement>('[data-game-overlay]');
+  const canvas = overlay?.querySelector('canvas');
+  const exit = overlay?.querySelector<HTMLButtonElement>('[data-game-exit]');
+  const status = overlay?.querySelector<HTMLElement>('[data-game-status]');
+
+  if (launch && overlay && canvas && exit) {
+    // The overlay lives at the end of <body> so the rest of the page can be made inert around it.
+    document.body.append(overlay);
+    // Keep the page behind from scrolling without hiding its scrollbar, which would shift the layout.
+    overlay.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
+    overlay.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+
+    let game: Game | null = null;
+    let opening = false;
+    const rest = () =>
+      [...document.body.children].filter(
+        (el): el is HTMLElement => el instanceof HTMLElement && el !== overlay && el.tagName !== 'SCRIPT',
+      );
+    const announce = (active: boolean) =>
+      document.dispatchEvent(new CustomEvent('gg:game', { detail: { active } }));
+
+    const close = (viaBack = false) => {
+      if (!game) return;
+      game.destroy();
+      game = null;
+      overlay.classList.remove('on');
+      document.documentElement.classList.remove('game-active');
+      rest().forEach((el) => (el.inert = false));
+      announce(false);
+      launch.focus({ preventScroll: true });
+      // Drop the history entry that open() added, unless the Back button has already done so.
+      if (!viaBack && history.state?.ggGame) history.back();
+      // Hide once the fade has finished, unless the game was reopened in the meantime.
+      setTimeout(() => {
+        if (!game) overlay.hidden = true;
+      }, 600);
+    };
+
+    const open = async () => {
+      if (game || opening) return;
+      opening = true;
+      try {
+        const { Game } = await import('../game/game');
+        // The ship's origin sits 16 of 32 units across and 19 of 42 units down the icon's viewBox.
+        const icon = (launch.querySelector('svg') ?? launch).getBoundingClientRect();
+        const from = { x: icon.left + icon.width / 2, y: icon.top + (icon.height * 19) / 42, scale: icon.width / 32 };
+        overlay.hidden = false;
+        document.documentElement.classList.add('game-active');
+        rest().forEach((el) => (el.inert = true));
+        announce(true);
+        // Give the game its own history entry, so Back (and the Android back gesture) closes it instead of leaving the site.
+        history.pushState({ ggGame: true }, '');
+        game = new Game(canvas, {
+          from,
+          onExit: () => close(),
+          onStatus: (message) => {
+            if (status) status.textContent = message;
+          },
+        });
+        overlay.focus({ preventScroll: true });
+        // Flush styles so the backdrop fades in from its hidden state.
+        void overlay.offsetWidth;
+        overlay.classList.add('on');
+      } finally {
+        opening = false;
+      }
+    };
+
+    launch.addEventListener('click', open);
+    exit.addEventListener('click', () => close());
+    addEventListener('popstate', () => close(true));
+  }
+</script>

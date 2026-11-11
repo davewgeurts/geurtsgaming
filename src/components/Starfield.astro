@@ -1,5 +1,5 @@
 ---
-/** Ambient drifting particles behind the hero. Pauses for reduced-motion users and off-screen tabs. */
+/** Ambient drifting particles behind the hero. Pauses for reduced-motion users, off-screen tabs and the arcade game. */
 ---
 <canvas class="starfield" aria-hidden="true"></canvas>
 
@@ -62,7 +62,13 @@
       if (!reduce) raf = requestAnimationFrame(draw);
     };
 
-    const start = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(draw); };
+    // The hero arcade game draws its own stars, so this one idles while the game is open.
+    let gameOpen = false;
+    const start = () => { cancelAnimationFrame(raf); if (!gameOpen) raf = requestAnimationFrame(draw); };
+    document.addEventListener('gg:game', (e) => {
+      gameOpen = (e as CustomEvent<{ active: boolean }>).detail.active;
+      start();
+    });
     resize(); start();
     addEventListener('resize', () => { resize(); if (reduce) draw(); }, { passive: true });
     document.addEventListener('visibilitychange', () => {
