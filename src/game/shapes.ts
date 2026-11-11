@@ -8,10 +8,17 @@ export type Shape = readonly Poly[];
 
 const closed = (...pts: Pt[]): Poly => ({ pts, closed: true });
 const open = (...pts: Pt[]): Poly => ({ pts, closed: false });
+const round1 = (v: number) => Math.round(v * 10) / 10;
 const ngon = (n: number, r: number, rot = 0): Pt[] =>
   Array.from({ length: n }, (_, i) => {
     const a = rot + (i / n) * Math.PI * 2;
-    return [Math.round(Math.cos(a) * r * 10) / 10, Math.round(Math.sin(a) * r * 10) / 10] as const;
+    return [round1(Math.cos(a) * r), round1(Math.sin(a) * r)] as const;
+  });
+/** Points along part of a circle, from one angle to another. */
+const arc = (r: number, from: number, to: number, steps: number): Pt[] =>
+  Array.from({ length: steps + 1 }, (_, i) => {
+    const a = from + ((to - from) * i) / steps;
+    return [round1(Math.cos(a) * r), round1(Math.sin(a) * r)] as const;
   });
 
 /** Player ship, nose up. The same outline is used for the launch button in the hero. */
@@ -37,6 +44,29 @@ export const CAPSULE: Shape = [closed(...ngon(8, 13, Math.PI / 8))];
 export const MARK_HULL: Shape = [open([-6, 0], [6, 0]), open([0, -6], [0, 6])];
 export const MARK_ENERGY: Shape = [open([3, -8], [-4, 1], [3, 1], [-3, 8])];
 export const MARK_BOMB: Shape = [open([-5, -5], [5, 5]), open([5, -5], [-5, 5]), open([0, -8], [0, 8]), open([-8, 0], [8, 0])];
+
+/** A hazard bomb: fly into one and it must be defused. */
+export const MINE: Shape = [
+  closed(...ngon(8, 9, Math.PI / 8)),
+  ...Array.from({ length: 8 }, (_, i) => {
+    const a = (i * Math.PI) / 4;
+    return open([round1(Math.cos(a) * 9), round1(Math.sin(a) * 9)], [round1(Math.cos(a) * 15), round1(Math.sin(a) * 15)]);
+  }),
+];
+
+/** Mini boss. The core is the weak spot; the shell is one half of its armour (drawn twice, the second turned round). */
+export const BOSS_CORE: Shape = [closed(...ngon(8, 24, Math.PI / 8))];
+export const BOSS_EYE: Shape = [closed(...ngon(4, 12)), closed(...ngon(4, 5))];
+export const BOSS_SHELL: Shape = [closed(...arc(35, -1.42, 1.42, 6), ...arc(28, 1.42, -1.42, 6))];
+export const BOSS_WINGS: Shape = [
+  open([-36, -6], [-66, -28], [-98, -10], [-78, 8], [-40, 10]),
+  open([36, -6], [66, -28], [98, -10], [78, 8], [40, 10]),
+  open([-18, -36], [0, -52], [18, -36]),
+];
+/** The hand at the end of a boss arm, pointing down. */
+export const CLAW: Shape = [closed([0, 13], [9, -7], [0, -2], [-9, -7])];
+/** A little escort ship with room for a number inside. */
+export const POD: Shape = [closed(...ngon(6, 18, Math.PI / 6)), open([-15, 9], [-24, 17]), open([15, 9], [24, 17])];
 
 /** Add a shape to the current canvas path, moved to (x, y), scaled and rotated. */
 export function trace(ctx: CanvasRenderingContext2D, shape: Shape, x: number, y: number, scale = 1, rot = 0): void {

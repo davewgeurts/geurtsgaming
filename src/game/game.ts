@@ -5,9 +5,12 @@
  *   Cleaner and faster work means more energy, and more energy means better cannons.
  * - During a wave, boost capsules drift down. Flying into one slows time to a crawl and asks one
  *   question; a right answer pays out the boost, a wrong one jams the cannons for a moment.
+ * - Bombs drift down too. Touching one asks a question that has to be answered, or the ship is lost.
+ * - Every wave ends with a mini boss, in neon (see boss.ts).
  *
  * The questions live in challenge.ts (the rules), maths.ts and lines.ts (the content).
  */
+import { NEON, NEON_LIST, bossParts, createBoss, shootBoss, touchesBoss, updateBoss, type Boss, type BossEnv } from './boss';
 import {
   accepts, choiceChallenge, choose, entryChallenge, lineChallenge, press, tick,
   type Challenge, type ChoiceChallenge, type LineChallenge,
@@ -16,7 +19,7 @@ import { advance, textWidth, traceText } from './font';
 import { LINES, WORDS } from './lines';
 import { makeProblem } from './maths';
 import {
-  CAPSULE, DART, DRIFTER, HEX, MARK_BOMB, MARK_ENERGY, MARK_HULL, SHIP, segments, trace, type Shape,
+  CAPSULE, DART, DRIFTER, HEX, MARK_BOMB, MARK_ENERGY, MARK_HULL, MINE, SHIP, segments, trace, type Shape,
 } from './shapes';
 
 const SAND = '#ecdfd2';
@@ -42,6 +45,8 @@ const PROMPT_SECONDS = 10;
 const SLOW_MOTION = 0.06;
 /** Seconds the cannons stay jammed after a wrong answer. */
 const JAM_SECONDS = 2.5;
+/** Points for defusing a bomb. */
+const DEFUSE_POINTS = 300;
 
 const GAME_KEYS = new Set([
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
@@ -54,7 +59,10 @@ const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'Home', 'End']);
 
 type State = 'ready' | 'playing' | 'over';
 type Kind = 'drifter' | 'dart' | 'hex';
-type Reward = 'hull' | 'energy' | 'bomb';
+/** What a boost capsule pays out. A blast clears the screen. */
+type Reward = 'hull' | 'energy' | 'blast';
+/** What a question is being answered for: a capsule's reward, or to defuse a bomb. */
+type Stake = Reward | 'defuse';
 
 const KINDS: Record<Kind, { shape: Shape; radius: number; hp: number; points: number }> = {
   drifter: { shape: DRIFTER, radius: 12, hp: 1, points: 50 },
@@ -62,10 +70,11 @@ const KINDS: Record<Kind, { shape: Shape; radius: number; hp: number; points: nu
   hex: { shape: HEX, radius: 15, hp: 2, points: 150 },
 };
 
-const REWARDS: Record<Reward, { mark: Shape; label: string; goal: string }> = {
+const STAKES: Record<Stake, { mark: Shape; label: string; goal: string }> = {
   hull: { mark: MARK_HULL, label: 'HULL', goal: 'TO REPAIR THE HULL' },
   energy: { mark: MARK_ENERGY, label: 'POWER', goal: 'TO POWER UP' },
-  bomb: { mark: MARK_BOMB, label: 'BOMB', goal: 'TO SET OFF A BOMB' },
+  blast: { mark: MARK_BOMB, label: 'BLAST', goal: 'TO SET OFF A BLAST' },
+  defuse: { mark: MINE, label: 'BOMB', goal: 'OR THE BOMB GOES OFF' },
 };
 
 interface Enemy {
@@ -81,14 +90,16 @@ interface Enemy {
   /** Hex: the height it holds at. */
   holdY: number;
 }
-interface Shot { x: number; y: number; vx: number; vy: number; hostile: boolean; dead: boolean }
-interface Debris { x: number; y: number; vx: number; vy: number; rot: number; spin: number; len: number; age: number; ttl: number; pink: boolean }
+interface Shot { x: number; y: number; vx: number; vy: number; hostile: boolean; dead: boolean; color: string }
+interface Debris { x: number; y: number; vx: number; vy: number; rot: number; spin: number; len: number; age: number; ttl: number; color: string }
 interface Star { x: number; y: number; speed: number; streak: boolean; tier: number }
 interface Spawn { at: number; kind: Kind; x: number; phase: number }
 /** A boost capsule drifting down the screen. Flying into it asks a question. */
 interface Pickup { reward: Reward; x: number; y: number; anchorX: number; phase: number; age: number; dead: boolean }
-/** The shockwave of a bomb. */
-interface Ring { x: number; y: number; age: number }
+/** A bomb drifting down the screen. Touching it means answering a question or losing the ship. */
+interface Mine { x: number; y: number; anchorX: number; phase: number; age: number; dead: boolean }
+/** An expanding shockwave. A negative age delays it. */
+interface Ring { x: number; y: number; age: number; color: string }
 interface Box { x: number; y: number; w: number; h: number }
 interface Banner { text: string; size: number; color: string; alpha: number }
 
@@ -112,9 +123,11 @@ interface Break {
 
 /** The question a boost capsule asks in the middle of a wave, while the game runs in slow motion. */
 interface Prompt {
-  reward: Reward;
+  stake: Stake;
   challenge: Challenge;
   settled: boolean;
+  /** A bomb that was not defused: when the result has been read, the ship is lost. */
+  fatal: boolean;
   /** What the answer earned or cost, shown once it is settled. */
   note: string;
   hold: number;
@@ -179,8 +192,16 @@ export class Game {
   private banner = 0;
   private rest = 0;
   private queue: Spawn[] = [];
-  /** Moments in the current wave, in seconds, at which a boost capsule appears. */
+  /** Moments in the current wave, in seconds, at which a boost capsule or a bomb appears. */
   private pickupTimes: number[] = [];
+  private mineTimes: number[] = [];
+
+  private boss: Boss | null = null;
+  /** The last boss sum read out for screen readers. */
+  private bossAsked = 0;
+  /** After a boss: what happened to it, and the seconds left before the next break. */
+  private bossNote = '';
+  private intermission = 0;
 
   private brk: Break | null = null;
   private prompt: Prompt | null = null;
@@ -190,6 +211,7 @@ export class Game {
   private shots: Shot[] = [];
   private debris: Debris[] = [];
   private pickups: Pickup[] = [];
+  private mines: Mine[] = [];
   private rings: Ring[] = [];
   private stars: Star[] = [];
   private warp = 1;
@@ -459,8 +481,11 @@ export class Game {
     this.enemies = [];
     this.shots = [];
     this.pickups = [];
+    this.mines = [];
     this.rings = [];
     this.prompt = null;
+    this.boss = null;
+    this.intermission = 0;
     this.ship.cooldown = 0;
     this.ship.invulnerable = 1;
     if (this.state === 'over') {
@@ -480,7 +505,7 @@ export class Game {
     this.opts.onStatus?.(`Wave ${n}.`);
   }
 
-  /** Each wave is chains of drifters, with darts from wave 2 and hexes from wave 3, and a boost capsule or two. */
+  /** Each wave is chains of drifters, with darts from wave 2 and hexes from wave 3, plus boost capsules and bombs. */
   private buildWave(n: number): Spawn[] {
     const q: Spawn[] = [];
     const chains = Math.min(6, 2 + Math.ceil(n / 2));
@@ -499,7 +524,9 @@ export class Game {
     if (n >= 3) {
       for (let i = 0; i < Math.min(3, Math.floor((n - 1) / 2)); i++) q.push({ at: rand(2, t), kind: 'hex', x: this.spawnX(), phase: 0 });
     }
-    this.pickupTimes = Array.from({ length: n >= 4 ? 2 : 1 }, () => rand(3, Math.max(4, t - 1))).sort((a, b) => a - b);
+    const moments = (count: number) => Array.from({ length: count }, () => rand(3, Math.max(4, t - 1))).sort((a, b) => a - b);
+    this.pickupTimes = moments(n >= 4 ? 2 : 1);
+    this.mineTimes = moments(Math.min(4, 1 + Math.floor(n / 2)));
     return q.sort((a, b) => a.at - b.at);
   }
 
@@ -537,15 +564,71 @@ export class Game {
     // Offer what helps most: repairs when the hull is hurt, bombs once the waves get busy.
     const pool: Reward[] = ['energy'];
     if (this.hull < MAX_HULL) pool.push('hull', 'hull');
-    if (this.wave >= 2) pool.push('bomb');
+    if (this.wave >= 2) pool.push('blast');
     const x = this.spawnX();
     this.pickups.push({ reward: pick(pool), x, y: -24, anchorX: x, phase: rand(0, Math.PI * 2), age: 0, dead: false });
+  }
+
+  private spawnMine(): void {
+    const x = this.spawnX();
+    this.mines.push({ x, y: -24, anchorX: x, phase: rand(0, Math.PI * 2), age: 0, dead: false });
+  }
+
+  /** What the boss needs to know about the world, and the ways it can act on it. */
+  private bossEnv(): BossEnv {
+    return {
+      w: this.w, h: this.h, top: this.inset.top, scale: this.scale,
+      shipX: this.ship.x, shipY: this.ship.y,
+      fire: (x, y, vx, vy, color) => this.shots.push({ x, y, vx, vy, hostile: true, dead: false, color }),
+      burst: (shape, x, y, scale, rot, color) => this.burst(shape, x, y, scale, rot, color),
+      problem: () => makeProblem(this.level),
+    };
+  }
+
+  private startBoss(): void {
+    this.boss = createBoss(this.wave, this.bossEnv());
+    this.bossAsked = 0;
+    this.banner = 0;
+    this.opts.onStatus?.(
+      this.boss.kind === 'sum'
+        ? 'Mini boss. Keep shooting the little ship carrying the right answer to open its armour, then shoot the red core.'
+        : 'Mini boss. Shoot its arms off, and shoot the red core when its armour opens.',
+    );
+  }
+
+  private updateBossFight(dt: number): void {
+    const b = this.boss;
+    if (!b) return;
+    updateBoss(b, dt, this.bossEnv());
+    if (b.problem && b.pods.length && b.problemId !== this.bossAsked) {
+      this.bossAsked = b.problemId;
+      this.opts.onStatus?.(`What is ${b.problem.question}? The little ships carry ${b.pods.map((p) => p.value).join(', ')}.`);
+    }
+    if (b.state !== 'gone') return;
+    this.boss = null;
+    if (this.state !== 'playing') return;
+    if (b.defeated) {
+      const bonus = 500 + 250 * b.wave;
+      this.score += bonus;
+      this.bossNote = `BOSS DOWN +${bonus}`;
+      for (const s of this.shots) if (s.hostile) s.dead = true;
+      this.rings.push(
+        { x: b.x, y: b.y, age: 0, color: NEON.red },
+        { x: b.x, y: b.y, age: -0.12, color: NEON.cyan },
+        { x: b.x, y: b.y, age: -0.24, color: NEON.yellow },
+      );
+      if (!this.reduceMotion) this.shake = 0.5;
+    } else {
+      this.bossNote = 'IT GOT AWAY';
+    }
+    this.intermission = 1.8;
+    this.opts.onStatus?.(b.defeated ? 'Mini boss destroyed.' : 'The mini boss got away.');
   }
 
   private destroyEnemy(e: Enemy): void {
     e.dead = true;
     this.score += KINDS[e.kind].points;
-    this.burst(KINDS[e.kind].shape, e.x, e.y, this.scale, e.rot, true);
+    this.burst(KINDS[e.kind].shape, e.x, e.y, this.scale, e.rot, PINK);
   }
 
   private hitShip(): void {
@@ -557,7 +640,7 @@ export class Game {
       const v = rand(60, 190);
       this.debris.push({
         x: this.ship.x, y: this.ship.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
-        rot: a, spin: rand(-5, 5), len: rand(4, 9), age: 0, ttl: rand(0.3, 0.6), pink: false,
+        rot: a, spin: rand(-5, 5), len: rand(4, 9), age: 0, ttl: rand(0.3, 0.6), color: SAND,
       });
     }
     if (this.hull <= 0) this.gameOver();
@@ -568,15 +651,36 @@ export class Game {
   private detonate(): void {
     for (const e of this.enemies) if (!e.dead) this.destroyEnemy(e);
     for (const s of this.shots) if (s.hostile) s.dead = true;
-    this.rings.push({ x: this.ship.x, y: this.ship.y, age: 0 });
+    this.rings.push({ x: this.ship.x, y: this.ship.y, age: 0, color: SAND });
     if (!this.reduceMotion) this.shake = 0.4;
   }
 
+  /** A few sparks where a shot landed on something it could not destroy. */
+  private spark(x: number, y: number, color: string): void {
+    for (let i = 0; i < 3; i++) {
+      const a = rand(0, Math.PI * 2);
+      const v = rand(50, 160);
+      this.debris.push({
+        x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+        rot: a, spin: rand(-6, 6), len: rand(3, 7), age: 0, ttl: rand(0.15, 0.35), color,
+      });
+    }
+  }
+
   private gameOver(): void {
-    this.burst(SHIP, this.ship.x, this.ship.y, this.shipScale, 0, false);
+    this.burst(SHIP, this.ship.x, this.ship.y, this.shipScale, 0, SAND);
     this.queue = [];
     this.pickupTimes = [];
+    this.mineTimes = [];
+    this.pickups = [];
+    this.mines = [];
     this.prompt = null;
+    this.intermission = 0;
+    // A boss that has won does not hang about over the game over screen.
+    if (this.boss && this.boss.state !== 'dying') {
+      this.boss.pods = [];
+      this.boss.state = 'leaving';
+    }
     if (this.score > this.best) {
       this.best = this.score;
       this.newBest = true;
@@ -591,7 +695,7 @@ export class Game {
   }
 
   /** Break a shape into its line segments and send them tumbling outward. */
-  private burst(shape: Shape, x: number, y: number, scale: number, rot: number, pink: boolean): void {
+  private burst(shape: Shape, x: number, y: number, scale: number, rot: number, color: string): void {
     for (const [x1, y1, x2, y2] of segments(shape, x, y, scale, rot)) {
       const mx = (x1 + x2) / 2;
       const my = (y1 + y2) / 2;
@@ -600,7 +704,7 @@ export class Game {
       this.debris.push({
         x: mx, y: my, vx: Math.cos(out) * v, vy: Math.sin(out) * v,
         rot: Math.atan2(y2 - y1, x2 - x1), spin: rand(-5, 5),
-        len: Math.hypot(x2 - x1, y2 - y1), age: 0, ttl: rand(0.5, 0.95), pink,
+        len: Math.hypot(x2 - x1, y2 - y1), age: 0, ttl: rand(0.5, 0.95), color,
       });
     }
   }
@@ -737,8 +841,8 @@ export class Game {
     );
   }
 
-  /** Flying into a boost capsule: time slows and one question decides whether the boost is paid out. */
-  private startPrompt(reward: Reward): void {
+  /** Flying into a boost capsule or a bomb: time slows and one question decides what happens next. */
+  private startPrompt(stake: Stake): void {
     const roll = Math.random();
     const challenge =
       this.input === 'touch' || roll < 0.4
@@ -746,8 +850,9 @@ export class Game {
         : roll < 0.7
           ? entryChallenge(makeProblem(this.level), PROMPT_SECONDS, PROMPT_GRACE)
           : lineChallenge(this.text(WORDS), PROMPT_SECONDS, PROMPT_GRACE);
-    this.prompt = { reward, challenge, settled: false, note: '', hold: 0 };
-    this.announce(challenge, `Boost capsule. Answer in ${PROMPT_SECONDS} seconds ${REWARDS[reward].goal.toLowerCase()}.`);
+    this.prompt = { stake, challenge, settled: false, fatal: false, note: '', hold: 0 };
+    const what = stake === 'defuse' ? 'You hit a bomb' : 'Boost capsule';
+    this.announce(challenge, `${what}. Answer in ${PROMPT_SECONDS} seconds ${STAKES[stake].goal.toLowerCase()}.`);
   }
 
   private updatePrompt(dt: number): void {
@@ -760,16 +865,27 @@ export class Game {
     }
     if (!p.settled) {
       p.settled = true;
-      if (!o.success) {
+      if (p.stake === 'defuse') {
+        // A bomb is all or nothing: defuse it, or lose the ship once the right answer has been shown.
+        if (o.success) {
+          this.score += DEFUSE_POINTS;
+          p.note = `BOMB DEFUSED +${DEFUSE_POINTS}`;
+          p.hold = 1;
+        } else {
+          p.fatal = true;
+          p.note = 'THE BOMB GOES OFF';
+          p.hold = 1.7;
+        }
+      } else if (!o.success) {
         this.jam = JAM_SECONDS;
         p.note = 'CANNONS JAMMED';
         p.hold = 1.8;
       } else {
         p.hold = 1;
-        if (p.reward === 'bomb') {
+        if (p.stake === 'blast') {
           this.detonate();
           p.note = 'BOOM';
-        } else if (p.reward === 'energy') {
+        } else if (p.stake === 'energy') {
           // A quicker answer is a bigger boost: 30% of a gauge at worst, 60% at best.
           const gain = 0.6 * o.quality;
           this.energy = Math.min(1, this.energy + gain);
@@ -787,6 +903,13 @@ export class Game {
     p.hold -= dt;
     if (p.hold <= 0) {
       this.prompt = null;
+      if (p.fatal) {
+        this.hull = 0;
+        this.rings.push({ x: this.ship.x, y: this.ship.y, age: 0, color: NEON.red }, { x: this.ship.x, y: this.ship.y, age: -0.1, color: NEON.orange });
+        if (!this.reduceMotion) this.shake = 0.5;
+        this.gameOver();
+        return;
+      }
       // A moment to find your bearings before anything can hit the ship again.
       this.ship.invulnerable = Math.max(this.ship.invulnerable, 1);
     }
@@ -809,8 +932,8 @@ export class Game {
     this.shake = Math.max(0, this.shake - dt);
     // Time crawls only while the question is waiting. Once it is answered the action picks straight back up,
     // with the result still on screen and the ship still shielded.
-    const asking = this.prompt !== null && !this.prompt.settled;
-    this.timeScale += ((asking ? SLOW_MOTION : 1) - this.timeScale) * (1 - Math.exp(-dt * 9));
+    // (A bomb that was not defused keeps time crawling to the end.)
+    this.timeScale += ((this.asking ? SLOW_MOTION : 1) - this.timeScale) * (1 - Math.exp(-dt * 9));
     const sim = dt * this.timeScale;
     this.banner = Math.max(0, this.banner - sim);
 
@@ -832,14 +955,24 @@ export class Game {
     this.debris = this.debris.filter((d) => d.age < d.ttl);
     for (const ring of this.rings) ring.age += dt;
     this.rings = this.rings.filter((ring) => ring.age < 0.7);
+    // A boss on its way out (after a game over) still has to fly off the screen.
+    if (this.boss && this.state !== 'playing') this.updateBossFight(sim);
 
     this.updateShip(sim);
     if (this.state === 'playing') {
       if (this.brk) {
         this.updateBreak(dt);
       } else {
-        this.updateWave(sim);
+        if (this.intermission > 0) {
+          this.intermission -= sim;
+          if (this.intermission <= 0) this.startBreak(this.wave + 1);
+        } else if (this.boss) {
+          this.updateBossFight(sim);
+        } else {
+          this.updateWave(sim);
+        }
         this.updatePickups(sim);
+        this.updateMines(sim);
         this.updatePrompt(dt);
       }
     }
@@ -850,6 +983,12 @@ export class Game {
     this.enemies = this.enemies.filter((e) => !e.dead);
     this.shots = this.shots.filter((s) => !s.dead);
     this.pickups = this.pickups.filter((p) => !p.dead);
+    this.mines = this.mines.filter((m) => !m.dead);
+  }
+
+  /** A question is open and still waiting for its answer (or a bomb is about to go off). */
+  private get asking(): boolean {
+    return this.prompt !== null && (!this.prompt.settled || this.prompt.fatal);
   }
 
   private updateShip(dt: number): void {
@@ -893,13 +1032,12 @@ export class Game {
 
     // On touch the ship fires for as long as a finger is down, so letting go is never a free ride.
     // It holds fire while a capsule's question is open, which keeps the question clear of shots.
-    const asking = this.prompt !== null && !this.prompt.settled;
-    if ((keys.has('Space') || this.touchId !== null) && ship.cooldown <= 0 && this.jam <= 0 && !asking) {
+    if ((keys.has('Space') || this.touchId !== null) && ship.cooldown <= 0 && this.jam <= 0 && !this.asking) {
       ship.cooldown = 0.17;
       const sc = this.scale;
       const up = -680 * this.pace;
       const shoot = (dx: number, dy: number, vx: number) =>
-        this.shots.push({ x: ship.x + dx * sc, y: ship.y - dy * sc, vx, vy: up, hostile: false, dead: false });
+        this.shots.push({ x: ship.x + dx * sc, y: ship.y - dy * sc, vx, vy: up, hostile: false, dead: false, color: SAND });
       // Energy buys cannons: one from the nose, then one from each wing, then all three with the wings angled out.
       if (this.energy <= 0) {
         shoot(0, 18, 0);
@@ -922,10 +1060,30 @@ export class Game {
       this.pickupTimes.shift();
       this.spawnPickup();
     }
+    while (this.mineTimes.length && this.mineTimes[0]! <= this.waveTime) {
+      this.mineTimes.shift();
+      this.spawnMine();
+    }
     const cleared = !this.queue.length && !this.enemies.length;
-    if (cleared && !this.pickups.length && !this.pickupTimes.length && !this.prompt) {
+    const quiet = !this.pickups.length && !this.pickupTimes.length && !this.mines.length && !this.mineTimes.length;
+    if (cleared && quiet && !this.prompt) {
       this.rest += dt;
-      if (this.rest > 0.9) this.startBreak(this.wave + 1);
+      if (this.rest > 0.9) this.startBoss();
+    }
+  }
+
+  private updateMines(dt: number): void {
+    const hurry = !this.queue.length && !this.enemies.length ? 3 : 1;
+    const reach = (10 + 9) * this.scale;
+    for (const m of this.mines) {
+      m.age += dt;
+      m.y += 74 * this.pace * hurry * dt;
+      m.x = m.anchorX + Math.sin(m.age * 0.9 + m.phase) * 34 * this.scale;
+      if (m.y > this.h + 40) m.dead = true;
+      else if (this.state === 'playing' && !this.prompt && Math.hypot(m.x - this.ship.x, m.y - this.ship.y) < reach) {
+        m.dead = true;
+        this.startPrompt('defuse');
+      }
     }
   }
 
@@ -963,7 +1121,7 @@ export class Game {
         if (e.fireIn > 0) {
           e.fireIn -= dt;
           if (e.fireIn <= 0 && playing && e.y > 0 && e.y < this.h * 0.55) {
-            this.shots.push({ x: e.x, y: e.y + 12 * this.scale, vx: 0, vy: 230 * this.pace, hostile: true, dead: false });
+            this.shots.push({ x: e.x, y: e.y + 12 * this.scale, vx: 0, vy: 230 * this.pace, hostile: true, dead: false, color: PINK });
           }
         }
       } else if (e.kind === 'dart') {
@@ -1002,7 +1160,7 @@ export class Game {
             const ty = ship.y - e.y;
             const dist = Math.hypot(tx, ty) || 1;
             const speed = Math.min(300, 210 + this.wave * 8);
-            this.shots.push({ x: e.x, y: e.y, vx: (tx / dist) * speed, vy: (ty / dist) * speed, hostile: true, dead: false });
+            this.shots.push({ x: e.x, y: e.y, vx: (tx / dist) * speed, vy: (ty / dist) * speed, hostile: true, dead: false, color: PINK });
           }
         }
       }
@@ -1035,6 +1193,25 @@ export class Game {
         }
         continue;
       }
+      if (this.boss) {
+        const hit = shootBoss(this.boss, s.x, s.y, this.bossEnv());
+        if (hit !== 'miss') {
+          s.dead = true;
+          this.spark(s.x, s.y, hit === 'blocked' ? NEON.cyan : hit === 'lock' ? NEON.yellow : NEON.red);
+          this.score += hit === 'armOff' ? 150 : hit === 'right' ? 100 : hit === 'core' ? 10 : 0;
+          if (hit === 'down') for (const other of this.shots) if (other.hostile) other.dead = true;
+          if (hit === 'right') this.opts.onStatus?.('Right answer. Its armour is open: shoot the red core.');
+          else if (hit === 'wrong') this.opts.onStatus?.('Wrong ship. A new sum is coming.');
+          continue;
+        }
+      }
+      // Bombs shrug shots off. They have to be flown around.
+      const mine = this.mines.find((m) => Math.hypot(s.x - m.x, s.y - m.y) < 11 * this.scale);
+      if (mine) {
+        s.dead = true;
+        this.spark(s.x, s.y, NEON.red);
+        continue;
+      }
       for (const e of this.enemies) {
         if (e.dead) continue;
         if (Math.hypot(s.x - e.x, s.y - e.y) < KINDS[e.kind].radius * this.scale + 4) {
@@ -1048,6 +1225,10 @@ export class Game {
     }
 
     if (safe) return;
+    if (this.boss && touchesBoss(this.boss, ship.x, ship.y, shipRadius, this.bossEnv())) {
+      this.hitShip();
+      return;
+    }
     for (const e of this.enemies) {
       if (e.dead) continue;
       if (Math.hypot(e.x - ship.x, e.y - ship.y) < KINDS[e.kind].radius * this.scale + shipRadius) {
@@ -1105,20 +1286,24 @@ export class Game {
         }
       }, false);
     }
-    this.ink(SAND, 0.16, 1, () => {
-      for (const star of this.stars) {
-        if (!star.streak) continue;
-        ctx.moveTo(star.x, star.y);
-        ctx.lineTo(star.x, star.y + star.speed * (0.08 + this.warp * 0.035));
-      }
-    }, false);
+    // Streaks are quiet sand in a wave and turn neon while a boss is on screen.
+    const streakColors = this.boss ? [NEON.cyan, NEON.violet, NEON.lime] : [SAND];
+    streakColors.forEach((color, band) => {
+      this.ink(color, this.boss ? 0.4 : 0.16, 1, () => {
+        this.stars.forEach((star, i) => {
+          if (!star.streak || i % streakColors.length !== band) return;
+          ctx.moveTo(star.x, star.y);
+          ctx.lineTo(star.x, star.y + star.speed * (0.08 + this.warp * 0.035));
+        });
+      }, false);
+    });
 
-    // Debris fades in two steps rather than per piece, again to keep strokes batched.
-    for (const pink of [true, false]) {
+    // Debris fades in two steps rather than per piece, and is grouped by colour, to keep strokes batched.
+    for (const color of new Set(this.debris.map((d) => d.color))) {
       for (const fresh of [true, false]) {
-        this.ink(pink ? PINK : SAND, fresh ? 1 : 0.45, 1.5, () => {
+        this.ink(color, fresh ? 1 : 0.45, 1.5, () => {
           for (const d of this.debris) {
-            if (d.pink !== pink || d.age < d.ttl * 0.55 !== fresh) continue;
+            if (d.color !== color || d.age < d.ttl * 0.55 !== fresh) continue;
             const hx = (Math.cos(d.rot) * d.len) / 2;
             const hy = (Math.sin(d.rot) * d.len) / 2;
             ctx.moveTo(d.x - hx, d.y - hy);
@@ -1134,26 +1319,39 @@ export class Game {
       this.ink(SAND, 0.9, 1.5, () => {
         for (const p of this.pickups) {
           trace(ctx, CAPSULE, p.x, p.y, sc * pulse, 0);
-          trace(ctx, REWARDS[p.reward].mark, p.x, p.y, sc * 0.8, 0);
+          trace(ctx, STAKES[p.reward].mark, p.x, p.y, sc * 0.8, 0);
         }
       });
       this.ink(SAND, 0.65, 1.1, () => {
-        for (const p of this.pickups) traceText(ctx, REWARDS[p.reward].label, p.x, p.y + 19 * sc, 7, 'center');
+        for (const p of this.pickups) traceText(ctx, STAKES[p.reward].label, p.x, p.y + 19 * sc, 7, 'center');
       }, false);
+    }
+
+    // Bombs are the opposite: red, spiked, spinning and throbbing.
+    if (this.mines.length) {
+      const throb = 1 + 0.16 * Math.sin(this.time * 9);
+      this.ink(NEON.red, 1, 1.7, () => {
+        for (const m of this.mines) trace(ctx, MINE, m.x, m.y, sc * throb, m.age * 1.4);
+      });
     }
 
     this.ink(PINK, 1, 1.6, () => {
       for (const e of this.enemies) if (e.flash <= 0) trace(ctx, KINDS[e.kind].shape, e.x, e.y, sc, e.rot);
-      for (const s of this.shots) {
-        if (!s.hostile) continue;
-        const r = 4 * sc;
-        ctx.moveTo(s.x, s.y - r);
-        ctx.lineTo(s.x + r, s.y);
-        ctx.lineTo(s.x, s.y + r);
-        ctx.lineTo(s.x - r, s.y);
-        ctx.closePath();
-      }
     });
+    // Enemy shots are diamonds in the colour of whatever fired them.
+    for (const color of new Set(this.shots.filter((s) => s.hostile).map((s) => s.color))) {
+      this.ink(color, 1, 1.6, () => {
+        for (const s of this.shots) {
+          if (!s.hostile || s.color !== color) continue;
+          const r = 4 * sc;
+          ctx.moveTo(s.x, s.y - r);
+          ctx.lineTo(s.x + r, s.y);
+          ctx.lineTo(s.x, s.y + r);
+          ctx.lineTo(s.x - r, s.y);
+          ctx.closePath();
+        }
+      });
+    }
     // An enemy that was just hit flashes in the ship's colour.
     this.ink(SAND, 1, 2.2, () => {
       for (const e of this.enemies) if (e.flash > 0) trace(ctx, KINDS[e.kind].shape, e.x, e.y, sc, e.rot);
@@ -1169,10 +1367,25 @@ export class Game {
       }
     });
 
+    if (this.boss) {
+      const b = this.boss;
+      for (const part of bossParts(b, this.bossEnv(), this.time)) {
+        this.ink(part.color, part.alpha, part.width, () => trace(ctx, part.shape, part.x, part.y, part.scale, part.rot));
+        const label = part.label;
+        if (label) this.ink(part.color, part.alpha, 1.6, () => traceText(ctx, label, part.x, part.y - 0.28 * 18 * part.scale, 0.56 * 18 * part.scale, 'center'), false);
+      }
+      // The sum boss wears its question above its head for as long as the answer ships are out.
+      if (b.problem && b.pods.length) {
+        const question = `${b.problem.question} = ?`;
+        this.ink(NEON.yellow, 1, 1.8, () => traceText(ctx, question, b.x, b.y - 100 * sc, 18, 'center'));
+      }
+    }
+
     for (const ring of this.rings) {
+      if (ring.age < 0) continue;
       const t = ring.age / 0.7;
       const r = t * Math.hypot(w, h);
-      this.ink(SAND, 1 - t, 2.4, () => {
+      this.ink(ring.color, 1 - t, 2.4, () => {
         ctx.moveTo(ring.x + r, ring.y);
         ctx.arc(ring.x, ring.y, r, 0, Math.PI * 2);
       });
@@ -1215,6 +1428,21 @@ export class Game {
       if (this.w >= 640) traceText(ctx, `BEST ${pad6(this.best)}`, this.w / 2, top, 12, 'center');
     });
     this.ink(SAND, 0.7, 1.2, () => traceText(ctx, `WAVE ${this.wave}`, left, top + 52, 9));
+
+    // A boss shows how much of its core is left, as a red line under the score.
+    const b = this.boss;
+    if (b && (b.state === 'fight' || b.state === 'enter')) {
+      const half = Math.min(140, this.room * 0.3);
+      const y = top + 47;
+      this.ink(NEON.red, 0.25, 2, () => {
+        ctx.moveTo(this.w / 2 - half, y);
+        ctx.lineTo(this.w / 2 + half, y);
+      }, false);
+      this.ink(NEON.red, 1, 2.6, () => {
+        ctx.moveTo(this.w / 2 - half, y);
+        ctx.lineTo(this.w / 2 - half + 2 * half * Math.max(0, b.hp / b.maxHp), y);
+      });
+    }
 
     // Energy gauge: ten ticks beside the hull. The taller ones are the half that buys the third cannon.
     const gauge = left + 84;
@@ -1269,8 +1497,24 @@ export class Game {
     if (this.prompt) {
       const p = this.prompt;
       const top = this.challengeTop;
-      this.renderChallenge(p.challenge, top, `${p.challenge.kind === 'line' ? 'TYPE' : 'SOLVE'} ${REWARDS[p.reward].goal}`);
-      if (p.settled) this.centred(p.note, top + 180, 13, 1, p.challenge.outcome?.success ? PINK : SAND);
+      this.renderChallenge(p.challenge, top, `${p.challenge.kind === 'line' ? 'TYPE' : 'SOLVE'} ${STAKES[p.stake].goal}`, p.stake === 'defuse' ? NEON.red : SAND);
+      if (p.settled) this.centred(p.note, top + 180, 13, 1, p.fatal ? NEON.red : p.challenge.outcome?.success ? PINK : SAND);
+      return;
+    }
+
+    // A boss arrives under a flashing warning, and leaves under a line saying how it went.
+    if (this.state === 'playing' && this.boss?.state === 'enter') {
+      const flash = Math.floor(this.time * 7) % 2 === 0;
+      this.centred('WARNING', mid, 30, 1, flash ? NEON.red : NEON.yellow);
+      this.centred(
+        this.boss.kind === 'sum' ? 'BLAST THE RIGHT ANSWER TO CRACK ITS ARMOUR' : 'HIT THE RED CORE WHEN ITS ARMOUR OPENS',
+        mid + 56, 11, 0.9, NEON.cyan,
+      );
+      return;
+    }
+    if (this.state === 'playing' && this.intermission > 0) {
+      const color = NEON_LIST[Math.floor(this.time * 10) % NEON_LIST.length]!;
+      this.centred(this.bossNote, mid, 26, Math.min(1, this.intermission / 0.4), color);
       return;
     }
 
@@ -1323,11 +1567,11 @@ export class Game {
     this.renderChallenge(b.challenge, top, title);
   }
 
-  private renderChallenge(c: Challenge, top: number, title: string): void {
+  private renderChallenge(c: Challenge, top: number, title: string, titleColor = SAND): void {
     const { ctx } = this;
     const alpha = Math.min(1, c.age / 0.35);
     const done = c.outcome !== null;
-    this.centred(title, top, 11, alpha * 0.8);
+    this.centred(title, top, 11, alpha * (titleColor === SAND ? 0.8 : 1), titleColor);
 
     if (c.kind === 'line') {
       this.renderLine(c, top + 40, alpha);
