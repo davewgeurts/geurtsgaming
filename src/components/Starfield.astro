@@ -1,5 +1,5 @@
 ---
-/** Ambient drifting particles behind the hero. Pauses for reduced-motion users, off-screen tabs and the arcade game. */
+/** Ambient drifting particles behind the hero. Pauses for reduced-motion users, hidden tabs, the arcade game, and once the hero has scrolled out of view. */
 ---
 <canvas class="starfield" aria-hidden="true"></canvas>
 
@@ -20,7 +20,7 @@
     const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
     const colors = ['236,223,210', '137,49,114', '204,202,204', '95,52,117'];
     type P = { x: number; y: number; r: number; vy: number; a: number; c: string; streak: boolean };
-    let w = 0, h = 0, dpr = 1, ps: P[] = [], raf = 0;
+    let w = 0, h = 0, dpr = 0, ps: P[] = [], raf = 0;
 
     const rand = (a: number, b: number) => a + Math.random() * (b - a);
     const make = (y?: number): P => {
@@ -37,7 +37,10 @@
     };
 
     const resize = () => {
-      dpr = Math.min(devicePixelRatio || 1, 2);
+      const nextDpr = Math.min(devicePixelRatio || 1, 2);
+      // Phones fire resize when the address bar slides away. Nothing changed size, so keep the stars where they are.
+      if (canvas.clientWidth === w && canvas.clientHeight === h && nextDpr === dpr) return;
+      dpr = nextDpr;
       w = canvas.clientWidth; h = canvas.clientHeight;
       canvas.width = w * dpr; canvas.height = h * dpr;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -64,7 +67,12 @@
 
     // The hero arcade game draws its own stars, so this one idles while the game is open.
     let gameOpen = false;
-    const start = () => { cancelAnimationFrame(raf); if (!gameOpen) raf = requestAnimationFrame(draw); };
+    let inView = true;
+    const start = () => { cancelAnimationFrame(raf); if (!gameOpen && inView) raf = requestAnimationFrame(draw); };
+    new IntersectionObserver(([entry]) => {
+      inView = entry?.isIntersecting ?? true;
+      start();
+    }).observe(canvas);
     document.addEventListener('gg:game', (e) => {
       gameOpen = (e as CustomEvent<{ active: boolean }>).detail.active;
       start();

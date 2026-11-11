@@ -19,8 +19,9 @@
   --accent-text: #d98ac0;   /* magenta tint for small text on navy (≥7:1) */
   --accent-2: var(--plum);
 
-  --font-display: 'Orbitron', 'Rajdhani', system-ui, sans-serif;
-  --font-body: 'Nunito', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* --font-orbitron and --font-nunito come from <Font> in Base.astro and already include fallbacks. */
+  --font-display: var(--font-orbitron), system-ui, sans-serif;
+  --font-body: var(--font-nunito), system-ui, -apple-system, 'Segoe UI', sans-serif;
 
   --radius: 18px;
   --radius-sm: 10px;

@@ -156,6 +156,21 @@ const pillars = [
     .cta .btn { justify-content: center; }
   }
 
+  /* Small phones (iPhone SE size): the nav already shows the logo, so the hero's copy gives up its space
+     to keep the demo launcher on the first screen. */
+  @media (max-width: 420px) and (max-height: 620px) {
+    .hero { padding-top: 84px; }
+    :global(.hero-logo) { display: none; }
+  }
+  /* Phones held sideways: no room for the big logo or a two-line title. */
+  @media (min-width: 641px) and (max-height: 480px) {
+    .hero { padding-block: 76px 60px; }
+    :global(.hero-logo) { display: none; }
+    h1 { display: flex; gap: 0.35em; font-size: clamp(2rem, 6vw, 3rem); }
+    .sub { margin-top: 6px; }
+    .lede { margin-bottom: 0; }
+  }
+
   .scroll {
     position: absolute;
     bottom: calc(14px + env(safe-area-inset-bottom)); left: 50%;

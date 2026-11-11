@@ -29,10 +29,15 @@ const year = new Date().getFullYear();
     </div>
   </div>
   <div class="wrap legal muted">
-    <span>© {year} GeurtsGaming. All rights reserved.</span>
+    <span>© <span data-year>{year}</span> GeurtsGaming. All rights reserved.</span>
     <span>Made with care for curious kids.</span>
   </div>
 </footer>
+
+<!-- The year above is set when the site is built; this keeps it right if the last deploy was last year. -->
+<script is:inline>
+  document.querySelectorAll('[data-year]').forEach((el) => (el.textContent = String(new Date().getFullYear())));
+</script>
 
 <style>
   .footer {

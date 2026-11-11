@@ -1,5 +1,6 @@
 ---
 import '../styles/global.css';
+import { Font } from 'astro:assets';
 import Nav from '../components/Nav.astro';
 import Footer from '../components/Footer.astro';
 
@@ -48,12 +49,9 @@ const ogImage = new URL(image, Astro.site ?? 'https://geurtsgaming.com');
     <meta name="twitter:description" content={description} />
     <meta name="twitter:image" content={ogImage} />
 
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;800&family=Orbitron:wght@700;900&display=swap"
-      rel="stylesheet"
-    />
+    <!-- Self-hosted (see `fonts` in astro.config.mjs). Only the two faces every page opens with are preloaded. -->
+    <Font cssVariable="--font-nunito" preload={[{ weight: 400, subset: 'latin' }]} />
+    <Font cssVariable="--font-orbitron" preload={[{ weight: 700, subset: 'latin' }]} />
 
     <script type="application/ld+json" set:html={JSON.stringify({
       '@context': 'https://schema.org',
