@@ -6,10 +6,10 @@ export type Pt = readonly [number, number];
 export interface Poly { pts: readonly Pt[]; closed: boolean }
 export type Shape = readonly Poly[];
 
-const closed = (...pts: Pt[]): Poly => ({ pts, closed: true });
-const open = (...pts: Pt[]): Poly => ({ pts, closed: false });
+export const closed = (...pts: Pt[]): Poly => ({ pts, closed: true });
+export const open = (...pts: Pt[]): Poly => ({ pts, closed: false });
 const round1 = (v: number) => Math.round(v * 10) / 10;
-const ngon = (n: number, r: number, rot = 0): Pt[] =>
+export const ngon = (n: number, r: number, rot = 0): Pt[] =>
   Array.from({ length: n }, (_, i) => {
     const a = rot + (i / n) * Math.PI * 2;
     return [round1(Math.cos(a) * r), round1(Math.sin(a) * r)] as const;
@@ -43,6 +43,8 @@ export const HEX: Shape = [closed(...ngon(6, 15)), closed(...ngon(3, 7, -Math.PI
 export const CAPSULE: Shape = [closed(...ngon(8, 13, Math.PI / 8))];
 export const MARK_HULL: Shape = [open([-6, 0], [6, 0]), open([0, -6], [0, 6])];
 export const MARK_ENERGY: Shape = [open([3, -8], [-4, 1], [3, 1], [-3, 8])];
+/** The mark of an upgrade capsule: a four-pointed star. */
+export const MARK_STAR: Shape = [closed([0, -9], [2.5, -2.5], [9, 0], [2.5, 2.5], [0, 9], [-2.5, 2.5], [-9, 0], [-2.5, -2.5])];
 export const MARK_BOMB: Shape = [open([-5, -5], [5, 5]), open([5, -5], [-5, 5]), open([0, -8], [0, 8]), open([-8, 0], [8, 0])];
 
 /** A hazard bomb: fly into one and it must be defused. */
@@ -53,6 +55,11 @@ export const MINE: Shape = [
     return open([round1(Math.cos(a) * 9), round1(Math.sin(a) * 9)], [round1(Math.cos(a) * 15), round1(Math.sin(a) * 15)]);
   }),
 ];
+
+/** A seeker rocket, nose up. */
+export const ROCKET: Shape = [closed([0, -8], [3, -2], [3, 5], [-3, 5], [-3, -2]), open([-3, 2], [-6, 7]), open([3, 2], [6, 7])];
+/** A friend's ship: the player's own outline without the cockpit, drawn small. */
+export const FRIEND: Shape = [closed([0, -16], [4, -4], [13, 10], [5, 7], [3, 12], [-3, 12], [-5, 7], [-13, 10], [-4, -4])];
 
 /** Mini boss. The core is the weak spot; the shell is one half of its armour (drawn twice, the second turned round). */
 export const BOSS_CORE: Shape = [closed(...ngon(8, 24, Math.PI / 8))];

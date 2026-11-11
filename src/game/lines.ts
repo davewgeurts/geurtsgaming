@@ -39,3 +39,26 @@ export const WORDS: readonly string[] = [
   'STAR', 'NOVA', 'LASER', 'COMET', 'ORBIT', 'PILOT', 'TURBO', 'BLAST', 'POWER',
   'ROCKET', 'PLANET', 'SHIELD', 'ENGINE', 'GALAXY', 'METEOR', 'THRUST',
 ];
+
+/**
+ * Things the mini boss says, by what has just happened. They are meant to be silly rather than mean,
+ * and none of them makes fun of a wrong answer to a sum.
+ */
+export const TAUNTS = {
+  enter: ['FRESH PILOT. YUM!', 'YOU AGAIN?', 'NOBODY BEATS ME!', 'PREPARE TO LOSE!', 'OH LOOK. A SNACK!'],
+  idle: ['IS THAT ALL?', 'YAWN.', 'YOU CANNOT WIN!', 'MY GRANNY FLIES BETTER!', 'OVER HERE, PILOT!', 'TICK TOCK!'],
+  hit: ['HA HA HA!', 'GOT YOU!', 'TOO SLOW!', 'BULLSEYE!', 'OOPS. DID THAT HURT?'],
+  blocked: ['MY ARMOUR LAUGHS AT YOU!', 'THAT TICKLES!', 'NICE TRY!'],
+  ouch: ['OW!', 'HEY! STOP THAT!', 'LUCKY SHOT!', 'NOT THE CORE!'],
+  arm: ['MY ARM!', 'I LIKED THAT ARM!', 'HEY! I NEED THOSE!'],
+  right: ['HOW DID YOU KNOW?', 'NO! MY ARMOUR!', 'YOU ARE TOO CLEVER!'],
+  wrong: ['WRONG SHIP! HA HA!', 'NOPE!', 'TRY AGAIN, PILOT!'],
+  bomb: ['CATCH!', 'A GIFT FOR YOU!', 'SOLVE THIS!', 'THINK FAST!'],
+  defused: ['NO FAIR!', 'THAT WAS MY BEST BOMB!', 'SHOW OFF!'],
+  boom: ['BOOM! HA HA HA!'],
+  low: ['THIS IS NOT FUNNY NOW!', 'WAIT. LET US TALK!', 'TIME OUT! TIME OUT!'],
+  down: ['NOOOOO!', 'I WILL BE BACK!', 'THIS IS NOT OVER!'],
+  bored: ['BORING. BYE!', 'I HAVE BETTER THINGS TO DO!'],
+  win: ['HA HA HA HA HA!', 'BYE BYE, PILOT!', 'TOO EASY!'],
+} as const;
+export type Taunt = keyof typeof TAUNTS;

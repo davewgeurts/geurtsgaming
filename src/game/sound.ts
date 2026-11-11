@@ -7,14 +7,15 @@ export type Sfx =
   | 'start' | 'wave' | 'shot' | 'enemyShot' | 'hit' | 'clang' | 'boom' | 'hurt' | 'over'
   | 'key' | 'slip' | 'tick' | 'right' | 'wrong' | 'power' | 'repair' | 'jam'
   | 'capsule' | 'bomb' | 'blast'
-  | 'warning' | 'lock' | 'core' | 'armOff' | 'bossDown' | 'fanfare' | 'escape';
+  | 'warning' | 'lock' | 'core' | 'armOff' | 'bossDown' | 'fanfare' | 'escape' | 'laugh' | 'taunt'
+  | 'beam' | 'rocket' | 'nova' | 'shield' | 'shieldUp';
 
 const STORE_KEY = 'gg-arcade-sound';
 /** Overall loudness. Each sound's own level below is a fraction of this. */
 const VOLUME = 0.55;
 /** Seconds that must pass before the same sound may play again, for the ones that come in bursts. */
 const GAP: Partial<Record<Sfx, number>> = {
-  shot: 0.06, enemyShot: 0.12, hit: 0.04, clang: 0.05, boom: 0.06, lock: 0.04, core: 0.04,
+  shot: 0.06, enemyShot: 0.12, hit: 0.04, clang: 0.05, boom: 0.06, lock: 0.04, core: 0.04, laugh: 0.8, taunt: 0.3,
 };
 
 export class Sound {
@@ -194,6 +195,32 @@ export class Sound {
         break;
       case 'fanfare':
         [523, 659, 784, 1047].forEach((f, i) => tone('triangle', f, f, i === 3 ? 0.3 : 0.11, 0.06, i * 0.1));
+        break;
+      case 'laugh':
+        // "Ha ha ha ha": four barks, each a little lower than the last.
+        [330, 294, 262, 220].forEach((f, i) => tone('square', f, f * 0.8, 0.09, 0.035, i * 0.13));
+        break;
+      case 'taunt':
+        tone('sawtooth', 150, 120, 0.09, 0.035);
+        tone('sawtooth', 190, 130, 0.14, 0.035, 0.1);
+        break;
+      case 'beam':
+        tone('sawtooth', 1400, 180, 0.28, 0.04);
+        tone('sine', 700, 90, 0.28, 0.05);
+        break;
+      case 'rocket':
+        tone('square', 180, 520, 0.14, 0.02);
+        break;
+      case 'nova':
+        noise(0.45, 0.12, 2400, 150);
+        tone('sine', 240, 60, 0.45, 0.09);
+        break;
+      case 'shield':
+        tone('triangle', 1200, 300, 0.25, 0.06);
+        tone('triangle', 1800, 450, 0.2, 0.03);
+        break;
+      case 'shieldUp':
+        tone('sine', 440, 880, 0.18, 0.035);
         break;
       case 'escape':
         tone('triangle', 392, 392, 0.14, 0.05);

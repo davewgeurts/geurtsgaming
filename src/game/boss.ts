@@ -7,6 +7,8 @@
  * - Even waves bring the sum boss: it shows a sum, and little ships line up under it carrying answers.
  *   Locking on to the ship with the right answer opens the armour; a wrong one makes it lash out.
  *
+ * Both kinds throw bombs every few seconds.
+ *
  * This file is the boss's behaviour and geometry. game.ts feeds it the world through `BossEnv`
  * and draws the `Part`s it hands back.
  */
@@ -50,6 +52,8 @@ export interface BossEnv {
   shipX: number;
   shipY: number;
   fire(x: number, y: number, vx: number, vy: number, color: string): void;
+  /** Throw a bomb: the pilot has to steer clear of it, or defuse it by answering a question. */
+  bomb(x: number, y: number): void;
   burst(shape: Shape, x: number, y: number, scale: number, rot: number, color: string): void;
   problem(): Problem;
 }
@@ -86,6 +90,8 @@ export interface Boss {
   /** Sum boss: seconds until the next sum appears. */
   nextSum: number;
   fireIn: number;
+  /** Seconds until it throws its next bomb. */
+  bombIn: number;
   timeLeft: number;
   popIn: number;
 }
@@ -123,7 +129,7 @@ export function createBoss(wave: number, env: BossEnv): Boss {
     open: 0, openFor: 0, cycle: 2.2,
     arms,
     problem: null, problemId: 0, pods: [], nextSum: 0.4,
-    fireIn: 2.4, timeLeft: PATIENCE, popIn: 0,
+    fireIn: 2.4, bombIn: 5, timeLeft: PATIENCE, popIn: 0,
   };
 }
 
@@ -195,7 +201,8 @@ export function updateBoss(b: Boss, dt: number, env: BossEnv): void {
   b.open += ((b.openFor > 0 ? 1 : 0) - b.open) * (1 - Math.exp(-dt * 7));
 
   if (b.state === 'enter') {
-    const restY = Math.max(env.top + 170, env.h * 0.25);
+    // Low enough to leave room above for its sum and for the faces in the corners.
+    const restY = Math.max(env.top + 104 + 72 * s, env.h * 0.25);
     b.y += (restY - b.y) * (1 - Math.exp(-dt * 2.4));
     if (b.stateTime > 2) setState(b, 'fight');
     return;
@@ -235,6 +242,12 @@ export function updateBoss(b: Boss, dt: number, env: BossEnv): void {
   const halfWidth = b.kind === 'sum' ? POD_GAP + POD_R + 6 : 106;
   b.x = env.w / 2 + Math.sin(b.stateTime * 0.55) * Math.max(0, Math.min(env.w / 2 - halfWidth * s, 190 * s));
 
+  b.bombIn -= dt;
+  if (b.bombIn <= 0) {
+    b.bombIn = rand(6.5, 9) * tempo(b);
+    env.bomb(b.x + rand(-30, 30) * s, b.y + 34 * s);
+  }
+
   if (b.kind === 'arms') {
     if (b.openFor > 0) {
       b.openFor -= dt;
@@ -271,8 +284,12 @@ export function updateBoss(b: Boss, dt: number, env: BossEnv): void {
   }
 }
 
-/** Test a player's shot at (x, y) against the boss, and apply whatever it does. */
-export function shootBoss(b: Boss, x: number, y: number, env: BossEnv): Hit {
+/**
+ * Test a player's shot at (x, y) against the boss, and apply whatever it does.
+ * Only an `aimed` shot (one from the ship's own cannons) can choose an answer ship: rockets, beams and
+ * friends' shots bounce off them, so a pilot with plenty of upgrades never answers a sum by accident.
+ */
+export function shootBoss(b: Boss, x: number, y: number, env: BossEnv, aimed = true): Hit {
   const s = env.scale * SIZE;
   if (b.state !== 'fight' && b.state !== 'enter') return 'miss';
   const fighting = b.state === 'fight';
@@ -293,7 +310,7 @@ export function shootBoss(b: Boss, x: number, y: number, env: BossEnv): Hit {
   for (const pod of b.pods) {
     const p = podPoint(b, pod, s);
     if (Math.hypot(x - p.x, y - p.y) > POD_R * s) continue;
-    if (!fighting || !b.problem) return 'blocked';
+    if (!fighting || !b.problem || !aimed) return 'blocked';
     pod.hits += 1;
     pod.cool = 0.7;
     pod.flash = 0.08;
