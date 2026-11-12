@@ -5,13 +5,14 @@ import { renderAvatarFrame, type Mood, type Who } from './avatar';
 import type { Boss } from './boss';
 import type { Challenge, LineChallenge } from './challenge';
 import { NEON, NEON_LIST, PINK, SAND, SOUL, clamp, pad6, percent, rand, type Ink } from './core';
+import { GRADE_COLOR, type Grade } from './fireworks';
 import { advance, fitTo, textWidth, traceText } from './font';
 import { BRIEFING } from './lines';
 import { renderLeaderboardPanel, type PilotScore } from './multiplayer';
-import { STAKES, type Break, type Prompt } from './questions';
+import { STAKES, gradeOf, type Break, type Prompt } from './questions';
 import { ALERT_SECONDS, ALERT_TURN } from './setpieces';
 import { DROGUE, PERSON_OUT, PERSON_UP, SHIP, TANKER, trace } from './shapes';
-import { FUEL_SECONDS, TANKER_SIZE, tankerTail, type Tanker, type TankerEnv } from './tanker';
+import { FUEL_SECONDS, PATIENCE, TANKER_SIZE, tankerTail, type Tanker, type TankerEnv } from './tanker';
 import { UPGRADES, type Upgrade, type UpgradeId } from './upgrades';
 import { TRIPLE_AT } from './weapons';
 
@@ -315,7 +316,10 @@ export function renderTanker(v: HudViewContext, t: Tanker, env: TankerEnv): void
     const lost = t.why !== null && t.whyAge < 1.1;
     const label = lost ? (t.why === 'close' ? 'TOO CLOSE!' : 'TOO FAR!') : t.fuel > 0 ? 'HOOK ON AGAIN' : 'HOOK ON HERE';
     const alpha = lost || steady ? 1 : 0.6 + 0.35 * Math.sin(time * 6);
-    ink(lost ? NEON.red : NEON.lime, alpha, 1.2, () => traceText(ctx, label, t.drogue.x, t.drogue.y + 9 * sc, printSize(8, w, h), 'center'), false);
+    const size = printSize(8, w, h);
+    ink(lost ? NEON.red : NEON.lime, alpha, 1.2, () => traceText(ctx, label, t.drogue.x, t.drogue.y + 9 * sc, size, 'center'), false);
+    // Under it, how long the fuel ship will still wait: the clock only runs while nobody is on the line.
+    renderCountdown(v, t.drogue.x - size * 0.7, t.drogue.y + 9 * sc + size + 11, Math.max(30, 34 * sc), t.patience / PATIENCE, t.patience, 1, printSize(9, w, h));
   }
 }
 
@@ -602,6 +606,7 @@ function renderBreak(v: HudViewContext, b: Break): void {
   const top = challengeTopY(v.h, v.inset.top, v.homeY, true);
   if (b.result) {
     const alpha = Math.min(1, b.hold / 0.4);
+    renderBadge(v, b.challenge.kind === 'line' ? 'TYPING CHALLENGE' : 'MATH CHALLENGE', top, b.grade, alpha);
     let y = top + 10;
     for (const line of b.result) {
       drawCentred(v, line.text, y, line.size, alpha * line.alpha, line.color);
@@ -620,6 +625,7 @@ function renderChallenge(v: HudViewContext, c: Challenge, top: number, title: st
   const { ctx, ink, w, h, room, input, reduceMotion, time } = v;
   const alpha = Math.min(1, c.age / 0.35);
   const done = c.outcome !== null;
+  renderBadge(v, c.kind === 'line' ? 'TYPING CHALLENGE' : 'MATH CHALLENGE', top, gradeOf(c), alpha);
   drawCentred(v, title, top, printSize(11, w, h), alpha * (titleColor === SAND ? 0.8 : 1), titleColor);
 
   if (c.kind === 'line') {
@@ -704,13 +710,109 @@ function renderLine(v: HudViewContext, c: LineChallenge, y: number, alpha: numbe
   if (!c.outcome) drawCentred(v, `ACCURACY ${pressed ? percent(c.index / pressed) : 100}%`, y + size + 46, printSize(9, w, h), alpha * 0.7);
 }
 
-/** Time left, as a line that shrinks toward the centre and turns pink for the last quarter. */
+/** Time left to answer: a bar that drains, with the seconds beside it. Once the answer is in it stops, and dims. */
 function renderTimer(v: HudViewContext, c: Challenge, y: number, alpha: number): void {
-  const { ctx, ink, w, room } = v;
-  const left = Math.max(0, c.timeLeft / c.limit);
-  const half = Math.min(170, (room - 32) / 2) * left;
-  ink(left < 0.25 ? PINK : SAND, alpha * 0.7, 1.4, () => {
-    ctx.moveTo(w / 2 - half, y);
-    ctx.lineTo(w / 2 + half, y);
-  }, false);
+  const size = printSize(12, v.w, v.h);
+  // The bar sits a little left of centre, to leave room for the number after it.
+  const half = Math.min(150, (v.room - 32) / 2 - size);
+  renderCountdown(v, v.w / 2 - size * 0.7, y, half, c.timeLeft / c.limit, c.timeLeft, alpha * (c.outcome ? 0.4 : 1), size, c.outcome === null);
+}
+
+/**
+ * A countdown: a track with a bar in it that drains from the right, and the whole seconds left after it.
+ * Green with time to spare, yellow under half, red under a quarter; in the last three seconds the number
+ * beats once a second. `left` is the share of the time that remains, 0 to 1.
+ */
+function renderCountdown(
+  v: HudViewContext,
+  cx: number,
+  y: number,
+  half: number,
+  left: number,
+  seconds: number,
+  alpha: number,
+  size: number,
+  running = true,
+): void {
+  const { ctx, ink, reduceMotion } = v;
+  const share = clamp(left, 0, 1);
+  const color = share > 0.5 ? NEON.lime : share > 0.25 ? NEON.yellow : NEON.red;
+  const count = Math.max(0, Math.ceil(seconds));
+  const urgent = running && count <= 3 && share > 0;
+  // The beat: big at the start of each of the last seconds, easing back before the next.
+  const beat = urgent && !reduceMotion ? 1 + 0.45 * (seconds - Math.floor(seconds)) : 1;
+  const x0 = cx - half;
+  const tall = Math.max(6, size * 0.6);
+  ink(SAND, alpha * 0.3, 1, () => ctx.rect(x0, y - tall / 2, half * 2, tall), false);
+  if (share > 0) {
+    const inset = tall / 2;
+    ink(color, alpha, tall - 3, () => {
+      ctx.moveTo(x0 + inset, y);
+      ctx.lineTo(x0 + inset + (half * 2 - inset * 2) * share, y);
+    }, running);
+  }
+  const text = size * beat;
+  ink(color, alpha, urgent ? 2 : 1.6, () => traceText(ctx, String(count), cx + half + 8, y - text / 2, text), urgent);
+}
+
+/** The neon colours the "Play the demo" button's frame cycles through, in order round the circle. */
+const BADGE_COLORS = ['#42f5ff', '#b98cff', '#ff5ea8', '#ffe84a', '#9bff4d', '#42f5ff'];
+/** What the badge says once the challenge is over. */
+const VERDICTS: Record<Grade, string> = { failed: 'CHALLENGE FAILED', good: 'GOOD JOB!', perfect: 'PERFECT!' };
+
+/**
+ * The badge above a challenge: what kind it is, in a frame that glows and cycles through the game's neon
+ * colours like the "Play the demo" button. Once the challenge is over the frame and the words turn to how
+ * it went: red for failed, yellow for good, green for perfect. `top` is where the challenge's title starts.
+ */
+function renderBadge(v: HudViewContext, label: string, top: number, grade: Grade | null, alpha: number): void {
+  const { ctx, ink, w, h, room, time, reduceMotion } = v;
+  const text = grade ? VERDICTS[grade] : label;
+  const size = fitTo(text, printSize(grade ? 13 : 11, w, h), room - 56);
+  const tall = size + 16;
+  const wide = textWidth(text, size) + size * 2.6;
+  const x = w / 2 - wide / 2;
+  const y = top - tall - 12;
+  const cx = w / 2;
+  const cy = y + tall / 2;
+  const frame = (): void => {
+    const r = Math.min(10, tall / 2);
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + wide, y, x + wide, y + tall, r);
+    ctx.arcTo(x + wide, y + tall, x, y + tall, r);
+    ctx.arcTo(x, y + tall, x, y, r);
+    ctx.arcTo(x, y, x + wide, y, r);
+    ctx.closePath();
+  };
+  // The frame's colours: the neon wheel, turning once every five seconds, or the one colour of the verdict.
+  let stroke: string | CanvasGradient = grade ? GRADE_COLOR[grade] : BADGE_COLORS[0]!;
+  let glow: string = grade ? GRADE_COLOR[grade] : BADGE_COLORS[Math.floor(time * 1.2) % (BADGE_COLORS.length - 1)]!;
+  if (!grade && typeof ctx.createConicGradient === 'function') {
+    const wheel = ctx.createConicGradient(reduceMotion ? 0.7 : (time * Math.PI * 2) / 5, cx, cy);
+    BADGE_COLORS.forEach((color, i) => wheel.addColorStop(i / (BADGE_COLORS.length - 1), color));
+    stroke = wheel;
+    glow = '#b98cff';
+  }
+  const breath = reduceMotion ? 1 : 0.8 + 0.2 * Math.sin(time * (grade ? 9 : 2.4));
+
+  ctx.save();
+  ctx.beginPath();
+  frame();
+  ctx.globalAlpha = alpha * 0.82;
+  ctx.fillStyle = 'rgb(4, 10, 40)';
+  ctx.fill();
+  // A soft halo, then the frame itself.
+  ctx.strokeStyle = stroke;
+  ctx.shadowColor = glow;
+  ctx.shadowBlur = 22;
+  ctx.globalAlpha = alpha * 0.35 * breath;
+  ctx.lineWidth = 7;
+  ctx.stroke();
+  ctx.shadowBlur = 10;
+  ctx.globalAlpha = alpha;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+
+  ink(grade ? GRADE_COLOR[grade] : SAND, alpha * (grade ? breath : 1), grade ? 2 : 1.7, () => traceText(ctx, text, cx, y + 8, size, 'center'));
 }

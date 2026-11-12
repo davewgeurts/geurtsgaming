@@ -5,11 +5,11 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { choose, type Challenge, type Outcome } from '../src/game/challenge';
+import { choiceChallenge, choose, entryChallenge, lineChallenge, press, tick, type Challenge, type Outcome } from '../src/game/challenge';
 import { LINES, WORDS } from '../src/game/lines';
 import {
   ALL_OWNED_POINTS, DEFUSE_POINTS, FULL_HULL_BONUS, JAM_SECONDS, OFFER_GRACE, POWER_GAIN, Questions, ROUND_PROBLEMS,
-  sumLevel, type QuestionEnv,
+  gradeOf, sumLevel, type QuestionEnv,
 } from '../src/game/questions';
 import { UPGRADES, type UpgradeId } from '../src/game/upgrades';
 
@@ -25,6 +25,7 @@ interface World extends QuestionEnv {
   log: string[];
   said: string[];
   calls: string[];
+  cheers: string[];
   sounds: string[];
   fitted: UpgradeId[];
 }
@@ -33,10 +34,11 @@ function world(over: Partial<QuestionEnv> = {}): World {
   const fitted: UpgradeId[] = [];
   const w: World = {
     touch: false, wave: 1, hull: 3, maxHull: 3, energy: 0, boss: false, owned: new Set<UpgradeId>(),
-    score: 0, jammed: 0, sheltered: 0, log: [], said: [], calls: [], sounds: [], fitted,
+    score: 0, jammed: 0, sheltered: 0, log: [], said: [], calls: [], cheers: [], sounds: [], fitted,
     play: (sound) => w.sounds.push(sound),
     say: (message) => w.said.push(message),
     call: (text) => w.calls.push(text),
+    celebrate: (grade, big) => w.cheers.push(`${grade}${big ? '' : ' (small)'}`),
     feel: () => {},
     taunt: (kind) => w.log.push(`taunt:${kind}`),
     award: (points) => (w.score += points),
@@ -62,6 +64,45 @@ const asked = (q: Questions): Challenge => q.challenge!;
 /** Give the open question an answer without playing it out. */
 const settle = (c: Challenge, outcome: Outcome) => { c.outcome = outcome; };
 
+test('a challenge is graded failed, good or perfect', () => {
+  // Typing: perfect means not one wrong key, however slow. A slip makes it good. Out of time is failed.
+  const type = (text: string, typo: boolean, secondsPerKey: number) => {
+    const c = lineChallenge(text, 20, 0);
+    assert.equal(gradeOf(c), null, 'no grade until it is over');
+    for (const ch of text) {
+      if (typo && ch === text[1]) press(c, '#');
+      press(c, ch);
+      tick(c, secondsPerKey);
+    }
+    return c;
+  };
+  assert.equal(gradeOf(type('FULL POWER', false, 0.1)), 'perfect');
+  assert.equal(gradeOf(type('FULL POWER', false, 1.5)), 'perfect', 'slow and clean is still perfect');
+  assert.equal(gradeOf(type('FULL POWER', true, 0.1)), 'good');
+  const late = lineChallenge('FULL POWER', 5, 0);
+  tick(late, 6);
+  assert.equal(gradeOf(late), 'failed');
+
+  // A sum: perfect when right with at least half the clock left, good when right but slow, failed when wrong.
+  const problem = { question: '2 + 3', answer: 5, options: [4, 5, 6] };
+  const pick = (after: number, option: number) => {
+    const c = choiceChallenge(problem, 10, 0);
+    tick(c, after);
+    choose(c, option);
+    return c;
+  };
+  assert.equal(gradeOf(pick(2, 1)), 'perfect');
+  assert.equal(gradeOf(pick(7, 1)), 'good');
+  assert.equal(gradeOf(pick(2, 0)), 'failed');
+
+  // A typed answer that needed its second try was right in the end, but not perfect.
+  const entry = entryChallenge({ ...problem, answer: 5 }, 10, 0, 1);
+  tick(entry, 1);
+  press(entry, '4');
+  press(entry, '5');
+  assert.equal(gradeOf(entry), 'good');
+});
+
 test('sums get harder every two waves, and stop at the hardest', () => {
   assert.deepEqual([1, 2, 3, 4, 5, 6, 9, 30].map(sumLevel), [1, 1, 2, 2, 3, 3, 3, 3]);
 });
@@ -84,6 +125,8 @@ test('at a keyboard the break is one line to type; good clean typing charges the
   assert.deepEqual(banners(q), ['ENERGY +80%', 'ACCURACY 96% - SPEED 30 WPM', 'TRIPLE CANNONS', 'HULL REPAIRED']);
   assert.equal(q.challenge, null, 'nothing is being asked while the result is up');
   assert.deepEqual(w.calls, ['TRIPLE CANNONS'], 'the pilot calls out how the cannons are charged');
+  assert.equal(q.brk!.grade, 'perfect', 'finished with no wrong keys');
+  assert.deepEqual(w.cheers, ['perfect'], 'and the full show goes up');
 
   runBreak(q, w, 2.5);
   assert.ok(q.brk, 'the result stays up to be read');
@@ -138,6 +181,8 @@ test('on a touch screen the break is three sums; all three right repairs the hul
   const w = world({ touch: true, hull: 2 });
   const q = playRound(w);
   assert.equal(banners(q)[0], '3 OF 3 CORRECT');
+  assert.equal(q.brk!.grade, 'perfect');
+  assert.deepEqual(w.cheers, ['perfect (small)', 'perfect (small)', 'perfect (small)', 'perfect'], 'a small burst for each sum, then the full show');
   assert.equal(w.hull, 3);
   assert.ok(w.energy > 0.5, 'three quick right answers are worth most of a tank');
   assert.equal(w.said.filter((s) => s.includes('Tap the answer')).length, 3);
@@ -145,6 +190,10 @@ test('on a touch screen the break is three sums; all three right repairs the hul
   const missed = world({ touch: true, hull: 2 });
   const q2 = playRound(missed, [1]);
   assert.equal(banners(q2)[0], '2 OF 3 CORRECT');
+  assert.equal(q2.brk!.grade, 'good');
+  assert.deepEqual(missed.cheers, ['perfect (small)', 'failed (small)', 'perfect (small)', 'good']);
+  const none = world({ touch: true });
+  assert.equal(playRound(none, [0, 1, 2]).brk!.grade, 'failed', 'none right is a round failed');
   assert.equal(missed.hull, 2);
   assert.equal(banners(q2).at(-1), 'ALL CORRECT REPAIRS THE HULL');
   assert.ok(missed.energy < w.energy);
@@ -214,6 +263,7 @@ test('a bomb defused is worth points; a bomb not defused goes off once the resul
   q.updatePrompt(DT, lost);
   assert.equal(q.prompt!.note, 'THE BOMB GOES OFF');
   assert.deepEqual(lost.calls, [], 'the pilot has nothing to say about that');
+  assert.deepEqual(lost.cheers, ['failed']);
   assert.ok(q.asking, 'the world stays slow until it does');
   assert.deepEqual(lost.log, [], 'with no boss about, nobody gloats');
   runPrompt(q, lost, 1.6);

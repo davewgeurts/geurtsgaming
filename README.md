@@ -38,7 +38,7 @@ docker compose up --build
   - `boss.ts` (the mini boss that ends each wave), `tanker.ts` (the fuel ship and its fuel line), `asteroids.ts` (the asteroid field and the two ways through it), `upgrades.ts` (the ten ship upgrades)
   - `hangar.ts` and `intro.ts` (the opening: the school's hangar, then the cockpit briefing and take-off), `backdrop.ts` (low-poly planets, moons and rocks behind the game), `avatar.ts` (the wireframe pilot, boss and commander)
   - `challenge.ts` (rules for the typing and maths questions), `maths.ts` (problem generator), `lines.ts` (lines to type, the briefing, the boss's taunts)
-  - `shapes.ts` (line-art ships), `font.ts` (stroke font), `sound.ts` (synthesised sound effects, no audio files), `voice.ts` (the commander, the boss and the pilot speaking their lines in the browser's own on-device voices)
+  - `shapes.ts` (line-art ships), `font.ts` (stroke font), `sound.ts` (synthesised sound effects, no audio files), `voice.ts` (the commander, the boss and the pilot speaking their lines in the browser's own on-device voices), `fireworks.ts` (the fireworks that show how a challenge went)
   - `multiplayer.ts` (callsigns, the Top 10 board, other pilots' ships and the calls to the presence server in `lambda/`)
 - `tests/` — tests for the game's rules, run with `npm test` (see below)
 - `src/data/games.ts` — the list of games; add a game here and it shows up everywhere

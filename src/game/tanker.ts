@@ -13,7 +13,7 @@ import { clamp, rand, smooth } from './core';
 /** Seconds on the line for a full tank. */
 export const FUEL_SECONDS = 6;
 /** Seconds the fuel ship will wait with nobody on its line before it gives up and leaves. */
-const PATIENCE = 12;
+export const PATIENCE = 12;
 /** How much bigger than its drawing in shapes.ts the fuel ship flies. */
 export const TANKER_SIZE = 1.3;
 /** Where the line leaves the fuel ship: this far behind its centre (px at scale 1, like everything below). */

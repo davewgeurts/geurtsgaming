@@ -16,6 +16,7 @@ import {
   type Challenge, type ChoiceChallenge,
 } from './challenge';
 import { PINK, SAND, percent, pick } from './core';
+import type { Grade } from './fireworks';
 import { LINES, WORDS, type Taunt } from './lines';
 import { makeProblem } from './maths';
 import { MARK_BOMB, MARK_ENERGY, MARK_HULL, MARK_STAR, MINE, type Shape } from './shapes';
@@ -44,6 +45,20 @@ export const ALL_OWNED_POINTS = 500;
 export const POWER_GAIN = 0.6;
 /** Seconds before an offered upgrade can be picked, so a key or finger still down from the question picks nothing. */
 export const OFFER_GRACE = 0.4;
+
+/**
+ * How one question went: failed (wrong, or out of time), good, or perfect. A typed line is perfect when it is
+ * finished without a single wrong key, however slowly: accuracy comes first. A sum is perfect when it is
+ * right first time with at least half the clock left.
+ */
+export function gradeOf(c: Challenge): Grade | null {
+  const o = c.outcome;
+  if (!o) return null;
+  if (!o.success) return 'failed';
+  if (c.kind === 'line') return c.misses === 0 ? 'perfect' : 'good';
+  const slipped = c.kind === 'entry' && c.misses > 0;
+  return !slipped && c.timeLeft >= c.limit / 2 ? 'perfect' : 'good';
+}
 
 /** What a boost capsule pays out. A blast clears the screen. */
 export type Reward = 'hull' | 'energy' | 'blast' | 'upgrade';
@@ -76,6 +91,8 @@ export interface Break {
   /** Set once the break is scored; the lines then stay on screen for `hold` seconds. */
   result: Banner[] | null;
   hold: number;
+  /** How the break went as a whole, once it is scored. */
+  grade: Grade | null;
 }
 
 /** The question a boost capsule asks in the middle of a wave, while the game runs in slow motion. */
@@ -118,6 +135,8 @@ export interface QuestionEnv {
   say(message: string): void;
   /** The pilot calls this out. */
   call(text: string): void;
+  /** Fireworks for how a challenge went. `big` is for a whole challenge; one sum in a round of them gets a small burst. */
+  celebrate(grade: Grade, big: boolean): void;
   feel(mood: Mood, seconds: number): void;
   /** The boss says its piece. */
   taunt(kind: Taunt, mood: Mood, seconds: number): void;
@@ -255,7 +274,7 @@ export class Questions {
     this.brk = {
       wave, challenge,
       total: typing ? 1 : ROUND_PROBLEMS, left: typing ? 0 : ROUND_PROBLEMS - 1,
-      right: 0, earned: 0, pause: 0, counted: false, result: null, hold: 0,
+      right: 0, earned: 0, pause: 0, counted: false, result: null, hold: 0, grade: null,
     };
     this.announce(challenge, `${wave === 1 ? 'Game started.' : `Wave ${wave - 1} cleared.`} Charge the ship for wave ${wave}.`, env);
   }
@@ -286,6 +305,7 @@ export class Questions {
       if (c.outcome.success) b.right += 1;
       env.play(c.outcome.success ? 'right' : 'wrong');
       env.feel(c.outcome.success ? 'happy' : 'hurt', 1.2);
+      env.celebrate(gradeOf(c)!, false);
       b.pause = c.outcome.success ? 0.7 : 1.7;
     }
     b.pause -= dt;
@@ -340,6 +360,9 @@ export class Questions {
     }
     b.result = lines;
     b.hold = 2.6;
+    // A round of sums is perfect when every one was right, and failed when none was.
+    b.grade = typed ? gradeOf(b.challenge)! : b.right === b.total ? 'perfect' : b.right === 0 ? 'failed' : 'good';
+    env.celebrate(b.grade, true);
     if (typed && !o.success) env.play('wrong');
     if (gain > 0) env.play('power');
     env.feel(gain >= 0.5 || clean ? 'happy' : gain > 0 ? 'calm' : 'hurt', 2.2);
@@ -418,6 +441,7 @@ export class Questions {
       }
       env.play(o.success ? 'right' : 'wrong');
       env.feel(o.success ? 'happy' : 'hurt', 1.6);
+      env.celebrate(gradeOf(p.challenge)!, true);
       // The pilot calls out what happened (a bomb about to go off leaves them speechless).
       if (p.note && !p.fatal) env.call(p.stake === 'energy' && o.success ? 'POWER UP' : p.note);
       env.say(

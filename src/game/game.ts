@@ -31,6 +31,7 @@ import { bossParts, createBoss, shootBoss, tapBoss, touchesBoss, updateBoss, typ
 import { choose } from './challenge';
 import { NEON, PEBBLE, PINK, ROCK, SAND, clamp, pick, rand, strokeInk, type Ink } from './core';
 import { KINDS, buildWavePlan, renderEnemies, spawnEnemy, spawnX, splitShards, updateEnemies, type Enemy, type Spawn } from './enemies';
+import { Fireworks, renderFireworks } from './fireworks';
 import { textWidth, traceText } from './font';
 import {
   BOSS_CORNER,
@@ -175,6 +176,8 @@ export class Game {
   private bossFreed = 0;
   /** The fuel ship, the commander's warning and the asteroid field (see setpieces.ts). */
   private readonly sets = new SetPieces();
+  /** The fireworks that say how a challenge went. */
+  private readonly fireworks = new Fireworks();
   private readonly backdrop = new Backdrop();
   /** The view from the cockpit that opens the game. null once the ship has taken off. */
   private intro: Intro | null = null;
@@ -582,6 +585,7 @@ export class Game {
     this.souls = [];
     this.freed = 0;
     this.sets.reset();
+    this.fireworks.clear();
     this.questions.prompt = null;
     this.boss = null;
     this.intermission = 0;
@@ -729,6 +733,12 @@ export class Game {
     play: (sound) => this.sound.play(sound),
     say: (message) => this.opts.onStatus?.(message),
     call: (text) => void this.voice.say('pilot', `${text}!`),
+    celebrate: (grade, big) => {
+      // With motion turned down the colour of the badge says it all.
+      if (this.reduceMotion) return;
+      const top = challengeTopY(this.h, this.inset.top, this.homeY, Boolean(this.questions.brk));
+      this.fireworks.launch(grade, big, this.w / 2, top + 40, Math.min(this.room / 2, 460), this.scale);
+    },
     feel: (mood, seconds) => this.feel(mood, seconds),
     taunt: (kind, mood, seconds) => this.taunt(kind, mood, seconds, 1, true),
     award: (points) => {
@@ -988,6 +998,7 @@ export class Game {
     this.time += dt;
     this.stateTime += dt;
     this.shake = Math.max(0, this.shake - dt);
+    this.fireworks.update(dt);
     this.timeScale += ((this.asking ? SLOW_MOTION : 1) - this.timeScale) * (1 - Math.exp(-dt * 9));
     const sim = dt * this.timeScale;
     this.banner = Math.max(0, this.banner - sim);
@@ -1727,6 +1738,7 @@ export class Game {
       ctx.fillRect(0, 0, w, h);
     }
 
+    renderFireworks(ctx, this.ink, this.fireworks);
     if (this.state !== 'ready') renderHud(hudCtx);
     renderMessages(hudCtx);
     if (alert !== null && this.state === 'playing' && !this.paused) renderAlert(hudCtx, alert);

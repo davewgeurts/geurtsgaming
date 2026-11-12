@@ -62,6 +62,15 @@ const ogImage = new URL(image, Astro.site ?? 'https://geurtsgaming.com');
       logo: 'https://geurtsgaming.com/logo.svg',
       description,
     })} />
+    <!-- Google tag (gtag.js) -->
+    <script is:inline async src="https://www.googletagmanager.com/gtag/js?id=G-R00Y85816Z"></script>
+    <script is:inline>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-R00Y85816Z');
+    </script>
+
     <slot name="head" />
   </head>
   <body>
