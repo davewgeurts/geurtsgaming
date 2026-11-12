@@ -315,21 +315,7 @@ export function shootBoss(b: Boss, x: number, y: number, env: BossEnv, aimed = t
     pod.cool = 0.7;
     pod.flash = 0.08;
     if (pod.hits < LOCK) return 'lock';
-    const right = pod.value === b.problem.answer;
-    // That ship is chosen, and this round of ships is over: the right one opens the armour, a wrong one sets the boss off.
-    for (const other of b.pods) {
-      const q = podPoint(b, other, s);
-      env.burst(POD, q.x, q.y, s, 0, other === pod ? (right ? NEON.lime : NEON.red) : NEON.yellow);
-    }
-    b.pods = [];
-    if (right) {
-      b.openFor = 5;
-    } else {
-      b.rage = 0.6;
-      b.nextSum = 1.4;
-      lashOut(env, b.x, b.y, volley(b) + 2, NEON.red);
-    }
-    return right ? 'right' : 'wrong';
+    return choosePod(b, pod, env);
   }
 
   const dist = Math.hypot(x - b.x, y - b.y);
@@ -349,6 +335,46 @@ export function shootBoss(b: Boss, x: number, y: number, env: BossEnv, aimed = t
 }
 
 /** Whether something of radius `r` at (x, y), such as the player's ship, is touching the boss. */
+/** That ship is chosen, and this round of ships is over: the right one opens the armour, a wrong one sets the boss off. */
+function choosePod(b: Boss, pod: Pod, env: BossEnv): 'right' | 'wrong' {
+  const s = env.scale * SIZE;
+  const right = pod.value === b.problem?.answer;
+  for (const other of b.pods) {
+    const q = podPoint(b, other, s);
+    env.burst(POD, q.x, q.y, s, 0, other === pod ? (right ? NEON.lime : NEON.red) : NEON.yellow);
+  }
+  b.pods = [];
+  if (right) {
+    b.openFor = 5;
+  } else {
+    b.rage = 0.6;
+    b.nextSum = 1.4;
+    lashOut(env, b.x, b.y, volley(b) + 2, NEON.red);
+  }
+  return right ? 'right' : 'wrong';
+}
+
+/**
+ * A tap or click at (x, y): if it lands on an answer ship, that ship is chosen there and then.
+ * This is how a sum boss is answered on a touch screen, where the ship never stops firing.
+ */
+export function tapBoss(b: Boss, x: number, y: number, env: BossEnv): Hit {
+  const s = env.scale * SIZE;
+  if (b.state !== 'fight' || !b.problem) return 'miss';
+  // Fingers are blunt: the nearest ship within a generous reach counts.
+  let best: Pod | null = null;
+  let bestDist = POD_R * s + 14;
+  for (const pod of b.pods) {
+    const p = podPoint(b, pod, s);
+    const dist = Math.hypot(x - p.x, y - p.y);
+    if (dist < bestDist) {
+      best = pod;
+      bestDist = dist;
+    }
+  }
+  return best ? choosePod(b, best, env) : 'miss';
+}
+
 export function touchesBoss(b: Boss, x: number, y: number, r: number, env: BossEnv): boolean {
   const s = env.scale * SIZE;
   if (b.state !== 'fight' && b.state !== 'enter') return false;

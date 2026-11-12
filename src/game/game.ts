@@ -10,11 +10,13 @@
  * - Upgrade capsules ask a question too; a right answer offers three upgrades to pick from (see upgrades.ts).
  * - Two wireframe faces watch from the top corners: the pilot's, and the boss's (see avatar.ts).
  * - Sound effects are synthesised (see sound.ts); the overlay's Sound button switches them off.
+ * - Behind it all, low-poly planets, moons and rocks drift by at different depths (see backdrop.ts).
  *
  * The questions live in challenge.ts (the rules), maths.ts and lines.ts (the content).
  */
 import { traceAvatar, type Mood, type Who } from './avatar';
-import { NEON, NEON_LIST, bossParts, createBoss, shootBoss, touchesBoss, updateBoss, type Boss, type BossEnv, type Hit } from './boss';
+import { Backdrop } from './backdrop';
+import { NEON, NEON_LIST, bossParts, createBoss, shootBoss, tapBoss, touchesBoss, updateBoss, type Boss, type BossEnv, type Hit } from './boss';
 import {
   accepts, choiceChallenge, choose, entryChallenge, lineChallenge, press, tick,
   type Challenge, type ChoiceChallenge, type LineChallenge,
@@ -23,13 +25,20 @@ import { advance, textWidth, traceText } from './font';
 import { LINES, TAUNTS, WORDS, type Taunt } from './lines';
 import { makeProblem } from './maths';
 import {
-  CAPSULE, DART, DRIFTER, FRIEND, HEX, MARK_BOMB, MARK_ENERGY, MARK_HULL, MARK_STAR, MINE, ROCKET, SHIP, segments, trace, type Shape,
+  CAPSULE, DART, DRIFTER, FRIEND, HEX, MARK_BOMB, MARK_ENERGY, MARK_HULL, MARK_STAR, MINE, MITE, ROCKET, SAUCER, SHARD, SHIP, SPINNER, SPLITTER,
+  WEAVER, segments, trace, type Shape,
 } from './shapes';
 import { Sound, type Sfx } from './sound';
 import { UPGRADES, offerUpgrades, type Upgrade, type UpgradeId } from './upgrades';
 
 const SAND = '#ecdfd2';
 const PINK = '#d98ac0';
+/** Enemies come in a few warm colours, one per family, so a new kind is easy to tell from an old one. */
+const LILAC = '#b3a0ff';
+const AMBER = '#f0b45a';
+const ROSE = '#ff7ab8';
+/** How far the scenery slides when the ship crosses the whole screen, as a share of the screen's width. */
+const PARALLAX = 0.3;
 const BEST_KEY = 'gg-arcade-best';
 const MAX_HULL = 3;
 /** Seconds a full energy gauge lasts. */
@@ -74,17 +83,27 @@ const GAME_KEYS = new Set([
 const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'Home', 'End']);
 
 type State = 'ready' | 'playing' | 'over';
-type Kind = 'drifter' | 'dart' | 'hex';
+type Kind = 'drifter' | 'dart' | 'hex' | 'weaver' | 'mite' | 'splitter' | 'shard' | 'spinner' | 'saucer';
 /** What a boost capsule pays out. A blast clears the screen. */
 type Reward = 'hull' | 'energy' | 'blast' | 'upgrade';
 /** What a question is being answered for: a capsule's reward, or to defuse a bomb. */
 type Stake = Reward | 'defuse';
 
-const KINDS: Record<Kind, { shape: Shape; radius: number; hp: number; points: number }> = {
-  drifter: { shape: DRIFTER, radius: 12, hp: 1, points: 50 },
-  dart: { shape: DART, radius: 11, hp: 1, points: 100 },
-  hex: { shape: HEX, radius: 15, hp: 2, points: 150 },
+const KINDS: Record<Kind, { shape: Shape; radius: number; hp: number; points: number; color: string }> = {
+  drifter: { shape: DRIFTER, radius: 12, hp: 1, points: 50, color: PINK },
+  dart: { shape: DART, radius: 11, hp: 1, points: 100, color: PINK },
+  hex: { shape: HEX, radius: 15, hp: 2, points: 150, color: PINK },
+  weaver: { shape: WEAVER, radius: 12, hp: 1, points: 80, color: LILAC },
+  mite: { shape: MITE, radius: 7, hp: 1, points: 30, color: LILAC },
+  splitter: { shape: SPLITTER, radius: 17, hp: 3, points: 120, color: AMBER },
+  shard: { shape: SHARD, radius: 8, hp: 1, points: 40, color: AMBER },
+  spinner: { shape: SPINNER, radius: 13, hp: 1, points: 90, color: ROSE },
+  saucer: { shape: SAUCER, radius: 16, hp: 2, points: 200, color: ROSE },
 };
+const ENEMY_COLORS = [PINK, LILAC, AMBER, ROSE];
+/** The groups a wave is built from, and the wave each first appears in. */
+type Group = 'drifters' | 'mites' | 'weavers' | 'spinners';
+const GROUP_FROM: Record<Group, number> = { drifters: 1, mites: 1, weavers: 2, spinners: 3 };
 
 const STAKES: Record<Stake, { mark: Shape; label: string; goal: string }> = {
   hull: { mark: MARK_HULL, label: 'HULL', goal: 'TO REPAIR THE HULL' },
@@ -98,13 +117,13 @@ interface Enemy {
   kind: Kind;
   x: number; y: number; vx: number; vy: number; rot: number;
   hp: number; age: number; flash: number; dead: boolean;
-  /** Drifter: centre line and sway of its snaking path. */
+  /** Drifter, weaver, spinner: centre line and width of its path. */
   anchorX: number; phase: number; amp: number;
-  /** Seconds until the next shot; 0 or less means it never fires (drifters) or fires now (hexes). */
+  /** Seconds until the next shot; 0 or less means it never fires (drifters) or fires now (hexes, saucers). */
   fireIn: number;
   /** Dart: has locked on. Hex: is leaving the screen. */
   committed: boolean;
-  /** Hex: the height it holds at. */
+  /** Hex, saucer: the height it holds at. Spinner: the height of the centre of its loop. */
   holdY: number;
 }
 interface Shot {
@@ -119,7 +138,7 @@ interface Rocket { x: number; y: number; vx: number; vy: number; age: number; de
 interface Beam { x: number; y: number; age: number }
 interface Debris { x: number; y: number; vx: number; vy: number; rot: number; spin: number; len: number; age: number; ttl: number; color: string }
 interface Star { x: number; y: number; speed: number; streak: boolean; tier: number }
-interface Spawn { at: number; kind: Kind; x: number; phase: number }
+interface Spawn { at: number; kind: Kind; x: number; phase: number; /** Weaver, saucer: which way it sets off, -1 or 1. */ dir?: number }
 /** A boost capsule drifting down the screen. Flying into it asks a question. */
 interface Pickup { reward: Reward; x: number; y: number; anchorX: number; phase: number; age: number; dead: boolean }
 /** A bomb drifting down the screen. Touching it means answering a question or losing the ship. */
@@ -251,6 +270,9 @@ export class Game {
   private mines: Mine[] = [];
   private rings: Ring[] = [];
   private stars: Star[] = [];
+  private readonly backdrop = new Backdrop();
+  /** Where the ship is across the screen, -0.5 to 0.5, smoothed: the scenery slides the other way. */
+  private drift = 0;
   private warp = 1;
   private shake = 0;
 
@@ -308,8 +330,22 @@ export class Game {
     this.raf = requestAnimationFrame(this.frame);
   }
 
+  /** Keep the score if it beats the best so far. Returns whether it did. */
+  private saveBest(): boolean {
+    if (this.score <= this.best) return false;
+    this.best = this.score;
+    try {
+      localStorage.setItem(BEST_KEY, String(this.best));
+    } catch {
+      /* see constructor */
+    }
+    return true;
+  }
+
   /** Stop the loop and remove every listener. The last frame stays on the canvas. */
   destroy(): void {
+    // Leaving in the middle of a record run still counts.
+    this.saveBest();
     cancelAnimationFrame(this.raf);
     this.sound.dispose();
     removeEventListener('keydown', this.onKeyDown);
@@ -418,6 +454,7 @@ export class Game {
 
     const count = Math.min(170, Math.floor((this.w * this.h) / 7500));
     this.stars = Array.from({ length: count }, () => this.makeStar(rand(0, this.h)));
+    this.backdrop.resize(this.w, this.h);
     if (!first) this.keepShipInBounds();
   };
 
@@ -508,11 +545,14 @@ export class Game {
   /** Pass a key to the open question, with a click for a key that counted and a buzz for a wrong letter. */
   private type(c: Challenge, key: string): void {
     const before = c.kind === 'line' ? c.index : c.kind === 'entry' ? c.typed.length : 0;
-    const misses = c.kind === 'line' ? c.misses : 0;
+    const misses = c.kind === 'choice' ? 0 : c.misses;
     press(c, key);
     if (c.kind === 'line') {
       if (c.index > before) this.sound.play('key');
       else if (c.misses > misses) this.sound.play('slip');
+    } else if (c.kind === 'entry' && c.misses > misses) {
+      this.sound.play('slip');
+      this.opts.onStatus?.(`Not quite. One more try. What is ${c.question}?`);
     } else if (c.kind === 'entry' && c.typed.length !== before) {
       this.sound.play('key');
     }
@@ -531,6 +571,7 @@ export class Game {
   private onVisibility = (): void => {
     cancelAnimationFrame(this.raf);
     if (document.hidden) {
+      this.saveBest();
       this.keys.clear();
       if (this.state === 'playing') this.paused = true;
     } else {
@@ -556,6 +597,14 @@ export class Game {
         if (touch) this.input = 'touch';
         choose(this.challenge, option);
         return;
+      }
+      // On a sum boss, a tap or click on a little ship chooses its answer.
+      if (this.state === 'playing' && !this.prompt && this.boss) {
+        const rect = this.canvas.getBoundingClientRect();
+        if (this.strikeBoss(e.clientX - rect.left, e.clientY - rect.top, true, true)) {
+          if (touch) this.input = 'touch';
+          return;
+        }
       }
     }
     if (touch) {
@@ -664,25 +713,49 @@ export class Game {
     this.opts.onStatus?.(`Wave ${n}.`);
   }
 
-  /** Each wave is chains of drifters, with darts from wave 2 and hexes from wave 3, plus boost capsules and bombs. */
+  /**
+   * A wave is a run of groups, one after another (a chain of drifters, a V of mites, a pair of weavers,
+   * a ring of spinners), with loners arriving in between: darts, hexes, splitters and saucers.
+   * New kinds join as the waves go by, and the wave a group first appears in always includes it.
+   */
   private buildWave(n: number): Spawn[] {
     const q: Spawn[] = [];
-    const chains = Math.min(6, 2 + Math.ceil(n / 2));
+    const sc = this.scale;
+    const slots = Math.min(6, 2 + Math.ceil(n / 2));
     const chainLength = Math.min(5, 3 + Math.floor(n / 3));
     const gap = Math.max(1.3, 2.6 - n * 0.15);
+    const known = (Object.keys(GROUP_FROM) as Group[]).filter((g) => GROUP_FROM[g] <= n);
+    const fresh = known.filter((g) => g !== 'drifters' && GROUP_FROM[g] === n);
     let t = 1.5;
-    for (let i = 0; i < chains; i++) {
+    for (let i = 0; i < slots; i++) {
+      // Open with drifters, show off anything new next, then mix (drifters stay the most common).
+      const group: Group = i === 0 ? 'drifters' : fresh[i - 1] ?? pick([...known, 'drifters']);
       const x = this.spawnX();
-      const phase = rand(0, Math.PI * 2);
-      for (let k = 0; k < chainLength; k++) q.push({ at: t + k * 0.42, kind: 'drifter', x, phase });
+      if (group === 'drifters') {
+        const phase = rand(0, Math.PI * 2);
+        for (let k = 0; k < chainLength; k++) q.push({ at: t + k * 0.42, kind: 'drifter', x, phase });
+      } else if (group === 'mites') {
+        // A V of five, the leader in front.
+        const reach = 44 * sc;
+        const lead = clamp(x, this.inset.left + this.margin + reach, Math.max(this.inset.left + this.margin + reach, this.w - this.inset.right - this.margin - reach));
+        for (let k = -2; k <= 2; k++) q.push({ at: t + Math.abs(k) * 0.16, kind: 'mite', x: lead + k * 22 * sc, phase: 0 });
+      } else if (group === 'weavers') {
+        const dir = Math.random() < 0.5 ? -1 : 1;
+        for (let k = 0; k < (n >= 5 ? 3 : 2); k++) q.push({ at: t + k * 0.55, kind: 'weaver', x, phase: 0, dir: k % 2 ? -dir : dir });
+      } else {
+        // Three spinners a third of a turn apart make a ring that turns as it comes down.
+        const phase = rand(0, Math.PI * 2);
+        for (let k = 0; k < 3; k++) q.push({ at: t, kind: 'spinner', x, phase: phase + (k * Math.PI * 2) / 3 });
+      }
       t += gap;
     }
-    if (n >= 2) {
-      for (let i = 0; i < Math.min(8, n + 1); i++) q.push({ at: rand(2.5, t + 1), kind: 'dart', x: this.spawnX(), phase: 0 });
-    }
-    if (n >= 3) {
-      for (let i = 0; i < Math.min(3, Math.floor((n - 1) / 2)); i++) q.push({ at: rand(2, t), kind: 'hex', x: this.spawnX(), phase: 0 });
-    }
+    const loners = (kind: Kind, count: number, from = 2.5) => {
+      for (let i = 0; i < count; i++) q.push({ at: rand(from, t + 1), kind, x: this.spawnX(), phase: 0, dir: Math.random() < 0.5 ? -1 : 1 });
+    };
+    if (n >= 2) loners('dart', Math.min(8, n + 1));
+    if (n >= 3) loners('hex', Math.min(3, Math.floor((n - 1) / 2)), 2);
+    if (n >= 3) loners('splitter', Math.min(3, Math.floor(n / 2)), 3);
+    if (n >= 4) loners('saucer', Math.min(2, Math.floor((n - 2) / 2)), 4);
     const moments = (count: number) => Array.from({ length: count }, () => rand(3, Math.max(4, t - 1))).sort((a, b) => a - b);
     this.pickupTimes = moments(n >= 4 ? 2 : 1);
     // One upgrade capsule a wave, for as long as there are upgrades left to earn.
@@ -696,27 +769,53 @@ export class Game {
     return rand(this.inset.left + m, Math.max(this.inset.left + m + 1, this.w - this.inset.right - m));
   }
 
-  private spawn(sp: Spawn): void {
-    const n = this.wave;
-    const kind = KINDS[sp.kind];
-    const e: Enemy = {
-      kind: sp.kind,
-      x: sp.x, y: -30, vx: 0, vy: 0, rot: 0,
-      hp: kind.hp, age: 0, flash: 0, dead: false,
-      anchorX: sp.x, phase: sp.phase, amp: 0,
+  private makeEnemy(kind: Kind, x: number, y: number, phase = 0): Enemy {
+    return {
+      kind,
+      x, y, vx: 0, vy: 0, rot: 0,
+      hp: KINDS[kind].hp, age: 0, flash: 0, dead: false,
+      anchorX: x, phase, amp: 0,
       fireIn: 0, committed: false, holdY: 0,
     };
+  }
+
+  private spawn(sp: Spawn): void {
+    const n = this.wave;
+    const sc = this.scale;
+    const e = this.makeEnemy(sp.kind, sp.x, -30, sp.phase);
+    const dir = sp.dir ?? 1;
     if (sp.kind === 'drifter') {
       e.vy = Math.min(112, 62 + n * 5) * this.pace;
-      e.amp = Math.min(rand(46, 72) * this.scale, this.w * 0.14);
+      e.amp = Math.min(rand(46, 72) * sc, this.w * 0.14);
       if (n >= 3 && Math.random() < 0.3) e.fireIn = rand(0.9, 2.4);
     } else if (sp.kind === 'dart') {
       e.vy = 60 * this.pace;
-    } else {
+    } else if (sp.kind === 'hex') {
       e.hp = n >= 6 ? 3 : 2;
       e.holdY = clamp(rand(this.h * 0.14, this.h * 0.34), this.inset.top + 90, this.h * 0.4);
       e.vx = (Math.random() < 0.5 ? -1 : 1) * Math.min(130, 70 + n * 6);
       e.fireIn = rand(1.2, 2.2);
+    } else if (sp.kind === 'weaver') {
+      e.vy = Math.min(120, 78 + n * 4) * this.pace;
+      e.vx = dir * Math.min(230, 150 + n * 8) * sc;
+      e.amp = Math.min(rand(90, 130) * sc, this.w * 0.24);
+    } else if (sp.kind === 'mite') {
+      e.vy = Math.min(210, 135 + n * 7) * this.pace;
+    } else if (sp.kind === 'splitter') {
+      e.vy = 46 * this.pace;
+      e.hp = n >= 7 ? 4 : 3;
+    } else if (sp.kind === 'spinner') {
+      e.amp = Math.min(rand(42, 58) * sc, this.w * 0.16);
+      e.vy = Math.min(84, 52 + n * 3) * this.pace;
+      e.holdY = -30 - e.amp;
+      e.y = e.holdY;
+    } else if (sp.kind === 'saucer') {
+      // Comes in from one side and leaves by the other.
+      e.x = dir > 0 ? -40 : this.w + 40;
+      e.vx = dir * Math.min(190, 115 + n * 7) * sc;
+      e.holdY = clamp(rand(this.h * 0.13, this.h * 0.3), this.inset.top + 90, this.h * 0.4);
+      e.y = e.holdY;
+      e.fireIn = rand(0.5, 1);
     }
     this.enemies.push(e);
   }
@@ -766,7 +865,7 @@ export class Game {
     this.sound.play('warning');
     this.opts.onStatus?.(
       this.boss.kind === 'sum'
-        ? 'Mini boss. Keep shooting the little ship carrying the right answer to open its armour, then shoot the red core.'
+        ? `Mini boss. ${this.input === 'touch' ? 'Tap' : 'Keep shooting'} the little ship carrying the right answer to open its armour, then shoot the red core.`
         : 'Mini boss. Shoot its arms off, and shoot the red core when its armour opens.',
     );
   }
@@ -831,8 +930,18 @@ export class Game {
     e.dead = true;
     this.feel('happy', 0.6, true);
     this.score += KINDS[e.kind].points;
-    this.burst(KINDS[e.kind].shape, e.x, e.y, this.scale, e.rot, PINK);
+    this.burst(KINDS[e.kind].shape, e.x, e.y, this.scale, e.rot, KINDS[e.kind].color);
     this.sound.play('boom');
+    if (e.kind === 'splitter') {
+      // Two shards fly out and down, one to each side.
+      for (const side of [-1, 1]) {
+        const shard = this.makeEnemy('shard', e.x + side * 8 * this.scale, e.y);
+        shard.vx = side * rand(90, 140) * this.scale;
+        shard.vy = rand(130, 170) * this.pace;
+        shard.rot = rand(0, Math.PI * 2);
+        this.enemies.push(shard);
+      }
+    }
   }
 
   private hitShip(): void {
@@ -905,15 +1014,7 @@ export class Game {
       this.boss.pods = [];
       this.boss.state = 'leaving';
     }
-    if (this.score > this.best) {
-      this.best = this.score;
-      this.newBest = true;
-      try {
-        localStorage.setItem(BEST_KEY, String(this.best));
-      } catch {
-        /* see constructor */
-      }
-    }
+    this.newBest = this.saveBest();
     this.setState('over');
     this.sound.play('over');
     this.opts.onStatus?.(`Game over. Score ${this.score}. Wave ${this.wave}.`);
@@ -1089,7 +1190,8 @@ export class Game {
       this.input === 'touch' || roll < 0.4
         ? this.sum(PROMPT_SECONDS, PROMPT_GRACE)
         : roll < 0.7
-          ? entryChallenge(makeProblem(this.level), PROMPT_SECONDS, PROMPT_GRACE)
+          ? // A bomb is do or die, so one slip of the finger on a typed answer is forgiven.
+            entryChallenge(makeProblem(this.level), PROMPT_SECONDS, PROMPT_GRACE, stake === 'defuse' ? 1 : 0)
           : lineChallenge(this.text(WORDS), PROMPT_SECONDS, PROMPT_GRACE);
     this.prompt = { stake, challenge, settled: false, fatal: false, note: '', hold: 0, offer: null, offerAge: 0 };
     this.sound.play(stake === 'defuse' ? 'bomb' : 'capsule');
@@ -1230,6 +1332,10 @@ export class Game {
       star.y += star.speed * this.warp * sim;
       if (star.y > this.h + 80) Object.assign(star, this.makeStar(-rand(10, 80)));
     }
+    this.backdrop.update(sim, this.warp);
+    // The scenery slides against the ship: a little for what is far away, a lot for what is near.
+    const across = this.reduceMotion ? 0 : clamp(this.ship.x / (this.w || 1) - 0.5, -0.5, 0.5);
+    this.drift += (across - this.drift) * (1 - Math.exp(-dt * 3));
 
     for (const d of this.debris) {
       d.age += sim;
@@ -1338,9 +1444,11 @@ export class Game {
         shoot(-8, 6, 0);
         shoot(8, 6, 0);
       } else {
+        // The wing cannons fan out to sweep a wave, and point straight ahead to pound a boss.
+        const fan = this.boss ? 0 : 105 * sc;
         shoot(0, 18, 0);
-        shoot(-8, 6, -105 * sc);
-        shoot(8, 6, 105 * sc);
+        shoot(-8, 6, -fan);
+        shoot(8, 6, fan);
       }
       if (has('wide')) {
         shoot(-10, 4, -215 * sc, SAND, true);
@@ -1351,7 +1459,8 @@ export class Game {
         shoot(WING, 0, 0, NEON.lime, true);
       }
     }
-    this.energy = Math.max(0, this.energy - dt / ENERGY_SECONDS);
+    // Energy only runs down while there is something to fight, so none is wasted waiting for a wave to arrive.
+    if (this.enemies.length || this.boss?.state === 'fight') this.energy = Math.max(0, this.energy - dt / ENERGY_SECONDS);
   }
 
   private updateWave(dt: number): void {
@@ -1532,10 +1641,10 @@ export class Game {
   }
 
   /** Land a hit on the boss at (x, y), if any part of it is there, and let it react. Returns whether something was hit. */
-  private strikeBoss(x: number, y: number, aimed = true): boolean {
+  private strikeBoss(x: number, y: number, aimed = true, tapped = false): boolean {
     const b = this.boss;
     if (!b) return false;
-    const hit = shootBoss(b, x, y, this.bossEnv(), aimed);
+    const hit = tapped ? tapBoss(b, x, y, this.bossEnv()) : shootBoss(b, x, y, this.bossEnv(), aimed);
     if (hit === 'miss') return false;
     const v = this.villain;
     this.spark(x, y, hit === 'blocked' ? NEON.cyan : hit === 'lock' ? NEON.yellow : NEON.red);
@@ -1606,6 +1715,41 @@ export class Game {
         }
         e.x += e.vx * dt;
         e.y += e.vy * dt;
+      } else if (e.kind === 'weaver') {
+        // Sharp diagonals: it turns back at the edge of its lane, or of the screen.
+        e.x += e.vx * dt;
+        e.y += e.vy * dt;
+        const off = e.x - e.anchorX;
+        if ((Math.abs(off) > e.amp && off * e.vx > 0) || (e.x < left && e.vx < 0) || (e.x > right && e.vx > 0)) e.vx = -e.vx;
+        e.rot += (-Math.sign(e.vx) * 0.5 - e.rot) * (1 - Math.exp(-dt * 14));
+      } else if (e.kind === 'mite') {
+        e.y += e.vy * dt;
+        e.x = clamp(e.anchorX + Math.sin(e.age * 3.2) * 9 * this.scale, left, right);
+      } else if (e.kind === 'splitter') {
+        e.y += e.vy * dt;
+        e.rot += dt * 0.5;
+      } else if (e.kind === 'shard') {
+        e.x += e.vx * dt;
+        e.y += e.vy * dt;
+        e.rot += dt * 6;
+        if ((e.x < left && e.vx < 0) || (e.x > right && e.vx > 0)) e.vx = -e.vx;
+      } else if (e.kind === 'spinner') {
+        // A loop whose centre sinks: with three of them a third of a turn apart, a turning ring.
+        const turn = e.age * 2.3 + e.phase;
+        e.holdY += e.vy * dt;
+        e.x = clamp(e.anchorX + Math.cos(turn) * e.amp, left, right);
+        e.y = e.holdY + Math.sin(turn) * e.amp * 0.62;
+        e.rot += dt * 5;
+      } else if (e.kind === 'saucer') {
+        e.x += e.vx * dt;
+        e.y = e.holdY + Math.sin(e.age * 2.4) * 7 * this.scale;
+        e.rot = Math.sin(e.age * 2.4 + 1) * 0.12;
+        e.fireIn -= dt;
+        if (e.fireIn <= 0 && playing && e.x > left && e.x < right) {
+          e.fireIn = Math.max(0.75, 1.5 - this.wave * 0.06);
+          this.shots.push({ x: e.x, y: e.y + 9 * this.scale, vx: 0, vy: 250 * this.pace, hostile: true, dead: false, color: KINDS.saucer.color });
+          this.sound.play('enemyShot');
+        }
       } else {
         e.rot += dt * 1.4;
         if (!e.committed && (e.age > 16 || !playing)) {
@@ -1663,7 +1807,8 @@ export class Game {
         }
         continue;
       }
-      if (this.strikeBoss(s.x, s.y, !s.stray)) {
+      // On a touch screen the ship fires all the time, so its shots cannot choose an answer: a tap does that.
+      if (this.strikeBoss(s.x, s.y, !s.stray && this.input !== 'touch')) {
         s.dead = true;
         continue;
       }
@@ -1746,24 +1891,35 @@ export class Game {
     ctx.save();
     if (this.shake > 0) ctx.translate(rand(-1, 1) * this.shake * 14, rand(-1, 1) * this.shake * 14);
 
+    // A star's speed is its depth: the faster it falls, the nearer it is, and the further it slides
+    // against the ship. Stars that slide off one side come back on the other.
+    const shift = -this.drift * w * PARALLAX;
+    const starX = (star: Star): number => {
+      const x = (star.x + (shift * star.speed) / 420) % w;
+      return x < 0 ? x + w : x;
+    };
     // Stars, batched by brightness so each tier is a single stroke.
     for (let tier = 0; tier < 3; tier++) {
       this.ink(SAND, [0.22, 0.45, 0.8][tier]!, 1.2, () => {
         for (const star of this.stars) {
           if (star.streak || star.tier !== tier) continue;
-          ctx.moveTo(star.x, star.y);
-          ctx.lineTo(star.x, star.y + Math.max(0.6, star.speed * this.warp * 0.02));
+          const x = starX(star);
+          ctx.moveTo(x, star.y);
+          ctx.lineTo(x, star.y + Math.max(0.6, star.speed * this.warp * 0.02));
         }
       }, false);
     }
+    // Planets, moons and rocks go over the stars (they hide them) and under everything else.
+    this.backdrop.render(ctx, shift);
     // Streaks are quiet sand in a wave and turn neon while a boss is on screen.
     const streakColors = this.boss ? [NEON.cyan, NEON.violet, NEON.lime] : [SAND];
     streakColors.forEach((color, band) => {
       this.ink(color, this.boss ? 0.4 : 0.16, 1, () => {
         this.stars.forEach((star, i) => {
           if (!star.streak || i % streakColors.length !== band) return;
-          ctx.moveTo(star.x, star.y);
-          ctx.lineTo(star.x, star.y + star.speed * (0.08 + this.warp * 0.035));
+          const x = starX(star);
+          ctx.moveTo(x, star.y);
+          ctx.lineTo(x, star.y + star.speed * (0.08 + this.warp * 0.035));
         });
       }, false);
     });
@@ -1809,9 +1965,12 @@ export class Game {
       });
     }
 
-    this.ink(PINK, 1, 1.6, () => {
-      for (const e of this.enemies) if (e.flash <= 0) trace(ctx, KINDS[e.kind].shape, e.x, e.y, sc, e.rot);
-    });
+    for (const color of ENEMY_COLORS) {
+      if (!this.enemies.some((e) => e.flash <= 0 && KINDS[e.kind].color === color)) continue;
+      this.ink(color, 1, 1.6, () => {
+        for (const e of this.enemies) if (e.flash <= 0 && KINDS[e.kind].color === color) trace(ctx, KINDS[e.kind].shape, e.x, e.y, sc, e.rot);
+      });
+    }
     // Enemy shots are diamonds in the colour of whatever fired them.
     for (const color of new Set(this.shots.filter((s) => s.hostile).map((s) => s.color))) {
       this.ink(color, 1, 1.6, () => {
@@ -1877,6 +2036,11 @@ export class Game {
       if (b.problem && b.pods.length) {
         const question = `${b.problem.question} = ?`;
         this.ink(NEON.yellow, 1, 1.8, () => traceText(ctx, question, b.x, b.y - 100 * sc, 18, 'center'));
+        // On a touch screen the answer is tapped, not shot, and that needs saying while the ships are there.
+        if (this.input === 'touch') {
+          const x = clamp(b.x, this.inset.left + 70, w - this.inset.right - 70);
+          this.ink(NEON.yellow, 0.6 + 0.3 * Math.sin(this.time * 6), 1.2, () => traceText(ctx, 'TAP THE ANSWER', x, b.y + 150 * sc, 9, 'center'), false);
+        }
       }
     }
 
@@ -2144,7 +2308,9 @@ export class Game {
       const flash = Math.floor(this.time * 7) % 2 === 0;
       this.centred('WARNING', mid, 30, 1, flash ? NEON.red : NEON.yellow);
       this.centred(
-        this.boss.kind === 'sum' ? 'BLAST THE RIGHT ANSWER TO CRACK ITS ARMOUR' : 'HIT THE RED CORE WHEN ITS ARMOUR OPENS',
+        this.boss.kind === 'sum'
+          ? `${this.input === 'touch' ? 'TAP' : 'BLAST'} THE RIGHT ANSWER TO CRACK ITS ARMOUR`
+          : 'HIT THE RED CORE WHEN ITS ARMOUR OPENS',
         mid + 56, 11, 0.9, NEON.cyan,
       );
       return;
@@ -2266,7 +2432,10 @@ export class Game {
         // The answer field: what has been typed so far, and a cursor after it.
         const field = { x: this.w / 2 - 66, y: top + 76, w: 132, h: 50 };
         const right = done && c.outcome?.success;
-        this.ink(right ? PINK : SAND, alpha, right ? 2.6 : 1.5, () => ctx.rect(field.x, field.y, field.w, field.h));
+        // The field flashes red, and shakes, when a wrong answer has just been wiped for a second try.
+        const wiped = !done && c.error > 0;
+        if (wiped && !this.reduceMotion) field.x += rand(-3, 3);
+        this.ink(right ? PINK : wiped ? NEON.red : SAND, alpha, right || wiped ? 2.6 : 1.5, () => ctx.rect(field.x, field.y, field.w, field.h));
         const typedWidth = textWidth(c.typed, 18);
         if (c.typed) this.ink(right ? PINK : SAND, alpha, 1.8, () => traceText(ctx, c.typed, this.w / 2, field.y + 16, 18, 'center'));
         if (!done && this.time % 0.9 < 0.55) {
@@ -2291,8 +2460,9 @@ export class Game {
             : `${c.timeLeft <= 0 ? 'OUT OF TIME' : 'NOT QUITE'} - ${c.question} = ${c.kind === 'choice' ? c.options[c.correct] : c.answer}`;
       this.centred(said, hintY, 10, 1, o.success ? PINK : SAND);
     } else if (c.kind !== 'line') {
-      const how = c.kind === 'entry' ? 'TYPE THE ANSWER' : this.input === 'keys' ? 'CLICK AN ANSWER OR PRESS ITS NUMBER' : 'TAP THE ANSWER';
-      this.centred(how, hintY, 8, alpha * 0.6);
+      const again = c.kind === 'entry' && c.misses > 0;
+      const how = again ? 'NOT QUITE - ONE MORE TRY' : c.kind === 'entry' ? 'TYPE THE ANSWER' : this.input === 'keys' ? 'CLICK AN ANSWER OR PRESS ITS NUMBER' : 'TAP THE ANSWER';
+      this.centred(how, hintY, again ? 10 : 8, alpha * (again ? 1 : 0.6), again ? NEON.red : SAND);
     }
   }
 

@@ -39,6 +39,39 @@ export const DART: Shape = [closed([0, 15], [8, -11], [0, -5], [-8, -11]), open(
 /** Tough enemy that holds position, spins and fires aimed shots. */
 export const HEX: Shape = [closed(...ngon(6, 15)), closed(...ngon(3, 7, -Math.PI / 2))];
 
+/** Zigzags down the screen in sharp diagonals. Drawn nose down. */
+export const WEAVER: Shape = [
+  closed([0, 11], [13, -9], [6, -10], [0, -1], [-6, -10], [-13, -9]),
+  open([-4, 3], [0, 7], [4, 3]),
+];
+
+/** Tiny, quick, and never alone: mites fly in a V. Drawn nose down. */
+export const MITE: Shape = [closed([0, 8], [6, -6], [0, -2], [-6, -6])];
+
+/** A slow lump that breaks into two shards when it is destroyed. The crack shows where. */
+export const SPLITTER: Shape = [
+  closed(...ngon(8, 17, Math.PI / 8)),
+  open([-1, -15.5], [-5, -5], [4, 2], [-1, 15.5]),
+];
+export const SHARD: Shape = [closed([-1, -10], [7, 5], [-6, 7]), open([-1, -10], [0, 4])];
+
+/** A pinwheel that spirals down in a ring of three. */
+export const SPINNER: Shape = [
+  closed(...ngon(4, 5)),
+  ...Array.from({ length: 4 }, (_, i) => {
+    const a = (i * Math.PI) / 2;
+    const at = (r: number, turn: number): Pt => [round1(Math.cos(a + turn) * r), round1(Math.sin(a + turn) * r)];
+    return open(at(5, 0), at(14, 0), at(11, 0.7));
+  }),
+];
+
+/** Crosses the top of the screen, dropping shots as it goes. */
+export const SAUCER: Shape = [
+  closed([-19, 2], [-9, -4], [9, -4], [19, 2], [9, 7], [-9, 7]),
+  open([-6, -4], [-3, -10], [3, -10], [6, -4]),
+  open([-19, 2], [19, 2]),
+];
+
 /** Boost capsule: the ring, and the mark inside that says what it holds. */
 export const CAPSULE: Shape = [closed(...ngon(8, 13, Math.PI / 8))];
 export const MARK_HULL: Shape = [open([-6, 0], [6, 0]), open([0, -6], [0, 6])];

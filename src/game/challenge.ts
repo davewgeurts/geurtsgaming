@@ -48,6 +48,9 @@ export interface EntryChallenge extends Common {
   question: string;
   answer: string;
   typed: string;
+  /** Wrong answers still allowed before the question is failed, and how many have been given. */
+  retries: number;
+  misses: number;
 }
 export type Challenge = LineChallenge | ChoiceChallenge | EntryChallenge;
 
@@ -73,8 +76,9 @@ export function choiceChallenge(problem: Problem, limit: number, grace: number):
   };
 }
 
-export function entryChallenge(problem: Problem, limit: number, grace: number): EntryChallenge {
-  return { kind: 'entry', question: problem.question, answer: String(problem.answer), typed: '', ...common(limit, grace) };
+/** `retries` is how many wrong answers are forgiven: the field clears and the clock keeps running. */
+export function entryChallenge(problem: Problem, limit: number, grace: number, retries = 0): EntryChallenge {
+  return { kind: 'entry', question: problem.question, answer: String(problem.answer), typed: '', retries, misses: 0, ...common(limit, grace) };
 }
 
 function settle(c: Challenge, success: boolean): void {
@@ -121,7 +125,16 @@ export function press(c: Challenge, key: string): void {
   } else {
     c.typed += key;
     // The answer is checked as soon as it has as many digits as the right one: no Enter key to hunt for.
-    if (c.typed.length >= c.answer.length) settle(c, c.typed === c.answer);
+    if (c.typed.length < c.answer.length) return;
+    if (c.typed === c.answer || c.retries <= 0) {
+      settle(c, c.typed === c.answer);
+    } else {
+      // A slip of the finger, forgiven: wipe the field and let them try again.
+      c.retries -= 1;
+      c.misses += 1;
+      c.typed = '';
+      c.error = 0.45;
+    }
   }
 }
 

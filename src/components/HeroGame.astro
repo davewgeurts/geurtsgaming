@@ -294,15 +294,25 @@
         document.documentElement.classList.add('game-active');
         rest().forEach((el) => (el.inert = true));
         announce(true);
+        try {
+          game = new Game(canvas, {
+            from,
+            onExit: () => close(),
+            onStatus: (message) => {
+              if (status) status.textContent = message;
+            },
+          });
+        } catch (error) {
+          // The game could not start (no canvas support, say): put the page back exactly as it was.
+          overlay.hidden = true;
+          document.documentElement.classList.remove('game-active');
+          rest().forEach((el) => (el.inert = false));
+          announce(false);
+          console.error('The arcade demo could not start.', error);
+          return;
+        }
         // Give the game its own history entry, so Back (and the Android back gesture) closes it instead of leaving the site.
         history.pushState({ ggGame: true }, '');
-        game = new Game(canvas, {
-          from,
-          onExit: () => close(),
-          onStatus: (message) => {
-            if (status) status.textContent = message;
-          },
-        });
         sound?.setAttribute('aria-pressed', String(game.soundOn));
         overlay.focus({ preventScroll: true });
         // Flush styles so the backdrop fades in from its hidden state.
