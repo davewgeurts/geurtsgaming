@@ -1,6 +1,8 @@
 /**
- * The opening of the arcade demo, seen from the pilot's seat.
+ * The opening of the arcade demo.
  *
+ * - Hangar: the pilot walks through the school's hangar and climbs into the ship (all of that is hangar.ts).
+ *   Then the view cuts to the pilot's seat:
  * - Briefing: the ship sits on the runway of a low-poly base. Through the windscreen: the runway, the
  *   base's buildings, hills, and the same far-off planets the game is played over. On the comms screen
  *   the flight commander explains how to play. The pilot launches whenever they like.
@@ -14,10 +16,11 @@
  */
 import { traceAvatar, type Mood } from './avatar';
 import { textWidth, traceText } from './font';
+import { HANGAR_SCRIPT, Hangar, type HangarCue } from './hangar';
 import { BRIEFING } from './lines';
 
 export type Ink = (color: string, alpha: number, width: number, build: () => void, glow?: boolean) => void;
-export type IntroCue = 'radio' | 'liftoff' | 'sonic';
+export type IntroCue = 'radio' | 'liftoff' | 'sonic' | HangarCue;
 
 /** How game.ts should draw the sky, and where the ship is, at this moment of the intro. */
 export interface IntroView {
@@ -36,6 +39,10 @@ export interface IntroView {
   ship: number;
   /** How hard the picture shakes, 0 to 1. */
   shake: number;
+  /** In the hangar: the outline of the door, which is the only place the sky shows. null everywhere else. */
+  sky: ((ctx: CanvasRenderingContext2D) => void) | null;
+  /** How dark the whole screen is, 0 to 1: the cut from the hangar to the cockpit is a fade through black. */
+  curtain: number;
 }
 
 export interface IntroFrame {
@@ -75,6 +82,9 @@ const FADE_TO = 110;
 const TYPE_RATE = 46;
 const LINE_HOLD = 2.3;
 
+/** Seconds the cockpit takes to fade in after the hangar. */
+const FADE_IN = 0.45;
+
 const BASE = 'rgb(3, 7, 26)';
 const SAND = '#ecdfd2';
 const CYAN = '#42f5ff';
@@ -111,10 +121,12 @@ function wrap(text: string, size: number, width: number): string[] {
 }
 
 export class Intro {
-  phase: 'brief' | 'launch' = 'brief';
+  phase: 'hangar' | 'brief' | 'launch';
   /** Seconds since this phase began. */
   t = 0;
   done = false;
+  /** The scene in the hangar. People who have asked for less motion go straight to the cockpit instead. */
+  private readonly hangar: Hangar | null;
 
   private camZ = 0;
   private camY = EYE;
@@ -134,6 +146,8 @@ export class Intro {
     private readonly reduceMotion: boolean,
     private readonly cue: (cue: IntroCue) => void,
   ) {
+    this.hangar = reduceMotion ? null : new Hangar(cue);
+    this.phase = this.hangar ? 'hangar' : 'brief';
     // The base: a control tower by the runway, then huts, domes and masts down both sides.
     this.blocks.push({ kind: 'tower', x: -24, z: 96, w: 5, d: 5, h: 30, tint: CYAN, dish: false });
     let side = 1;
@@ -157,9 +171,16 @@ export class Intro {
     }
   }
 
-  /** Every line of the briefing, for a screen reader. */
-  static script(touch: boolean): string {
-    return `In the cockpit, on the runway. ${BRIEFING[touch ? 'touch' : 'keys'].join(' ')}`;
+  /** What happens before take-off, and every line of the briefing, for a screen reader. */
+  static script(touch: boolean, hangar: boolean): string {
+    return `${hangar ? `${HANGAR_SCRIPT} Then: in` : 'In'} the cockpit, on the runway. ${BRIEFING[touch ? 'touch' : 'keys'].join(' ')}`;
+  }
+
+  /** The pilot has pressed the button (or tapped): move things on, whatever is happening. */
+  advance(): void {
+    if (this.phase === 'hangar') this.hangar?.skip();
+    else if (this.phase === 'brief') this.launch();
+    else this.skip();
   }
 
   private say(text: string): void {
@@ -190,6 +211,14 @@ export class Intro {
 
   update(dt: number, touch: boolean): void {
     this.t += dt;
+    if (this.phase === 'hangar' && this.hangar) {
+      this.hangar.update(dt);
+      if (this.hangar.done) {
+        this.phase = 'brief';
+        this.t = 0;
+      }
+      return;
+    }
     this.saidAge += dt;
     if (this.phase === 'brief') {
       const lines = BRIEFING[touch ? 'touch' : 'keys'];
@@ -251,6 +280,11 @@ export class Intro {
   }
 
   view(w: number, h: number): IntroView {
+    if (this.phase === 'hangar' && this.hangar) {
+      // In the hangar the sky is as the game has it, standing still, and seen only through the door.
+      this.hangar.layout(w, h);
+      return { lift: 0, horizon: null, vanish: null, speed: 0, stretch: 1, settle: 0, ship: 0, shake: 0, sky: this.hangar.clipSky, curtain: this.hangar.curtain };
+    }
     const launching = this.phase === 'launch';
     const t = launching ? this.t : 0;
     const climb = launching ? smooth((t - T_CLIMB) / CLIMB) : 0;
@@ -272,6 +306,8 @@ export class Intro {
       settle: smooth(hand),
       ship: smooth(hand),
       shake: rumble,
+      sky: null,
+      curtain: this.hangar && this.phase === 'brief' ? Math.max(0, 1 - this.t / FADE_IN) : 0,
     };
   }
 
@@ -279,6 +315,10 @@ export class Intro {
 
   /** The base, its runway and the land around it, seen from the cockpit. Drawn over the sky, under the cockpit. */
   renderGround(f: IntroFrame): void {
+    if (this.phase === 'hangar') {
+      this.hangar?.render(f);
+      return;
+    }
     const solid = this.ground;
     if (solid <= 0) return;
     const { ctx, ink, w, h, time } = f;
@@ -358,7 +398,8 @@ export class Intro {
         for (let x = -5; x <= 5; x += 2) seg(x, 0, RUNWAY_END - 20, x, 0, RUNWAY_END - 6);
       });
       // Lights down both edges, lit in turn so that they run away towards the horizon.
-      const beat = Math.floor(time * 9);
+      // (For people who have asked for less motion they hold still.)
+      const beat = this.reduceMotion ? 1 : Math.floor(time * 9);
       for (const lit of [false, true]) {
         ink(lit ? YELLOW : CYAN, (lit ? 1 : 0.45) * solid, lit ? 2 : 1.2, () => {
           for (let i = 0; i * 24 < RUNWAY_END; i++) {
@@ -433,7 +474,7 @@ export class Intro {
   renderCockpit(f: IntroFrame): void {
     const { ctx, ink, w, h, inset, time, touch } = f;
     const hand = this.handover;
-    if (hand >= 1) return;
+    if (hand >= 1 || this.phase === 'hangar') return;
     const launching = this.phase === 'launch';
     const dash = this.dash(h);
     const eye = this.eye(h);
@@ -453,7 +494,7 @@ export class Intro {
       if (time % 1.1 < 0.75) ink(SAND, alpha, 1.8, () => traceText(ctx, ask, w / 2, eye * 0.42, size, 'center'));
     } else if (this.t > T_SONIC && hand < 0.4) {
       const size = Math.min(26, (26 * (w - 40)) / textWidth('SUPERSONIC', 26));
-      const flash = Math.floor(time * 9) % 2 === 0;
+      const flash = this.reduceMotion || Math.floor(time * 9) % 2 === 0;
       ink(flash ? CYAN : YELLOW, 1, 2, () => traceText(ctx, 'SUPERSONIC', w / 2, eye * 0.42, size, 'center'));
     }
 
@@ -521,15 +562,17 @@ export class Intro {
     this.renderCommander(f, left, panelTop, screen);
 
     const textX = left + screen + 14;
-    const size = wide ? 11 : 9;
+    // Larger print on a big screen, where there is room for it.
+    const big = w >= 1000 && h >= 640;
+    const size = big ? 13 : wide ? 11 : 9;
     const textWidthMax = (wide ? Math.min(right - 250, textX + 560) : right) - textX;
-    ink(CYAN, 0.8, 1.1, () => traceText(ctx, 'FLIGHT COMMAND', textX, panelTop + 1, 7), false);
+    ink(CYAN, 0.8, 1.1, () => traceText(ctx, 'FLIGHT COMMAND', textX, panelTop + 1, big ? 9 : 7), false);
     const lines = wrap(this.said, size, textWidthMax);
     let budget = Math.floor(this.saidAge * TYPE_RATE);
     ink(SAND, 1, 1.4, () => {
       lines.forEach((line, i) => {
         if (budget <= 0) return;
-        traceText(ctx, line.slice(0, budget), textX, panelTop + 16 + i * (size + 7), size);
+        traceText(ctx, line.slice(0, budget), textX, panelTop + (big ? 20 : 16) + i * (size + 7), size);
         budget -= line.length + 1;
       });
     });

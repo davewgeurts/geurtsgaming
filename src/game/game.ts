@@ -10,12 +10,18 @@
  * - Upgrade capsules ask a question too; a right answer offers three upgrades to pick from (see upgrades.ts).
  * - Two wireframe faces watch from the top corners: the pilot's, and the boss's (see avatar.ts).
  * - Sound effects are synthesised (see sound.ts); the overlay's Sound button switches them off.
+ * - Every enemy ship holds somebody prisoner. Destroying it sets them free, and they fly up to be counted;
+ *   a beaten boss lets out a whole crowd.
+ * - Half way through each wave a fuel ship arrives (see tanker.ts): hook on to its fuel line and stay on.
+ * - Later in the wave the flight commander bursts in with a warning, and an asteroid field follows
+ *   (see asteroids.ts): two winding ways through, an easy one with bombs in it and a hard one with power-ups.
  * - Behind it all, low-poly planets, moons and rocks drift by at different depths (see backdrop.ts).
  * - It opens in the cockpit: a briefing from the flight commander, then a take-off that hands over to
  *   the top-down view (see intro.ts).
  *
  * The questions live in challenge.ts (the rules), maths.ts and lines.ts (the content).
  */
+import { createField, gapAt, updateField, type Field, type FieldEnv, type Rock } from './asteroids';
 import { traceAvatar, type Mood, type Who } from './avatar';
 import { Backdrop } from './backdrop';
 import { NEON, NEON_LIST, bossParts, createBoss, shootBoss, tapBoss, touchesBoss, updateBoss, type Boss, type BossEnv, type Hit } from './boss';
@@ -25,13 +31,14 @@ import {
 } from './challenge';
 import { advance, textWidth, traceText } from './font';
 import { Intro, type Ink, type IntroCue, type IntroView } from './intro';
-import { LINES, TAUNTS, WORDS, type Taunt } from './lines';
+import { BRIEFING, LINES, TAUNTS, WORDS, type Taunt } from './lines';
 import { makeProblem } from './maths';
 import {
-  CAPSULE, DART, DRIFTER, FRIEND, HEX, MARK_BOMB, MARK_ENERGY, MARK_HULL, MARK_STAR, MINE, MITE, ROCKET, SAUCER, SHARD, SHIP, SPINNER, SPLITTER,
-  WEAVER, segments, trace, type Shape,
+  CAPSULE, DART, DRIFTER, DROGUE, FRIEND, HEX, MARK_BOMB, MARK_ENERGY, MARK_HULL, MARK_STAR, MINE, MITE, PERSON_OUT, PERSON_UP, ROCKET, SAUCER,
+  SHARD, SHIP, SPINNER, SPLITTER, TANKER, WEAVER, segments, trace, type Shape,
 } from './shapes';
 import { Sound, type Sfx } from './sound';
+import { FUEL_SECONDS, TANKER_SIZE, createTanker, dismissTanker, tankerTail, updateTanker, type Tanker, type TankerEnv } from './tanker';
 import { UPGRADES, offerUpgrades, type Upgrade, type UpgradeId } from './upgrades';
 
 const SAND = '#ecdfd2';
@@ -40,6 +47,28 @@ const PINK = '#d98ac0';
 const LILAC = '#b3a0ff';
 const AMBER = '#f0b45a';
 const ROSE = '#ff7ab8';
+/** The people set free are drawn in the brightest colour in the game, and so is their count. */
+const SOUL = '#f4fbff';
+/** Seconds somebody just set free drifts about before flying up to be counted, and the most drawn at once. */
+const SOUL_FLOAT = 0.7;
+const MAX_SOULS = 80;
+/** Points for filling the tank from the fuel ship. */
+const FULL_TANK_POINTS = 400;
+/** Rocks: the tough ones are dull, the little ones that break at a touch are bright. */
+const ROCK = '#7c8fa8';
+const PEBBLE = '#d7e3f2';
+/**
+ * The commander's warning: how long it is on screen, when the commander turns from the alarm to the choice
+ * of ways through, and how far in the asteroids set off.
+ */
+const ALERT_SECONDS = 6;
+const ALERT_TURN = 2.4;
+const ALERT_LEAD = 3.4;
+/** Points for breaking a little rock and a tough one, for getting through a field, and for doing it without a scratch. */
+const PEBBLE_POINTS = 20;
+const ROCK_POINTS = 150;
+const FIELD_POINTS = 150;
+const CLEAN_FIELD_POINTS = 400;
 /** How far the scenery slides when the ship crosses the whole screen, as a share of the screen's width. */
 const PARALLAX = 0.3;
 const BEST_KEY = 'gg-arcade-best';
@@ -75,6 +104,13 @@ const SHIELD_SECONDS = 12;
 /** How far out to each side the wingmates fly, and how far from the ship the guardian circles (px at scale 1). */
 const WING = 30;
 const ORBIT = 46;
+
+/**
+ * On a short screen: how far in from the right edge the boss's corner reaches (its face, then its health
+ * bar and its taunts, which are kept to SHORT_TAUNT px wide there).
+ */
+const SHORT_TAUNT = 130;
+const BOSS_CORNER = 12 + 50 + 10 + SHORT_TAUNT + 10;
 
 const GAME_KEYS = new Set([
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
@@ -143,13 +179,23 @@ interface Debris { x: number; y: number; vx: number; vy: number; rot: number; sp
 interface Star { x: number; y: number; speed: number; streak: boolean; tier: number }
 interface Spawn { at: number; kind: Kind; x: number; phase: number; /** Weaver, saucer: which way it sets off, -1 or 1. */ dir?: number }
 /** A boost capsule drifting down the screen. Flying into it asks a question. */
-interface Pickup { reward: Reward; x: number; y: number; anchorX: number; phase: number; age: number; dead: boolean }
+interface Pickup {
+  reward: Reward; x: number; y: number; anchorX: number; phase: number; age: number; dead: boolean;
+  /** A power-up in an asteroid field: it falls at this speed, in step with the rocks, and does not sway. */
+  ride?: number;
+}
 /** A bomb drifting down the screen. Touching it means answering a question or losing the ship. */
 /** A hazard bomb. One thrown by a boss drifts after the ship. */
-interface Mine { x: number; y: number; anchorX: number; phase: number; age: number; dead: boolean; thrown: boolean }
+interface Mine {
+  x: number; y: number; anchorX: number; phase: number; age: number; dead: boolean; thrown: boolean;
+  /** A bomb in an asteroid field: it falls at this speed, in step with the rocks, and does not sway. */
+  ride?: number;
+}
 /** An expanding shockwave. A negative age delays it. */
 /** An expanding ring. It grows to `reach` px, or right across the screen when that is left out. */
 interface Ring { x: number; y: number; age: number; color: string; reach?: number }
+/** Somebody set free, on their way to be counted. A negative age delays them, so a crowd pours out rather than popping out. */
+interface Soul { x: number; y: number; vx: number; vy: number; age: number; phase: number; dead: boolean }
 interface Box { x: number; y: number; w: number; h: number }
 interface Banner { text: string; size: number; color: string; alpha: number }
 
@@ -191,7 +237,14 @@ export interface GameOptions {
   onExit: () => void;
   /** Short status messages for a screen-reader live region. */
   onStatus?: (message: string) => void;
+  /** Called whenever the game is paused or resumed, however that happened, so a Pause button can keep in step. */
+  onPause?: (paused: boolean) => void;
 }
+
+/** The boss's face before it has done or said anything. */
+const freshVillain = () => ({ mood: 'calm' as Mood, until: 0, line: '', lineUntil: 0, nextIdle: 0, show: 0, warned: false, bye: false, beaten: false });
+const isHostile = (shot: Shot): boolean => shot.hostile;
+const isOwn = (shot: Shot): boolean => !shot.hostile;
 
 /** What a shot landing on each part of a boss sounds like. */
 const BOSS_SOUNDS: Record<Exclude<Hit, 'miss'>, Sfx> = {
@@ -231,6 +284,12 @@ export class Game {
   private input: 'keys' | 'touch' = this.coarse ? 'touch' : 'keys';
   private touchId: number | null = null;
   private touch = { x: 0, y: 0 };
+  /** Where the canvas's top left corner is in the window, measured when it is laid out rather than on every touch. */
+  private origin = { x: 0, y: 0 };
+  /** Counts the ship's volleys, for the things that fire every other one. */
+  private volley = 0;
+  /** Scratch space for sorting things by colour before drawing them. */
+  private readonly tints = new Set<string>();
 
   private ship = { x: 0, y: 0, cooldown: 0, invulnerable: 0 };
   /** Size the ship is drawn at. Starts at the launch button's size and eases to the game's. */
@@ -271,6 +330,28 @@ export class Game {
   private mines: Mine[] = [];
   private rings: Ring[] = [];
   private stars: Star[] = [];
+  /** The people set free this game: those still on their way to the counter, and the count itself. */
+  private souls: Soul[] = [];
+  private freed = 0;
+  private freedPulse = 0;
+  /** How many the last boss was holding. */
+  private bossFreed = 0;
+  /**
+   * The set pieces in a wave, in order: the fuel ship and the asteroid field, and when each is due.
+   * `due` is the one waiting for a clear sky before it starts; the wave's clock stops from then until it is over.
+   */
+  private stops: { at: number; kind: 'fuel' | 'rocks' }[] = [];
+  private due: 'fuel' | 'rocks' | null = null;
+  private dueWait = 0;
+  private tanker: Tanker | null = null;
+  /** The asteroid field, the rocks of it that are on screen, and how many times it has hit the ship. */
+  private field: Field | null = null;
+  private near: Rock[] = [];
+  private fieldHits = 0;
+  /** Seconds the commander's asteroid warning has been up, or null when it is not. */
+  private alert: number | null = null;
+  /** A line about how the refuelling or the asteroids went, and when it fades. */
+  private fuelNote = { text: '', until: 0, color: SAND };
   private readonly backdrop = new Backdrop();
   /** The view from the cockpit that opens the game. null once the ship has taken off. */
   private intro: Intro | null = null;
@@ -295,7 +376,7 @@ export class Game {
 
   /** The faces in the corners: what each is feeling and until when. */
   private pilot = { mood: 'calm' as Mood, until: 0 };
-  private villain = { mood: 'calm' as Mood, until: 0, line: '', lineUntil: 0, nextIdle: 0, show: 0, warned: false, bye: false, beaten: false };
+  private villain = freshVillain();
   /** How hard the pilot is leaning into a turn, -1 to 1. It turns the pilot's head. */
   private lean = 0;
   private lastShipX = 0;
@@ -316,7 +397,7 @@ export class Game {
     this.intro = new Intro(this.reduceMotion, this.onIntroCue);
     this.ship.x = this.homeX;
     this.ship.y = this.h + 80;
-    opts.onStatus?.(Intro.script(this.input === 'touch'));
+    opts.onStatus?.(Intro.script(this.input === 'touch', !this.reduceMotion));
 
     addEventListener('keydown', this.onKeyDown);
     addEventListener('keyup', this.onKeyUp);
@@ -363,6 +444,24 @@ export class Game {
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
     this.canvas.removeEventListener('pointerup', this.onPointerUp);
     this.canvas.removeEventListener('pointercancel', this.onPointerUp);
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
+  /** Pause or resume: this is what the overlay's Pause button does. Only a game in play can be paused. */
+  togglePause(): void {
+    this.setPaused(!this.paused);
+  }
+
+  private setPaused(on: boolean): void {
+    if (on === this.paused || (on && this.state !== 'playing')) return;
+    this.paused = on;
+    this.keys.clear();
+    this.touchId = null;
+    this.opts.onPause?.(on);
+    this.opts.onStatus?.(on ? 'Paused.' : 'Resumed.');
   }
 
   get soundOn(): boolean {
@@ -438,9 +537,12 @@ export class Game {
   private resize = (): void => {
     const { canvas, ctx } = this;
     const first = this.w === 0;
+    const was = { w: this.w, h: this.h };
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.w = canvas.clientWidth;
     this.h = canvas.clientHeight;
+    const box = canvas.getBoundingClientRect();
+    this.origin = { x: box.left, y: box.top };
     canvas.width = Math.round(this.w * dpr);
     canvas.height = Math.round(this.h * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -448,7 +550,9 @@ export class Game {
     ctx.lineCap = 'round';
     // A phone held sideways is short: everything shrinks further there, to leave room to fly.
     this.scale = clamp(Math.min(this.w, this.h) / 700, this.h < 500 ? 0.62 : 0.85, 1.3);
-    this.pace = clamp(this.h / 760, 0.9, 1.35);
+    // Everything that flies does so at a speed in proportion to the height of the screen, so a short screen
+    // (a phone held sideways) gives a pilot as long to react as a tall one does.
+    this.pace = clamp(this.h / 760, 0.6, 1.35);
 
     const cs = getComputedStyle(canvas.parentElement ?? canvas);
     this.inset = {
@@ -459,7 +563,18 @@ export class Game {
     };
 
     const count = Math.min(170, Math.floor((this.w * this.h) / 7500));
-    this.stars = Array.from({ length: count }, () => this.makeStar(rand(0, this.h)));
+    if (first || !was.w || !was.h) {
+      this.stars = Array.from({ length: count }, () => this.makeStar(rand(0, this.h)));
+    } else {
+      // A change of size (a window being dragged, a phone's address bar sliding away) keeps the stars it has,
+      // spread over the new shape, rather than scattering a new sky.
+      for (const star of this.stars) {
+        star.x *= this.w / was.w;
+        star.y *= this.h / was.h;
+      }
+      while (this.stars.length < count) this.stars.push(this.makeStar(rand(0, this.h)));
+      this.stars.length = count;
+    }
     this.backdrop.resize(this.w, this.h);
     if (!first) this.keepShipInBounds();
   };
@@ -536,11 +651,11 @@ export class Game {
     this.input = 'keys';
 
     if (this.paused) {
-      if (code === 'KeyP' || code === 'Space' || code === 'Enter') this.paused = false;
+      if (code === 'KeyP' || code === 'Space' || code === 'Enter') this.setPaused(false);
       return;
     }
     if (code === 'KeyP') {
-      if (this.state === 'playing') this.paused = true;
+      this.setPaused(true);
       return;
     }
     this.keys.add(code);
@@ -580,8 +695,10 @@ export class Game {
     if (document.hidden) {
       this.saveBest();
       this.keys.clear();
-      if (this.state === 'playing') this.paused = true;
+      this.setPaused(true);
     } else {
+      // Coming back from another app, the phone may have taken the audio away: ask for it back.
+      this.sound.unlock();
       this.last = performance.now();
       this.raf = requestAnimationFrame(this.frame);
     }
@@ -589,7 +706,11 @@ export class Game {
 
   private onPointerDown = (e: PointerEvent): void => {
     const touch = e.pointerType !== 'mouse';
+    // Only the main mouse button plays; the others are the browser's.
+    if (!touch && e.button !== 0) return;
     this.sound.unlock();
+    const box = this.canvas.getBoundingClientRect();
+    this.origin = { x: box.left, y: box.top };
     if (!this.paused) {
       // A click or tap on an upgrade or an answer picks it, and is not a steering touch.
       const offer = this.prompt?.offer;
@@ -607,8 +728,7 @@ export class Game {
       }
       // On a sum boss, a tap or click on a little ship chooses its answer.
       if (this.state === 'playing' && !this.prompt && this.boss) {
-        const rect = this.canvas.getBoundingClientRect();
-        if (this.strikeBoss(e.clientX - rect.left, e.clientY - rect.top, true, true)) {
+        if (this.strikeBoss(e.clientX - this.origin.x, e.clientY - this.origin.y, true, true)) {
           if (touch) this.input = 'touch';
           return;
         }
@@ -625,7 +745,7 @@ export class Game {
         /* capture is a nicety, not a requirement */
       }
     }
-    if (this.paused) this.paused = false;
+    if (this.paused) this.setPaused(false);
     else if (this.state === 'ready') this.go();
     else if (this.state === 'over' && this.stateTime > 0.9) this.begin();
   };
@@ -640,9 +760,8 @@ export class Game {
 
   /** The ship rides a little above the finger so the finger does not cover it. */
   private trackTouch(e: PointerEvent): void {
-    const rect = this.canvas.getBoundingClientRect();
-    this.touch.x = e.clientX - rect.left;
-    this.touch.y = e.clientY - rect.top - 64;
+    this.touch.x = e.clientX - this.origin.x;
+    this.touch.y = e.clientY - this.origin.y - 64;
   }
 
   /** Which answer box, if any, a click or tap landed on. */
@@ -654,9 +773,8 @@ export class Game {
 
   /** Which of these boxes, if any, a click or tap landed on (with a little slack for fingers). */
   private boxAt(e: PointerEvent, boxes: Box[]): number | null {
-    const rect = this.canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const x = e.clientX - this.origin.x;
+    const y = e.clientY - this.origin.y;
     const slack = 4;
     const index = boxes.findIndex((b) => x >= b.x - slack && x <= b.x + b.w + slack && y >= b.y - slack && y <= b.y + b.h + slack);
     return index < 0 ? null : index;
@@ -674,16 +792,13 @@ export class Game {
 
   // ------------------------------------------------------------ game state
 
-  /** Space, Enter or a tap in the cockpit: launch, or cut a take-off short. */
+  /** Space, Enter or a tap before the game has begun: skip the hangar, launch, or cut the take-off short. */
   private go(): void {
     const intro = this.intro;
     if (!intro || this.stateTime < 0.5) return;
-    if (intro.phase === 'brief') {
-      intro.launch();
-      this.opts.onStatus?.('Taking off.');
-    } else {
-      intro.skip();
-    }
+    const briefing = intro.phase === 'brief';
+    intro.advance();
+    if (briefing) this.opts.onStatus?.('Taking off.');
   }
 
   private onIntroCue = (cue: IntroCue): void => {
@@ -716,6 +831,15 @@ export class Game {
     this.pickups = [];
     this.mines = [];
     this.rings = [];
+    this.souls = [];
+    this.freed = 0;
+    this.tanker = null;
+    this.field = null;
+    this.near = [];
+    this.alert = null;
+    this.due = null;
+    this.stops = [];
+    this.fuelNote.until = 0;
     this.prompt = null;
     this.boss = null;
     this.intermission = 0;
@@ -724,7 +848,7 @@ export class Game {
     this.rockets = [];
     this.beams = [];
     this.pilot = { mood: 'calm', until: 0 };
-    this.villain = { mood: 'calm', until: 0, line: '', lineUntil: 0, nextIdle: 0, show: 0, warned: false, bye: false, beaten: false };
+    this.villain = freshVillain();
     this.ship.cooldown = 0;
     this.ship.invulnerable = 1;
     if (this.state === 'over') {
@@ -741,6 +865,11 @@ export class Game {
     this.waveTime = 0;
     this.banner = 2.2;
     this.rest = 0;
+    this.tanker = null;
+    this.field = null;
+    this.near = [];
+    this.alert = null;
+    this.due = null;
     this.queue = this.buildWave(n);
     this.sound.play('wave');
     this.opts.onStatus?.(`Wave ${n}.`);
@@ -760,6 +889,8 @@ export class Game {
     const known = (Object.keys(GROUP_FROM) as Group[]).filter((g) => GROUP_FROM[g] <= n);
     const fresh = known.filter((g) => g !== 'drifters' && GROUP_FROM[g] === n);
     let t = 1.5;
+    // When each group starts and ends, so the fuel ship does not turn up in the middle of one.
+    const spans: [number, number][] = [];
     for (let i = 0; i < slots; i++) {
       // Open with drifters, show off anything new next, then mix (drifters stay the most common).
       const group: Group = i === 0 ? 'drifters' : fresh[i - 1] ?? pick([...known, 'drifters']);
@@ -767,14 +898,17 @@ export class Game {
       if (group === 'drifters') {
         const phase = rand(0, Math.PI * 2);
         for (let k = 0; k < chainLength; k++) q.push({ at: t + k * 0.42, kind: 'drifter', x, phase });
+        spans.push([t, t + (chainLength - 1) * 0.42]);
       } else if (group === 'mites') {
         // A V of five, the leader in front.
         const reach = 44 * sc;
         const lead = clamp(x, this.inset.left + this.margin + reach, Math.max(this.inset.left + this.margin + reach, this.w - this.inset.right - this.margin - reach));
         for (let k = -2; k <= 2; k++) q.push({ at: t + Math.abs(k) * 0.16, kind: 'mite', x: lead + k * 22 * sc, phase: 0 });
+        spans.push([t, t + 0.32]);
       } else if (group === 'weavers') {
         const dir = Math.random() < 0.5 ? -1 : 1;
         for (let k = 0; k < (n >= 5 ? 3 : 2); k++) q.push({ at: t + k * 0.55, kind: 'weaver', x, phase: 0, dir: k % 2 ? -dir : dir });
+        spans.push([t, t + 1.1]);
       } else {
         // Three spinners a third of a turn apart make a ring that turns as it comes down.
         const phase = rand(0, Math.PI * 2);
@@ -794,6 +928,16 @@ export class Game {
     // One upgrade capsule a wave, for as long as there are upgrades left to earn.
     this.upgradeTimes = this.upgrades.size < UPGRADES.length ? moments(1) : [];
     this.mineTimes = moments(Math.min(4, 1 + Math.floor(n / 2)));
+    // Two set pieces break the wave up: the fuel ship about a third of the way through its groups and the
+    // asteroid field about two thirds, each once any group already on its way in has arrived.
+    const stopAfter = (slot: number): number => {
+      let at = 1.5 + gap * slot - 0.2;
+      for (const [from, to] of spans) if (from < at && to >= at) at = to + 0.05;
+      return at;
+    };
+    const fuelSlot = Math.max(1, Math.round(slots / 3));
+    const rockSlot = Math.max(fuelSlot + 1, Math.round((2 * slots) / 3));
+    this.stops = [{ at: stopAfter(fuelSlot), kind: 'fuel' }, { at: stopAfter(rockSlot), kind: 'rocks' }];
     return q.sort((a, b) => a.at - b.at);
   }
 
@@ -853,13 +997,17 @@ export class Game {
     this.enemies.push(e);
   }
 
-  private spawnPickup(reward?: Reward): void {
-    // Offer what helps most: repairs when the hull is hurt, blasts once the waves get busy.
+  /** What an ordinary capsule holds: whatever helps most. Repairs when the hull is hurt, blasts once the waves get busy. */
+  private pickReward(): Reward {
     const pool: Reward[] = ['energy'];
     if (this.hull < this.maxHull) pool.push('hull', 'hull');
     if (this.wave >= 2) pool.push('blast');
+    return pick(pool);
+  }
+
+  private spawnPickup(reward?: Reward): void {
     const x = this.spawnX();
-    this.pickups.push({ reward: reward ?? pick(pool), x, y: -24, anchorX: x, phase: rand(0, Math.PI * 2), age: 0, dead: false });
+    this.pickups.push({ reward: reward ?? this.pickReward(), x, y: -24, anchorX: x, phase: rand(0, Math.PI * 2), age: 0, dead: false });
   }
 
   private spawnMine(): void {
@@ -868,32 +1016,271 @@ export class Game {
   }
 
   /** What the boss needs to know about the world, and the ways it can act on it. */
+  /** What the boss knows of the game: made once, and brought up to date each time it is asked for. */
+  private readonly env: BossEnv = {
+    w: 0, h: 0, top: 0, scale: 1, pace: 1, headroom: 104, sweep: Infinity, calm: false, shipX: 0, shipY: 0,
+    fire: (x, y, vx, vy, color) => {
+      this.shots.push({ x, y, vx, vy, hostile: true, dead: false, color });
+      this.sound.play('enemyShot');
+    },
+    bomb: (x, y) => {
+      if (this.mines.length >= 3 || this.state !== 'playing') return;
+      this.mines.push({ x, y, anchorX: x, phase: 0, age: 0, dead: false, thrown: true });
+      this.taunt('bomb', 'talk', 1.2, 0.7);
+    },
+    burst: (shape, x, y, scale, rot, color) => {
+      this.burst(shape, x, y, scale, rot, color);
+      this.sound.play('boom');
+    },
+    problem: () => makeProblem(this.level),
+  };
+
   private bossEnv(): BossEnv {
-    return {
-      w: this.w, h: this.h, top: this.inset.top, scale: this.scale,
-      shipX: this.ship.x, shipY: this.ship.y,
-      fire: (x, y, vx, vy, color) => {
-        this.shots.push({ x, y, vx, vy, hostile: true, dead: false, color });
-        this.sound.play('enemyShot');
-      },
-      bomb: (x, y) => {
-        if (this.mines.length >= 3 || this.state !== 'playing') return;
-        this.mines.push({ x, y, anchorX: x, phase: 0, age: 0, dead: false, thrown: true });
-        this.taunt('bomb', 'talk', 1.2, 0.7);
-      },
-      burst: (shape, x, y, scale, rot, color) => {
-        this.burst(shape, x, y, scale, rot, color);
-        this.sound.play('boom');
-      },
-      problem: () => makeProblem(this.level),
+    const env = this.env;
+    env.w = this.w;
+    env.h = this.h;
+    env.top = this.inset.top;
+    env.scale = this.scale;
+    env.pace = this.pace;
+    // On a short screen (a phone held sideways) the HUD is all in the corners, so the boss can sit higher;
+    // but it must not sweep under its own health bar and taunts, which are to the left of its face.
+    // On a narrow one it sits a little lower, so the sum over its head clears the taunts.
+    const short = this.h < 500;
+    env.headroom = short ? 68 : this.w < 480 ? 112 : 104;
+    env.sweep = short ? Math.max(0, this.w / 2 - this.inset.right - BOSS_CORNER - 84) : Infinity;
+    env.calm = this.reduceMotion;
+    env.shipX = this.ship.x;
+    env.shipY = this.ship.y;
+    return env;
+  }
+
+  /** What the fuel ship knows of the game: made once, and brought up to date each time it is asked for. */
+  private readonly fuelEnv: TankerEnv = { w: 0, h: 0, top: 0, left: 0, right: 0, scale: 1, noseX: 0, noseY: 0 };
+
+  private tankerEnv(): TankerEnv {
+    const env = this.fuelEnv;
+    env.w = this.w;
+    env.h = this.h;
+    env.top = this.inset.top;
+    env.left = this.inset.left;
+    env.right = this.inset.right;
+    env.scale = this.scale;
+    env.noseX = this.ship.x;
+    env.noseY = this.ship.y - 16 * this.shipScale;
+    return env;
+  }
+
+  private callTanker(): void {
+    this.tanker = createTanker(this.wave, this.tankerEnv());
+    this.sound.play('tanker');
+    this.opts.onStatus?.(`A fuel ship has arrived. Fly up behind it, catch the end of its fuel line with the nose of the ship, and stay hooked on for ${FUEL_SECONDS} seconds. It will not hold still.`);
+  }
+
+  /** Fly the fuel ship, and pay out its fuel: energy for as long as the line is on, and a bonus for a full tank. */
+  private flyTanker(dt: number): void {
+    const t = this.tanker;
+    if (!t) return;
+    const playing = this.state === 'playing';
+    const event = updateTanker(t, dt, this.tankerEnv());
+    const note = (text: string, color: string, seconds = 1.8) => {
+      this.fuelNote = { text, until: this.time + seconds, color };
     };
+    if (t.hooked && playing) {
+      this.energy = Math.min(1, this.energy + dt / FUEL_SECONDS);
+      this.sound.play('pump');
+    }
+    if (event === 'hook') {
+      this.sound.play('hook');
+      this.feel('happy', 0.8, true);
+      if (!t.snaps) this.opts.onStatus?.('Fuel line hooked on. Stay with the fuel ship.');
+    } else if (event === 'snap') {
+      this.sound.play('snap');
+      this.spark(this.ship.x, this.ship.y - 16 * this.shipScale, NEON.red);
+      this.feel('worried', 1, true);
+      this.opts.onStatus?.(`The fuel line came off: too ${t.why === 'close' ? 'close' : 'far away'}. Catch it again.`);
+    } else if (event === 'full') {
+      this.energy = 1;
+      this.score += FULL_TANK_POINTS;
+      this.feel('happy', 1.4);
+      this.sound.play('power');
+      this.rings.push({ x: this.ship.x, y: this.ship.y, age: 0, color: NEON.lime, reach: 120 * this.scale });
+      note(`FULL TANK +${FULL_TANK_POINTS}`, NEON.lime, 2);
+      this.opts.onStatus?.('Tank full. Cannons at full power.');
+    } else if (event === 'leave') {
+      note(t.fuel > 0 ? `FUEL SHIP LEAVING - TANK ${percent(t.fuel)}% FULL` : 'THE FUEL SHIP COULD NOT WAIT', SAND);
+      this.opts.onStatus?.('The fuel ship has left.');
+    }
+    if (t.state === 'gone') this.tanker = null;
+  }
+
+  private readonly rockEnv: FieldEnv = { w: 0, h: 0, left: 0, right: 0, scale: 1, pace: 1, wave: 1 };
+
+  private fieldEnv(): FieldEnv {
+    const env = this.rockEnv;
+    env.w = this.w;
+    env.h = this.h;
+    env.left = this.inset.left;
+    env.right = this.inset.right;
+    env.scale = this.scale;
+    env.pace = this.pace;
+    env.wave = this.wave;
+    return env;
+  }
+
+  /** The flight commander bursts in, worried: asteroids ahead. The field itself sets off a moment later. */
+  private raiseAlarm(): void {
+    this.alert = 0;
+    this.sound.play('alarm');
+    this.feel('worried', ALERT_TURN + 1);
+    this.opts.onStatus?.(
+      `Flight commander: ${BRIEFING.asteroids.join(' ')} ${BRIEFING.choice.join(' ')} An asteroid field is coming down the screen, with two winding ways through. ` +
+      'The easy way is wide and has bombs in it, which ask a question if touched. The hard way is narrow and has power-ups instead. ' +
+      'Little rocks break in one shot; the rest take many.',
+    );
+  }
+
+  private startField(): void {
+    const f = createField(this.fieldEnv());
+    this.field = f;
+    this.fieldHits = 0;
+    for (const b of f.bombs) {
+      this.mines.push({ x: b.x, y: f.front - b.d, anchorX: b.x, phase: 0, age: 0, dead: false, thrown: false, ride: f.speed });
+    }
+    // The hard way's power-ups: boosts, and at the far end the big prize, an upgrade (while there are any left to win).
+    f.prizes.forEach((p, i) => {
+      const last = i === f.prizes.length - 1 && this.upgrades.size < UPGRADES.length;
+      this.pickups.push({ reward: last ? 'upgrade' : this.pickReward(), x: p.x, y: f.front - p.d, anchorX: p.x, phase: 0, age: 0, dead: false, ride: f.speed });
+    });
+  }
+
+  /** Run the warning and then the asteroid field. `dt` is the world's time, `real` the clock's. */
+  private flyField(dt: number, real: number): void {
+    if (this.alert !== null) {
+      const was = this.alert;
+      this.alert += dt;
+      if (was < ALERT_TURN && this.alert >= ALERT_TURN) this.sound.play('radio');
+      if (was < ALERT_LEAD && this.alert >= ALERT_LEAD) this.startField();
+      if (this.alert >= ALERT_SECONDS) this.alert = null;
+    }
+    const f = this.field;
+    if (!f) return;
+    updateField(f, dt, real, this.fieldEnv());
+    if (f.rocks.some((rock) => rock.dead)) f.rocks = f.rocks.filter((rock) => !rock.dead);
+    // Only the rocks on screen are drawn or can be hit.
+    this.near.length = 0;
+    for (const rock of f.rocks) {
+      const y = f.front - rock.d;
+      if (y > -rock.r - 8 && y < this.h + rock.r + 8) this.near.push(rock);
+    }
+    if (!f.done) return;
+    this.field = null;
+    this.near.length = 0;
+    if (this.state !== 'playing') return;
+    const clean = this.fieldHits === 0;
+    const points = clean ? CLEAN_FIELD_POINTS : FIELD_POINTS;
+    this.score += points;
+    this.fuelNote = { text: `${clean ? 'NOT A SCRATCH' : 'THROUGH THE ASTEROIDS'} +${points}`, until: this.time + 2, color: clean ? NEON.lime : SAND };
+    this.feel('happy', 1.4);
+    this.sound.play('right');
+    this.opts.onStatus?.(`Through the asteroid field${clean ? ' without a scratch' : ''}.`);
+  }
+
+  /** A shot has landed on a rock. Little ones break after a couple; on the rest it mostly just sparks. */
+  private hitRock(rock: Rock, x: number, y: number): void {
+    rock.hp -= 1;
+    rock.flash = 0.08;
+    if (rock.hp <= 0) {
+      this.breakRock(rock);
+    } else if (rock.tough) {
+      this.spark(x, y, ROCK);
+      this.sound.play('clang');
+    } else {
+      this.sound.play('hit');
+    }
+  }
+
+  private breakRock(rock: Rock): void {
+    if (rock.dead || !this.field) return;
+    rock.dead = true;
+    this.score += rock.tough ? ROCK_POINTS : PEBBLE_POINTS;
+    this.burst(rock.shape, rock.x, this.field.front - rock.d, 1, rock.rot, rock.tough ? ROCK : PEBBLE);
+    this.sound.play('boom');
+  }
+
+  /** Set people free at (x, y): one from an ordinary ship, a crowd from a boss. They fly up to the counter. */
+  private free(x: number, y: number, count = 1): void {
+    const crowd = count > 1;
+    if (!crowd) this.rings.push({ x, y, age: 0.12, color: SOUL, reach: 34 * this.scale });
+    for (let i = 0; i < count; i++) {
+      // More than can be drawn at once are counted straight away.
+      if (this.souls.length >= MAX_SOULS) {
+        this.freed += 1;
+        continue;
+      }
+      // One pops up and out of the wreck; a crowd scatters every way.
+      const angle = crowd ? rand(0, Math.PI * 2) : rand(-Math.PI * 0.85, -Math.PI * 0.15);
+      const speed = (crowd ? rand(70, 300) : rand(50, 110)) * this.scale;
+      this.souls.push({
+        x: x + (crowd ? rand(-30, 30) * this.scale : 0), y: y + (crowd ? rand(-20, 20) * this.scale : 0),
+        vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+        age: crowd ? -i * 0.04 : 0, phase: rand(0, Math.PI * 2), dead: false,
+      });
+    }
+  }
+
+  /** Where the score is written, and so where the count of people freed goes: just after it. */
+  private get scoreLine(): { text: string; size: number; x: number; y: number } {
+    const box = this.faceBox;
+    return {
+      text: this.w < 360 ? pad6(this.score) : `SCORE ${pad6(this.score)}`,
+      size: box < 60 ? 10 : 12,
+      x: this.inset.left + 12 + box + 10,
+      y: this.inset.top + 13,
+    };
+  }
+  private get freedAt(): { x: number; y: number } {
+    const line = this.scoreLine;
+    return { x: line.x + textWidth(line.text, line.size) + (line.size < 12 ? 13 : 18), y: line.y + line.size / 2 };
+  }
+
+  private updateSouls(dt: number): void {
+    this.freedPulse = Math.max(0, this.freedPulse - dt);
+    if (!this.souls.length) return;
+    const home = this.freedAt;
+    const slow = Math.exp(-dt * 3.2);
+    for (const s of this.souls) {
+      s.age += dt;
+      if (s.age < 0) continue;
+      if (s.age < SOUL_FLOAT) {
+        s.x += s.vx * dt;
+        s.y += s.vy * dt;
+        s.vx *= slow;
+        s.vy *= slow;
+        continue;
+      }
+      // Then away to be counted, faster and faster.
+      const dx = home.x - s.x;
+      const dy = home.y - s.y;
+      const dist = Math.hypot(dx, dy);
+      const step = (240 + (s.age - SOUL_FLOAT) * 1100) * Math.max(0.8, this.scale) * dt;
+      if (dist <= step + 5) {
+        s.dead = true;
+        this.freed += 1;
+        this.freedPulse = 0.3;
+        this.sound.play('free');
+      } else {
+        s.x += (dx / dist) * step;
+        s.y += (dy / dist) * step;
+      }
+    }
+    this.souls = this.souls.filter((s) => !s.dead);
   }
 
   private startBoss(): void {
     this.boss = createBoss(this.wave, this.bossEnv());
     this.bossAsked = 0;
     this.banner = 0;
-    this.villain = { mood: 'calm', until: 0, line: '', lineUntil: 0, nextIdle: 0, show: 0, warned: false, bye: false, beaten: false };
+    this.villain = freshVillain();
     this.taunt('enter', 'laugh', 2, 1, true);
     this.sound.play('warning');
     this.opts.onStatus?.(
@@ -903,10 +1290,10 @@ export class Game {
     );
   }
 
-  private updateBossFight(dt: number): void {
+  private updateBossFight(dt: number, real: number): void {
     const b = this.boss;
     if (!b) return;
-    updateBoss(b, dt, this.bossEnv());
+    updateBoss(b, dt, this.bossEnv(), real);
     if (b.problem && b.pods.length && b.problemId !== this.bossAsked) {
       this.bossAsked = b.problemId;
       this.opts.onStatus?.(`What is ${b.problem.question}? The little ships carry ${b.pods.map((p) => p.value).join(', ')}.`);
@@ -929,6 +1316,9 @@ export class Game {
       const bonus = 500 + 250 * b.wave;
       this.score += bonus;
       this.bossNote = `BOSS DOWN +${bonus}`;
+      // A boss holds a crowd, and a bigger one each wave.
+      this.bossFreed = Math.min(30, 10 + 2 * b.wave);
+      this.free(b.x, b.y, this.bossFreed);
       for (const s of this.shots) if (s.hostile) s.dead = true;
       this.rings.push(
         { x: b.x, y: b.y, age: 0, color: NEON.red },
@@ -938,10 +1328,11 @@ export class Game {
       if (!this.reduceMotion) this.shake = 0.5;
     } else {
       this.bossNote = 'IT GOT AWAY';
+      this.bossFreed = 0;
     }
     this.intermission = 1.8;
     this.sound.play(b.defeated ? 'fanfare' : 'escape');
-    this.opts.onStatus?.(b.defeated ? 'Mini boss destroyed.' : 'The mini boss got away.');
+    this.opts.onStatus?.(b.defeated ? `Mini boss destroyed. ${this.bossFreed} people set free.` : 'The mini boss got away.');
   }
 
   /** Throw away any bombs still on screen, with a puff of sparks each. */
@@ -965,6 +1356,8 @@ export class Game {
     this.score += KINDS[e.kind].points;
     this.burst(KINDS[e.kind].shape, e.x, e.y, this.scale, e.rot, KINDS[e.kind].color);
     this.sound.play('boom');
+    // Whoever it was holding is free.
+    this.free(e.x, e.y);
     if (e.kind === 'splitter') {
       // Two shards fly out and down, one to each side.
       for (const side of [-1, 1]) {
@@ -1012,6 +1405,8 @@ export class Game {
   private detonate(): void {
     for (const e of this.enemies) if (!e.dead) this.destroyEnemy(e);
     for (const s of this.shots) if (s.hostile) s.dead = true;
+    // In an asteroid field it clears the little rocks on screen. The tough ones shrug it off.
+    for (const rock of this.near) if (!rock.tough) this.breakRock(rock);
     this.rings.push({ x: this.ship.x, y: this.ship.y, age: 0, color: SAND });
     this.sound.play('blast');
     if (!this.reduceMotion) this.shake = 0.4;
@@ -1041,6 +1436,11 @@ export class Game {
     this.beams = [];
     this.prompt = null;
     this.intermission = 0;
+    this.due = null;
+    this.stops = [];
+    this.alert = null;
+    this.fuelNote.until = 0;
+    if (this.tanker) dismissTanker(this.tanker);
     if (this.boss) this.taunt('win', 'laugh', 6, 1, true);
     // A boss that has won does not hang about over the game over screen.
     if (this.boss && this.boss.state !== 'dying') {
@@ -1050,7 +1450,9 @@ export class Game {
     this.newBest = this.saveBest();
     this.setState('over');
     this.sound.play('over');
-    this.opts.onStatus?.(`Game over. Score ${this.score}. Wave ${this.wave}.`);
+    // (Anyone still on their way to the counter has been freed all the same.)
+    const freed = this.freed + this.souls.length;
+    this.opts.onStatus?.(`Game over. Score ${this.score}. Wave ${this.wave}. You set ${freed} ${freed === 1 ? 'person' : 'people'} free.`);
   }
 
   /** Break a shape into its line segments and send them tumbling outward. */
@@ -1094,7 +1496,9 @@ export class Game {
       c.kind === 'line'
         ? `Type: ${c.text}`
         : c.kind === 'choice'
-          ? `What is ${c.question}? ${c.options.map((o, i) => `Press ${i + 1} for ${o}`).join(', ')}.`
+          ? this.input === 'touch'
+            ? `What is ${c.question}? Tap the answer: ${c.options.join(', ')}.`
+            : `What is ${c.question}? ${c.options.map((o, i) => `Press ${i + 1} for ${o}`).join(', ')}.`
           : `What is ${c.question}? Type the answer.`;
     this.opts.onStatus?.(`${lead} ${ask}`.trim());
   }
@@ -1256,10 +1660,12 @@ export class Game {
           if (this.boss) this.taunt('boom', 'laugh', 4, 1, true);
         }
       } else if (!o.success) {
-        this.jam = JAM_SECONDS;
-        this.sound.play('jam');
         p.note = 'CANNONS JAMMED';
         p.hold = 1.8;
+        // The jam lasts beyond the moment the result is on screen (when nothing can hurt the ship anyway),
+        // so a wrong answer costs a spell of real flying without cannons.
+        this.jam = JAM_SECONDS + p.hold;
+        this.sound.play('jam');
       } else {
         p.hold = 1;
         if (p.stake === 'upgrade') {
@@ -1290,7 +1696,7 @@ export class Game {
       this.feel(o.success ? 'happy' : 'hurt', 1.6);
       this.opts.onStatus?.(
         p.offer
-          ? `Correct. Choose an upgrade. ${p.offer.map((u, i) => `Press ${i + 1} for ${u.name.toLowerCase()}: ${u.blurb.toLowerCase()}`).join('. ')}.`
+          ? `Correct. Choose an upgrade. ${p.offer.map((u, i) => `${this.input === 'touch' ? 'Tap' : `Press ${i + 1} for`} ${u.name.toLowerCase()}: ${u.blurb.toLowerCase()}`).join('. ')}.`
           : `${o.success ? 'Correct.' : 'Not quite.'} ${p.note.toLowerCase().replace('%', ' percent')}.`,
       );
     }
@@ -1392,10 +1798,16 @@ export class Game {
       d.rot += d.spin * sim;
     }
     this.debris = this.debris.filter((d) => d.age < d.ttl);
+    // Flashes of light keep real time, so one caught by slow motion does not hang about for seconds.
+    for (const beam of this.beams) beam.age += dt;
+    if (this.beams.length) this.beams = this.beams.filter((b) => b.age < 0.22);
     for (const ring of this.rings) ring.age += dt;
     this.rings = this.rings.filter((ring) => ring.age < 0.7);
-    // A boss on its way out (after a game over) still has to fly off the screen.
-    if (this.boss && this.state !== 'playing') this.updateBossFight(sim);
+    // A boss on its way out (after a game over) still has to fly off the screen, and so does a fuel ship.
+    if (this.boss && this.state !== 'playing') this.updateBossFight(sim, dt);
+    if (this.tanker && this.state !== 'playing') this.flyTanker(sim);
+    if (this.field && this.state !== 'playing') this.flyField(sim, dt);
+    this.updateSouls(sim);
 
     this.updateShip(sim);
     // The pilot leans into a turn: how fast the ship is moving sideways, smoothed.
@@ -1410,9 +1822,9 @@ export class Game {
           this.intermission -= sim;
           if (this.intermission <= 0) this.startBreak(this.wave + 1);
         } else if (this.boss) {
-          this.updateBossFight(sim);
+          this.updateBossFight(sim, dt);
         } else {
-          this.updateWave(sim);
+          this.updateWave(sim, dt);
         }
         this.updatePickups(sim);
         this.updateMines(sim);
@@ -1420,7 +1832,7 @@ export class Game {
         this.updatePrompt(dt);
       }
     }
-    this.updateEnemies(sim);
+    this.updateEnemies(sim, dt);
     this.updateShots(sim);
     if (this.state === 'playing') this.collide();
 
@@ -1483,9 +1895,11 @@ export class Game {
 
     // On touch the ship fires for as long as a finger is down, so letting go is never a free ride.
     // It holds fire while a capsule's question is open, which keeps the question clear of shots.
-    if ((keys.has('Space') || this.touchId !== null) && ship.cooldown <= 0 && this.jam <= 0 && !this.asking) {
+    // (And it holds fire while it is on the fuel line: the fuel ship is right in front of the cannons.)
+    if ((keys.has('Space') || this.touchId !== null) && ship.cooldown <= 0 && this.jam <= 0 && !this.asking && !this.tanker?.hooked) {
       const has = (id: UpgradeId) => this.upgrades.has(id);
       ship.cooldown = has('rapid') ? 0.11 : 0.17;
+      this.volley += 1;
       this.sound.play('shot');
       const sc = this.scale;
       const up = -680 * this.pace;
@@ -1509,7 +1923,8 @@ export class Game {
         shoot(-10, 4, -215 * sc, SAND, true);
         shoot(10, 4, 215 * sc, SAND, true);
       }
-      if (has('wingmates')) {
+      // The wingmates fire with every other volley: a real help, without doing the pilot's job for them.
+      if (has('wingmates') && this.volley % 2 === 0) {
         shoot(-WING, 0, 0, NEON.lime, true);
         shoot(WING, 0, 0, NEON.lime, true);
       }
@@ -1555,8 +1970,32 @@ export class Game {
     }
   }
 
-  private updateWave(dt: number): void {
-    this.waveTime += dt;
+  private updateWave(dt: number, real: number): void {
+    // The wave waits while the fuel ship or the asteroid field is here, and before that until the sky is
+    // clear enough for it to come in.
+    if (this.tanker) {
+      this.flyTanker(dt);
+      return;
+    }
+    if (this.field || this.alert !== null) {
+      this.flyField(dt, real);
+      return;
+    }
+    if (this.due) {
+      this.dueWait += dt;
+      if (!this.prompt && (!this.enemies.length || this.dueWait > 12)) {
+        if (this.due === 'fuel') this.callTanker();
+        else this.raiseAlarm();
+        this.due = null;
+      }
+      return;
+    }
+    const next = this.stops[0]?.at ?? Infinity;
+    this.waveTime = Math.min(this.waveTime + dt, next);
+    if (this.waveTime >= next) {
+      this.due = this.stops.shift()!.kind;
+      this.dueWait = 0;
+    }
     while (this.queue.length && this.queue[0]!.at <= this.waveTime) this.spawn(this.queue.shift()!);
     while (this.pickupTimes.length && this.pickupTimes[0]! <= this.waveTime) {
       this.pickupTimes.shift();
@@ -1585,10 +2024,10 @@ export class Game {
     const reach = (10 + 9) * this.scale;
     for (const m of this.mines) {
       m.age += dt;
-      m.y += 74 * this.pace * hurry * dt;
-      // A thrown bomb drifts after the ship; an ordinary one just sways.
+      m.y += (m.ride ?? 74 * this.pace * hurry) * dt;
+      // A thrown bomb drifts after the ship; an ordinary one just sways; one in an asteroid field keeps its place.
       if (m.thrown) m.anchorX += clamp(this.ship.x - m.anchorX, -1, 1) * 30 * this.scale * dt;
-      m.x = m.anchorX + Math.sin(m.age * 0.9 + m.phase) * (m.thrown ? 12 : 34) * this.scale;
+      m.x = m.ride !== undefined ? m.anchorX : m.anchorX + Math.sin(m.age * 0.9 + m.phase) * (m.thrown ? 12 : 34) * this.scale;
       if (m.y > this.h + 40) m.dead = true;
       // A ship that is still blinking (just hit, or just out of a question) passes through a bomb unharmed.
       else if (this.state === 'playing' && !this.prompt && this.ship.invulnerable <= 0 && Math.hypot(m.x - this.ship.x, m.y - this.ship.y) < reach) {
@@ -1602,12 +2041,17 @@ export class Game {
     // Once the wave is beaten, a capsule nobody wants hurries off so the game is not left waiting for it.
     const hurry = !this.queue.length && !this.enemies.length ? 3 : 1;
     const reach = (13 + 9) * this.scale;
-    // Capsules wait while a question is on screen, so one never slips past a pilot who is busy answering.
-    if (this.prompt) return;
     for (const p of this.pickups) {
-      p.age += dt;
-      p.y += 60 * this.pace * hurry * dt;
-      p.x = p.anchorX + Math.sin(p.age * 1.3 + p.phase) * 18 * this.scale;
+      if (p.ride !== undefined) {
+        // A power-up in an asteroid field keeps its place among the rocks, question or no question.
+        p.age += dt;
+        p.y += p.ride * dt;
+      } else if (!this.prompt) {
+        // The others wait while a question is on screen, so one never slips past a pilot who is busy answering.
+        p.age += dt;
+        p.y += 60 * this.pace * hurry * dt;
+        p.x = p.anchorX + Math.sin(p.age * 1.3 + p.phase) * 18 * this.scale;
+      }
       if (p.y > this.h + 40) p.dead = true;
       else if (!this.prompt && Math.hypot(p.x - this.ship.x, p.y - this.ship.y) < reach) {
         p.dead = true;
@@ -1627,9 +2071,6 @@ export class Game {
     const sc = this.scale;
     const { ship } = this;
     const has = (id: UpgradeId) => this.upgrades.has(id);
-    for (const beam of this.beams) beam.age += dt;
-    this.beams = this.beams.filter((b) => b.age < 0.22);
-
     if (has('shield') && !this.shield.ready) {
       this.shield.recharge -= dt;
       if (this.shield.recharge <= 0) {
@@ -1639,11 +2080,11 @@ export class Game {
     }
 
     if (has('guardian')) {
-      this.orbit += dt * 2.8;
+      this.orbit += dt * 3.6;
       this.guardCool = Math.max(0, this.guardCool - dt);
       const g = this.guardianAt;
       for (const s of this.shots) {
-        if (!s.hostile || s.dead || Math.hypot(s.x - g.x, s.y - g.y) > 14 * sc) continue;
+        if (!s.hostile || s.dead || Math.hypot(s.x - g.x, s.y - g.y) > 20 * sc) continue;
         s.dead = true;
         this.spark(s.x, s.y, NEON.cyan);
         this.sound.play('clang');
@@ -1652,7 +2093,7 @@ export class Game {
         const rammed = this.enemies.find((e) => !e.dead && Math.hypot(e.x - g.x, e.y - g.y) < (KINDS[e.kind].radius + 8) * sc);
         if (rammed) {
           this.guardCool = 0.3;
-          this.damage(rammed, 1);
+          this.damage(rammed, 2);
         }
       }
     }
@@ -1668,7 +2109,8 @@ export class Game {
       this.beams.push({ x, y: ship.y - 18 * sc, age: 0 });
       this.sound.play('beam');
       for (const e of this.enemies) if (e.y < ship.y && Math.abs(e.x - x) < (KINDS[e.kind].radius + 7) * sc) this.damage(e, 2);
-      for (let n = 0; n < 2; n++) {
+      // Against a boss the beam lands like four shots.
+      for (let n = 0; n < 4; n++) {
         for (let y = ship.y - 20 * sc; y > 0; y -= 8) if (this.strikeBoss(x, y, false)) break;
       }
     }
@@ -1719,8 +2161,11 @@ export class Game {
       r.y += r.vy * dt;
 
       const touched = this.enemies.some((e) => !e.dead && Math.hypot(e.x - r.x, e.y - r.y) < (KINDS[e.kind].radius + 6) * sc);
-      if (touched || this.strikeBoss(r.x, r.y, false)) {
+      const struck = !touched && this.strikeBoss(r.x, r.y, false);
+      if (touched || struck) {
         r.dead = true;
+        // A rocket that reaches a boss lands like three shots.
+        if (struck) for (let n = 0; n < 2; n++) this.strikeBoss(r.x, r.y, false);
         const reach = 54 * sc;
         this.rings.push({ x: r.x, y: r.y, age: 0, color: NEON.orange, reach });
         this.sound.play('boom');
@@ -1772,7 +2217,8 @@ export class Game {
     return true;
   }
 
-  private updateEnemies(dt: number): void {
+  /** `dt` is game time; `real` is the time that actually passed, which a hit's flash is timed by. */
+  private updateEnemies(dt: number, real: number): void {
     const playing = this.state === 'playing';
     const left = this.inset.left + this.margin;
     const right = this.w - this.inset.right - this.margin;
@@ -1780,7 +2226,7 @@ export class Game {
 
     for (const e of this.enemies) {
       e.age += dt;
-      e.flash = Math.max(0, e.flash - dt);
+      e.flash = Math.max(0, e.flash - real);
 
       if (e.kind === 'drifter') {
         const sway = Math.sin(e.age * 1.7 + e.phase);
@@ -1800,7 +2246,7 @@ export class Game {
           const tx = ship.x - e.x;
           const ty = Math.max(80, ship.y - e.y);
           const dist = Math.hypot(tx, ty);
-          const speed = Math.min(560, 400 + this.wave * 14);
+          const speed = Math.min(560, 400 + this.wave * 14) * this.pace;
           e.vx = (tx / dist) * speed;
           e.vy = (ty / dist) * speed;
           e.rot = Math.atan2(-e.vx, e.vy);
@@ -1864,7 +2310,7 @@ export class Game {
             const tx = ship.x - e.x;
             const ty = ship.y - e.y;
             const dist = Math.hypot(tx, ty) || 1;
-            const speed = Math.min(300, 210 + this.wave * 8);
+            const speed = Math.min(300, 210 + this.wave * 8) * this.pace;
             this.shots.push({ x: e.x, y: e.y, vx: (tx / dist) * speed, vy: (ty / dist) * speed, hostile: true, dead: false, color: PINK });
             this.sound.play('enemyShot');
           }
@@ -1912,6 +2358,14 @@ export class Game {
         this.sound.play('clang');
         continue;
       }
+      // Rocks stop every shot, piercing ones too.
+      const field = this.field;
+      const rock = field && this.near.find((r) => !r.dead && Math.hypot(s.x - r.x, s.y - (field.front - r.d)) < r.r + 2);
+      if (rock) {
+        s.dead = true;
+        this.hitRock(rock, s.x, s.y);
+        continue;
+      }
       for (const e of this.enemies) {
         if (e.dead || e === s.skip) continue;
         if (Math.hypot(s.x - e.x, s.y - e.y) < KINDS[e.kind].radius * this.scale + 4) {
@@ -1944,6 +2398,19 @@ export class Game {
         return;
       }
     }
+    // Flying into a rock costs a point of hull. A little one breaks; a tough one does not even notice.
+    if (this.field) {
+      const front = this.field.front;
+      for (const rock of this.near) {
+        if (rock.dead || Math.hypot(rock.x - ship.x, front - rock.d - ship.y) >= rock.r * 0.9 + shipRadius) continue;
+        if (!rock.tough) this.breakRock(rock);
+        this.fieldHits += 1;
+        this.hitShip();
+        // A little longer than usual before the next rock can hurt: time to get back into the gap.
+        if (this.state === 'playing') ship.invulnerable = Math.max(ship.invulnerable, 2.2);
+        return;
+      }
+    }
   }
 
   // ---------------------------------------------------------------- render
@@ -1965,14 +2432,23 @@ export class Game {
     ctx.globalAlpha = 1;
   }
 
-  /** Largest size up to `size` at which `text` still fits the screen width. */
-  private fit(text: string, size: number): number {
-    const width = textWidth(text, size);
-    return width > this.room ? (size * this.room) / width : size;
+  /** The colours of these things (or of the ones `keep` lets through), so each colour can be drawn in one stroke. */
+  private tintsOf<T extends { color: string }>(items: readonly T[], keep?: (item: T) => boolean): Set<string> {
+    this.tints.clear();
+    for (const item of items) if (!keep || keep(item)) this.tints.add(item.color);
+    return this.tints;
+  }
+
+  /** Small print is drawn a quarter larger on a big screen, where it would otherwise be tiny. */
+  private get big(): boolean {
+    return this.w >= 1000 && this.h >= 640;
+  }
+  private print(size: number): number {
+    return this.big ? Math.round(size * 1.25) : size;
   }
 
   private centred(text: string, y: number, size: number, alpha = 1, color = SAND): void {
-    const fitted = this.fit(text, size);
+    const fitted = this.fitTo(text, size, this.room);
     this.ink(color, alpha, fitted > 16 ? 1.8 : 1.4, () => traceText(this.ctx, text, this.w / 2, y, fitted, 'center'));
   }
 
@@ -1984,12 +2460,14 @@ export class Game {
     const view = this.view;
     const shake = Math.max(this.shake, view?.shake ?? 0);
     if (shake > 0) ctx.translate(rand(-1, 1) * shake * 14, rand(-1, 1) * shake * 14);
-    const frame = { ctx, ink: this.inkFn, w, h, inset: this.inset, time: this.time, touch: this.input === 'touch' };
-    // From the cockpit, the sky stops at the horizon.
-    if (view && view.horizon !== null) {
+    const frame = this.intro ? { ctx, ink: this.inkFn, w, h, inset: this.inset, time: this.time, touch: this.input === 'touch' } : null;
+    // From the cockpit, the sky stops at the horizon; in the hangar, it shows only through the door.
+    const framed = view !== null && (view.horizon !== null || view.sky !== null);
+    if (view && framed) {
       ctx.save();
       ctx.beginPath();
-      ctx.rect(-20, -20, w + 40, view.horizon + 20);
+      if (view.sky) view.sky(ctx);
+      else ctx.rect(-20, -20, w + 40, (view.horizon ?? 0) + 20);
       ctx.clip();
     }
 
@@ -2043,11 +2521,11 @@ export class Game {
         });
       }, false);
     });
-    if (view && view.horizon !== null) ctx.restore();
-    this.intro?.renderGround(frame);
+    if (framed) ctx.restore();
+    if (frame) this.intro?.renderGround(frame);
 
     // Debris fades in two steps rather than per piece, and is grouped by colour, to keep strokes batched.
-    for (const color of new Set(this.debris.map((d) => d.color))) {
+    for (const color of this.tintsOf(this.debris)) {
       for (const fresh of [true, false]) {
         this.ink(color, fresh ? 1 : 0.45, 1.5, () => {
           for (const d of this.debris) {
@@ -2075,7 +2553,7 @@ export class Game {
         }
       });
       this.ink(color, prize ? 0.9 : 0.65, 1.1, () => {
-        for (const p of these) traceText(ctx, STAKES[p.reward].label, p.x, p.y + (prize ? 22 : 19) * sc, 7, 'center');
+        for (const p of these) traceText(ctx, STAKES[p.reward].label, p.x, p.y + (prize ? 22 : 19) * sc, this.print(7), 'center');
       }, false);
     }
 
@@ -2087,6 +2565,49 @@ export class Game {
       });
     }
 
+    // Asteroids: the tough ones dull, the little ones that break bright, and any that was just hit in the ship's colour.
+    if (this.field && this.near.length) {
+      const field = this.field;
+      const front = field.front;
+      // Faint arrowheads down the middle of each way through show where it goes: cool blue for the easy way,
+      // hot orange for the hard one. They ride along with the rocks.
+      const step = 54 * sc;
+      for (const hard of [false, true]) {
+        this.ink(hard ? NEON.orange : NEON.cyan, 0.6, 1.4, () => {
+          for (let d = Math.max(0, Math.ceil((front - h) / step) * step); d < Math.min(front + 20, field.length); d += step) {
+            const x = gapAt(field, front - d, hard);
+            const ahead = gapAt(field, front - d - step, hard);
+            if (x === null) continue;
+            // Each one points the way the gap goes from there.
+            const lean = ahead === null ? 0 : Math.atan2(ahead - x, step);
+            const y = front - d;
+            const arm = 7.5 * sc;
+            ctx.moveTo(x + Math.sin(lean - 2.5) * arm, y - Math.cos(lean - 2.5) * arm);
+            ctx.lineTo(x + Math.sin(lean) * arm * 0.4, y - Math.cos(lean) * arm * 0.4);
+            ctx.lineTo(x + Math.sin(lean + 2.5) * arm, y - Math.cos(lean + 2.5) * arm);
+          }
+        }, false);
+      }
+      // Where the two first part, each is signposted with what is in it.
+      for (const sign of field.signs) {
+        const y = front - sign.d;
+        if (y < -30 || y > h + 30) continue;
+        const size = this.print(8);
+        const half = textWidth('POWER-UPS', size) / 2 + 4;
+        const x = clamp(sign.x, this.inset.left + half, w - this.inset.right - half);
+        this.ink(sign.hard ? NEON.orange : NEON.cyan, 1, 1.3, () => {
+          traceText(ctx, sign.hard ? 'HARD WAY' : 'EASY WAY', x, y - size - 3, size, 'center');
+          traceText(ctx, sign.hard ? 'POWER-UPS' : 'BOMBS', x, y + 3, size, 'center');
+        }, false);
+      }
+      const rocks = (keep: (rock: Rock) => boolean) => () => {
+        for (const rock of this.near) if (!rock.dead && keep(rock)) trace(ctx, rock.shape, rock.x, front - rock.d, 1, rock.rot);
+      };
+      this.ink(ROCK, 1, 1.5, rocks((rock) => rock.tough && rock.flash <= 0), false);
+      this.ink(PEBBLE, 1, 1.4, rocks((rock) => !rock.tough && rock.flash <= 0));
+      this.ink(SAND, 1, 2, rocks((rock) => rock.flash > 0));
+    }
+
     for (const color of ENEMY_COLORS) {
       if (!this.enemies.some((e) => e.flash <= 0 && KINDS[e.kind].color === color)) continue;
       this.ink(color, 1, 1.6, () => {
@@ -2094,7 +2615,7 @@ export class Game {
       });
     }
     // Enemy shots are diamonds in the colour of whatever fired them.
-    for (const color of new Set(this.shots.filter((s) => s.hostile).map((s) => s.color))) {
+    for (const color of this.tintsOf(this.shots, isHostile)) {
       this.ink(color, 1, 1.6, () => {
         for (const s of this.shots) {
           if (!s.hostile || s.color !== color) continue;
@@ -2111,10 +2632,20 @@ export class Game {
     this.ink(SAND, 1, 2.2, () => {
       for (const e of this.enemies) if (e.flash > 0) trace(ctx, KINDS[e.kind].shape, e.x, e.y, sc, e.rot);
     });
+    // The spark at the heart of each one is whoever it is holding.
+    if (this.enemies.length) {
+      this.ink(SOUL, 0.6 + 0.3 * Math.sin(this.time * 5), 1.2, () => {
+        for (const e of this.enemies) {
+          ctx.moveTo(e.x + 1.3 * sc, e.y);
+          ctx.arc(e.x, e.y, 1.3 * sc, 0, Math.PI * 2);
+        }
+      }, false);
+    }
+    if (this.tanker) this.renderTanker(this.tanker);
 
     // The ship's shots are drawn along the way they fly, so the angled wing cannons look angled.
     // (A wingmate's shots are green, so it is clear who fired what.)
-    for (const color of new Set(this.shots.filter((s) => !s.hostile).map((s) => s.color))) {
+    for (const color of this.tintsOf(this.shots, isOwn)) {
       this.ink(color, 1, 1.8, () => {
         for (const s of this.shots) {
           if (s.hostile || s.color !== color) continue;
@@ -2157,7 +2688,13 @@ export class Game {
       // The sum boss wears its question above its head for as long as the answer ships are out.
       if (b.problem && b.pods.length) {
         const question = `${b.problem.question} = ?`;
-        this.ink(NEON.yellow, 1, 1.8, () => traceText(ctx, question, b.x, b.y - 100 * sc, 18, 'center'));
+        // On a narrow screen the boss's face, in the top right corner, is in the way: the sum slides left of it.
+        const half = textWidth(question, 18) / 2;
+        const qy = b.y - 100 * sc;
+        const face = this.faceBox;
+        const beside = qy < this.inset.top + 64 + face + 6 ? w - this.inset.right - 12 - face - 10 - half : Infinity;
+        const qx = Math.max(this.inset.left + 8 + half, Math.min(b.x, beside));
+        this.ink(NEON.yellow, 1, 1.8, () => traceText(ctx, question, qx, qy, 18, 'center'));
         // On a touch screen the answer is tapped, not shot, and that needs saying while the ships are there.
         if (this.input === 'touch') {
           const x = clamp(b.x, this.inset.left + 70, w - this.inset.right - 70);
@@ -2176,15 +2713,32 @@ export class Game {
       });
     }
 
+    // The people set free wave their arms as they go.
+    if (this.souls.length) {
+      this.ink(SOUL, 1, 1.3, () => {
+        for (const s of this.souls) {
+          if (s.age < 0) continue;
+          const waving = Math.floor(this.time * 7 + s.phase) % 2 === 0;
+          trace(ctx, waving ? PERSON_UP : PERSON_OUT, s.x, s.y, 1.2 * sc * Math.min(1, 0.4 + s.age * 4), Math.sin(this.time * 5 + s.phase) * 0.22);
+        }
+      });
+    }
+
     // The cockpit goes over the view out of it, and under the ship that rises as the cockpit drops away.
-    this.intro?.renderCockpit(frame);
+    if (frame) this.intro?.renderCockpit(frame);
+    // The cut from the hangar to the cockpit is a fade through black.
+    if (view && view.curtain > 0) {
+      ctx.fillStyle = `rgba(3, 7, 26, ${Math.min(1, view.curtain).toFixed(3)})`;
+      ctx.fillRect(-20, -20, w + 40, h + 40);
+    }
 
     // The ship blinks while it cannot be hit, but never disappears on the paused screen.
     const blinking = this.state === 'playing' && !this.paused && !this.prompt && !this.brk && this.ship.invulnerable > 0;
-    const shipVisible = this.state !== 'over' && (!view || view.ship > 0) && (!blinking || Math.floor(this.time * 14) % 2 === 0);
+    // (For people who have asked for less motion it goes faint instead of blinking.)
+    const shipVisible = this.state !== 'over' && (!view || view.ship > 0) && (!blinking || this.reduceMotion || Math.floor(this.time * 14) % 2 === 0);
     if (shipVisible) {
       const s = this.shipScale;
-      this.ink(SAND, 1, 1.7, () => trace(ctx, SHIP, this.ship.x, this.ship.y, s, 0));
+      this.ink(SAND, blinking && this.reduceMotion ? 0.45 : 1, 1.7, () => trace(ctx, SHIP, this.ship.x, this.ship.y, s, 0));
       const flame = (this.state === 'playing' ? rand(8, 15) : rand(4, 8)) * s;
       this.ink(PINK, 1, 1.5, () => {
         ctx.moveTo(this.ship.x - 3 * s, this.ship.y + 13 * s);
@@ -2229,6 +2783,163 @@ export class Game {
 
     if (this.state !== 'ready') this.renderHud();
     this.renderMessages();
+    if (this.alert !== null && this.state === 'playing' && !this.paused) this.renderAlert(this.alert);
+  }
+
+  /**
+   * The flight commander, large in the middle of the screen, with what they are saying underneath: first
+   * the alarm, worried, and then the choice between the two ways through.
+   */
+  private renderAlert(age: number): void {
+    const { ctx, w, h } = this;
+    const t = this.time;
+    const steady = this.reduceMotion;
+    const fade = clamp(Math.min(age / 0.2, (ALERT_SECONDS - age) / 0.35), 0, 1);
+    const alarm = age < ALERT_TURN;
+    const [headline, order] = BRIEFING.asteroids;
+    const [look, or, choose] = BRIEFING.choice;
+    const big = this.fitTo(headline, h < 500 ? 20 : 28, this.room);
+    const small = Math.min(this.fitTo(order, h < 500 ? 11 : 15, this.room), this.fitTo(look, h < 500 ? 11 : 15, this.room));
+    // The screen, then the words, centred as a block a little above the middle. (It is sized for the longer
+    // of the two things said, so that it does not jump when the commander moves on.)
+    const box = Math.round(Math.min(w - this.inset.left - this.inset.right - 60, h * (h < 500 ? 0.36 : 0.4), 320));
+    const block = box + 20 + small + 8 + small + 12 + big;
+    const x = w / 2 - box / 2;
+    const y = Math.max(this.inset.top + 58, Math.min(h * 0.44 - block / 2, this.homeY - 44 - block));
+    const cut = box * 0.16;
+    const frame = (): void => {
+      ctx.moveTo(x + cut, y);
+      ctx.lineTo(x + box - cut, y);
+      ctx.lineTo(x + box, y + cut);
+      ctx.lineTo(x + box, y + box - cut);
+      ctx.lineTo(x + box - cut, y + box);
+      ctx.lineTo(x + cut, y + box);
+      ctx.lineTo(x, y + box - cut);
+      ctx.lineTo(x, y + cut);
+      ctx.closePath();
+    };
+    const flash = steady || Math.floor(t * 6) % 2 === 0;
+    // How far through saying the second thing: the mouth moves until it is said.
+    const told = Math.floor((age - ALERT_TURN) * 46);
+    const mood: Mood = alarm ? 'worried' : told < look.length + or.length + choose.length ? 'talk' : 'calm';
+    // Worried: looking this way and that, and shuddering. Then steadier, looking straight at the pilot.
+    const yaw = alarm ? Math.sin(t * 4.2) * 0.3 : Math.sin(t * 0.9) * 0.08;
+    const pitch = 0.05 + (steady ? 0 : alarm ? Math.sin(t * 34) * 0.025 : mood === 'talk' ? Math.sin(t * 7) * 0.035 : 0);
+    const cx = x + box / 2;
+    const cy = y + box * 0.5;
+    const size = box * 0.3;
+
+    ctx.save();
+    ctx.beginPath();
+    frame();
+    ctx.fillStyle = `rgba(3, 7, 26, ${(0.86 * fade).toFixed(3)})`;
+    ctx.fill();
+    ctx.clip();
+    this.ink(NEON.cyan, 0.5 * fade, 1.2, () => traceAvatar(ctx, 'commander', 'head', cx, cy, size, yaw, pitch, mood, t), false);
+    this.ink(SAND, fade, 2, () => traceAvatar(ctx, 'commander', 'face', cx, cy, size, yaw, pitch, mood, t));
+    // Scan lines: it is a picture sent over the radio.
+    this.ink(NEON.cyan, 0.12 * fade, 1, () => {
+      for (let sy = y + ((t * 14) % 6); sy < y + box; sy += 6) {
+        ctx.moveTo(x, sy);
+        ctx.lineTo(x + box, sy);
+      }
+    }, false);
+    ctx.restore();
+    this.ink(alarm ? (flash ? NEON.red : NEON.yellow) : NEON.cyan, fade, 2, frame);
+
+    // The words appear as they are spoken. Each line starts where it will end up, so it does not slide about.
+    const ty = y + box + 20;
+    const write = (text: string, shown: number, top: number, size: number, color: string, width: number): void => {
+      const part = text.slice(0, Math.max(0, shown));
+      if (part) this.ink(color, fade, width, () => traceText(ctx, part, w / 2 - textWidth(text, size) / 2, top, size));
+    };
+    if (alarm) {
+      const said = Math.floor(age * 46);
+      write(headline, said, ty, big, flash ? NEON.red : NEON.yellow, 2);
+      write(order, said - headline.length, ty + big + 14, small, SAND, 1.6);
+    } else {
+      const last = this.fitTo(choose, big, this.room);
+      write(look, told, ty, small, SAND, 1.6);
+      write(or, told - look.length, ty + small + 8, small, SAND, 1.6);
+      write(choose, told - look.length - or.length, ty + small + 8 + small + 12, last, NEON.yellow, 2);
+    }
+  }
+
+  /** The fuel ship, its line and basket, and how the refuelling is going. */
+  private renderTanker(t: Tanker): void {
+    const { ctx } = this;
+    const sc = this.scale;
+    const env = this.tankerEnv();
+    const tail = tankerTail(t, sc);
+    const end = t.hooked ? { x: env.noseX, y: env.noseY } : t.drogue;
+    const steady = this.reduceMotion;
+    // The line is green while it is easy, yellow as it tightens and red when it is about to come off.
+    const lineColor = t.strain > 0.8 ? NEON.red : t.strain > 0.5 ? NEON.yellow : NEON.lime;
+    // It hangs in a lazy curve while it is slack, pulls straight as it tightens, and shivers at the end.
+    const bow = (1 - t.strain) * 20 * sc * (t.hooked ? Math.sin(this.time * 2.2 + t.phases[0]) : 0.35);
+    const shiver = t.strain > 0.8 && !steady ? rand(-1.5, 1.5) : 0;
+    const mx = (tail.x + end.x) / 2 + bow + shiver;
+    const my = (tail.y + end.y) / 2;
+    const top = end.y - 5 * sc;
+    this.ink(lineColor, 1, 1.5, () => {
+      ctx.moveTo(tail.x, tail.y);
+      ctx.quadraticCurveTo(mx, my, end.x, top);
+      trace(ctx, DROGUE, end.x, end.y, sc, 0);
+    });
+    if (t.hooked) {
+      // Fuel on its way down the line.
+      this.ink(SAND, 1, 1.3, () => {
+        for (let i = 0; i < 4; i++) {
+          const u = (this.time * 1.1 + i / 4) % 1;
+          const x = (1 - u) * (1 - u) * tail.x + 2 * (1 - u) * u * mx + u * u * end.x;
+          const y = (1 - u) * (1 - u) * tail.y + 2 * (1 - u) * u * my + u * u * top;
+          const r = 2.2 * sc;
+          ctx.moveTo(x, y - r);
+          ctx.lineTo(x + r, y);
+          ctx.lineTo(x, y + r);
+          ctx.lineTo(x - r, y);
+          ctx.closePath();
+        }
+      }, false);
+    }
+
+    // It flickers when it is about to give up waiting.
+    const impatient = t.state === 'station' && !t.hooked && t.patience < 3;
+    const faint = impatient && (steady || Math.floor(this.time * 6) % 2 === 0);
+    const big = sc * TANKER_SIZE;
+    this.ink(NEON.lime, faint ? 0.45 : 1, 1.7, () => trace(ctx, TANKER, t.x, t.y, big, 0));
+    this.ink(PINK, 1, 1.4, () => {
+      for (const side of [-1, 1]) {
+        const x = t.x + side * 14.5 * big;
+        const y = t.y + 21.5 * big;
+        ctx.moveTo(x - 3 * big, y);
+        ctx.lineTo(x, y + rand(6, 12) * big);
+        ctx.lineTo(x + 3 * big, y);
+      }
+    });
+
+    if (this.state !== 'playing') return;
+    // How full the tank is: a ring round the ship that closes as the fuel goes in.
+    if (t.fuel > 0) {
+      const r = 27 * this.shipScale;
+      const { x, y } = this.ship;
+      this.ink(NEON.lime, 0.22, 1.2, () => {
+        ctx.moveTo(x + r, y);
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+      }, false);
+      this.ink(NEON.lime, 1, 2, () => {
+        ctx.moveTo(x, y - r);
+        ctx.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * t.fuel);
+      });
+      this.ink(NEON.lime, 0.9, 1.2, () => traceText(ctx, `FUEL ${percent(t.fuel)}%`, x, y + r + 6, this.print(8), 'center'), false);
+    }
+    // By the basket: what to do, or what just went wrong.
+    if (t.state === 'station' && !t.hooked) {
+      const lost = t.why !== null && t.whyAge < 1.1;
+      const label = lost ? (t.why === 'close' ? 'TOO CLOSE!' : 'TOO FAR!') : t.fuel > 0 ? 'HOOK ON AGAIN' : 'HOOK ON HERE';
+      const alpha = lost || steady ? 1 : 0.6 + 0.35 * Math.sin(this.time * 6);
+      this.ink(lost ? NEON.red : NEON.lime, alpha, 1.2, () => traceText(ctx, label, t.drogue.x, t.drogue.y + 9 * sc, this.print(8), 'center'), false);
+    }
   }
 
   /** Side of the square each corner face sits in: large on a desktop, smaller on phones (either way up). */
@@ -2259,8 +2970,9 @@ export class Game {
     const waveY = top + box - (small ? 9 : 10);
     const waveSize = small ? 8 : 9;
     const waveText = `WAVE ${this.wave}`;
+    const line = this.scoreLine;
     this.ink(SAND, 1, 1.4, () => {
-      traceText(ctx, this.w < 360 ? pad6(this.score) : `SCORE ${pad6(this.score)}`, x0, top + 1, small ? 10 : 12);
+      traceText(ctx, line.text, line.x, line.y, line.size);
       for (let i = 0; i < this.hull; i++) trace(ctx, SHIP, x0 + 8 + i * hullGap, hullY, hullScale, 0);
       if (this.w >= 720) traceText(ctx, `BEST ${pad6(this.best)}`, this.w / 2, top + 1, 12, 'center');
     });
@@ -2272,13 +2984,21 @@ export class Game {
     }
     this.ink(SAND, 0.7, 1.2, () => traceText(ctx, waveText, x0, waveY, waveSize));
 
+    // After the score: how many people have been set free. The little figure jumps as each one arrives.
+    const at = this.freedAt;
+    const jump = this.reduceMotion ? 0 : this.freedPulse / 0.3;
+    this.ink(SOUL, 1, 1.2, () => {
+      trace(ctx, jump > 0 ? PERSON_UP : PERSON_OUT, at.x, at.y + 1 - jump * 2, (line.size / 17) * (1 + jump * 0.25), 0);
+      traceText(ctx, String(this.freed), at.x + line.size * 0.62, line.y, line.size);
+    });
+
     // Energy gauge: ten ticks. The taller ones are the half that buys the third cannon.
     // It sits beside the hull, or beside the wave number where there is less room.
     const gauge = small ? x0 + textWidth(waveText, waveSize) + 10 : x0 + this.maxHull * hullGap + 8;
     const foot = small ? waveY + waveSize : hullY + 6;
     const step = small ? 4 : 5;
     if (this.jam > 0) {
-      if (this.time % 0.5 < 0.32) this.ink(PINK, 1, 1.3, () => traceText(ctx, 'JAMMED', gauge, foot - waveSize, waveSize));
+      if (this.reduceMotion || this.time % 0.5 < 0.32) this.ink(PINK, 1, 1.3, () => traceText(ctx, 'JAMMED', gauge, foot - waveSize, waveSize));
     } else if (this.energy > 0) {
       const lit = Math.ceil(this.energy * 10);
       const ticks = (from: number, to: number) => () => {
@@ -2292,10 +3012,13 @@ export class Game {
     }
 
     // The upgrades earned so far, as a row of small icons under the cockpit.
+    // On a phone they are drawn smaller and closer together, to leave room beside them for the boss's health.
+    const iconStep = small ? 14 : 18;
+    const iconsEnd = this.upgrades.size ? left + 8 + (this.upgrades.size - 1) * iconStep + 7 : left;
     if (this.upgrades.size) {
       this.ink(NEON.lime, 0.85, 1.1, () => {
         let i = 0;
-        for (const u of UPGRADES) if (this.upgrades.has(u.id)) trace(ctx, u.icon, left + 8 + i++ * 18, top + box + 14, 0.55, 0);
+        for (const u of UPGRADES) if (this.upgrades.has(u.id)) trace(ctx, u.icon, left + 8 + i++ * iconStep, top + box + (small ? 12 : 14), small ? 0.45 : 0.55, 0);
       }, false);
     }
 
@@ -2309,7 +3032,7 @@ export class Game {
     const edge = bx - 10;
     const room = edge - left;
     if (b && (b.state === 'fight' || b.state === 'enter')) {
-      const length = Math.min(150, room);
+      const length = Math.min(150, room, small ? Math.max(48, edge - iconsEnd - 10) : Infinity, this.h < 500 ? SHORT_TAUNT : Infinity);
       this.ink(NEON.red, 0.25, 2, () => {
         ctx.moveTo(edge - length, by + 5);
         ctx.lineTo(edge, by + 5);
@@ -2320,9 +3043,10 @@ export class Game {
       });
     }
     if (v.lineUntil > this.time) {
-      const size = this.fitTo(v.line, small ? 9 : 11, room);
+      const size = this.fitTo(v.line, small ? 9 : 11, this.h < 500 ? SHORT_TAUNT : room);
       const alpha = Math.min(1, (v.lineUntil - this.time) / 0.3);
-      this.ink(NEON.yellow, alpha, 1.5, () => traceText(ctx, v.line, edge, by + 17, size, 'right'));
+      // (A line lower on a phone, so a long taunt runs under the upgrade icons and not through them.)
+      this.ink(NEON.yellow, alpha, 1.5, () => traceText(ctx, v.line, edge, by + (small ? 24 : 17), size, 'right'));
     }
   }
 
@@ -2416,7 +3140,7 @@ export class Game {
 
     // A boss arrives under a flashing warning, and leaves under a line saying how it went.
     if (this.state === 'playing' && this.boss?.state === 'enter') {
-      const flash = Math.floor(this.time * 7) % 2 === 0;
+      const flash = this.reduceMotion || Math.floor(this.time * 7) % 2 === 0;
       this.centred('WARNING', mid, 30, 1, flash ? NEON.red : NEON.yellow);
       this.centred(
         this.boss.kind === 'sum'
@@ -2427,9 +3151,28 @@ export class Game {
       return;
     }
     if (this.state === 'playing' && this.intermission > 0) {
-      const color = NEON_LIST[Math.floor(this.time * 10) % NEON_LIST.length]!;
-      this.centred(this.bossNote, mid, 26, Math.min(1, this.intermission / 0.4), color);
+      const color = this.reduceMotion ? NEON.yellow : NEON_LIST[Math.floor(this.time * 10) % NEON_LIST.length]!;
+      const alpha = Math.min(1, this.intermission / 0.4);
+      this.centred(this.bossNote, mid, 26, alpha, color);
+      if (this.bossFreed) this.centred(`${this.bossFreed} PEOPLE SET FREE`, mid + 48, 13, alpha, SOUL);
       return;
+    }
+
+    // The fuel ship is announced below where the ship will be flying, and so is how the refuelling went.
+    if (this.state === 'playing') {
+      const t = this.tanker;
+      const low = Math.min(this.h * 0.58, this.homeY - 96);
+      if (t && t.fuel === 0 && !t.hooked && t.age < 3.2 && t.state !== 'leaving') {
+        const alpha = Math.min(1, t.age / 0.3, (3.2 - t.age) / 0.4);
+        this.centred('FUEL SHIP', low, 22, alpha, NEON.lime);
+        this.centred('FLY IN BEHIND IT AND CATCH THE FUEL LINE', low + 40, 11, alpha * 0.9);
+        this.centred(`STAY HOOKED ON FOR ${FUEL_SECONDS} SECONDS`, low + 62, 11, alpha * 0.9);
+        return;
+      }
+      if (this.fuelNote.until > this.time) {
+        this.centred(this.fuelNote.text, low, 16, Math.min(1, (this.fuelNote.until - this.time) / 0.4), this.fuelNote.color);
+        return;
+      }
     }
 
     if (this.state === 'playing' && this.banner > 0) {
@@ -2442,8 +3185,10 @@ export class Game {
       this.centred('GAME OVER', mid - 30, 32, alpha);
       this.centred(`SCORE ${pad6(this.score)}`, mid + 30, 15, alpha);
       this.centred(this.newBest ? 'NEW BEST!' : `BEST ${pad6(this.best)}`, mid + 60, 11, alpha * 0.8, this.newBest ? PINK : SAND);
+      const freed = this.freed + this.souls.length;
+      this.centred(freed === 1 ? 'YOU SET 1 PERSON FREE' : `YOU SET ${freed} PEOPLE FREE`, mid + 86, 11, alpha, SOUL);
       if (this.stateTime > 0.9 && blink) {
-        this.centred(this.coarse ? 'TAP TO RETRY' : 'PRESS SPACE TO RETRY - ESC TO EXIT', mid + 104, 11, 0.9);
+        this.centred(this.coarse ? 'TAP TO RETRY' : 'PRESS SPACE TO RETRY - ESC TO EXIT', mid + 122, 11, 0.9);
       }
     }
   }
@@ -2452,7 +3197,9 @@ export class Game {
 
   /** Top of the question panel. A break sits mid-screen; a capsule's question sits higher, clear of the ship. */
   private get challengeTop(): number {
-    return this.brk ? this.h * 0.42 - 44 : Math.max(this.inset.top + 96, this.h * 0.2);
+    const usual = this.brk ? this.h * 0.42 - 44 : Math.max(this.inset.top + 96, this.h * 0.2);
+    // On a very short screen the whole question moves up, so that its last line stays clear of the ship.
+    return Math.max(this.inset.top + 40, Math.min(usual, this.homeY - 196));
   }
 
   /** Where the answer boxes of a multiple-choice sum go. Used to draw them and to tell which one was clicked. */
@@ -2465,7 +3212,7 @@ export class Game {
 
   /** Where the upgrades on offer go: one row each. Used to draw them and to tell which one was clicked. */
   private offerBoxes(count: number): Box[] {
-    const rowHeight = this.h < 480 ? 44 : 54;
+    const rowHeight = this.h < 480 ? 44 : this.big ? 64 : 54;
     const w = Math.min(this.room, 420);
     return Array.from({ length: count }, (_, i) => ({ x: this.w / 2 - w / 2, y: this.challengeTop + 26 + i * (rowHeight + 8), w, h: rowHeight }));
   }
@@ -2474,23 +3221,23 @@ export class Game {
     const { ctx } = this;
     const alpha = Math.min(1, age / 0.3);
     const boxes = this.offerBoxes(offer.length);
-    this.centred('CORRECT - CHOOSE AN UPGRADE', this.challengeTop, 11, alpha, NEON.lime);
+    this.centred('CORRECT - CHOOSE AN UPGRADE', this.challengeTop, this.print(11), alpha, NEON.lime);
     boxes.forEach((b, i) => {
       const u = offer[i]!;
       const textX = b.x + b.h + 10;
       const room = b.w - b.h - 22;
-      const nameSize = this.fitTo(u.name, 12, room);
+      const nameSize = this.fitTo(u.name, this.print(12), room);
       this.ink(SAND, alpha * 0.9, 1.4, () => ctx.rect(b.x, b.y, b.w, b.h));
       this.ink(NEON.lime, alpha, 1.6, () => {
         trace(ctx, u.icon, b.x + 4 + b.h / 2, b.y + b.h / 2, b.h / 40, 0);
         traceText(ctx, u.name, textX, b.y + b.h / 2 - nameSize - 2, nameSize);
       });
-      this.ink(SAND, alpha * 0.8, 1.1, () => traceText(ctx, u.blurb, textX, b.y + b.h / 2 + 6, this.fitTo(u.blurb, 8, room)), false);
+      this.ink(SAND, alpha * 0.8, 1.1, () => traceText(ctx, u.blurb, textX, b.y + b.h / 2 + 6, this.fitTo(u.blurb, this.print(8), room)), false);
       // The number key that picks this one, for players at a keyboard.
-      if (this.input === 'keys') this.ink(SAND, alpha * 0.55, 1, () => traceText(ctx, String(i + 1), b.x + b.w - 8, b.y + 6, 7, 'right'), false);
+      if (this.input === 'keys') this.ink(SAND, alpha * 0.55, 1, () => traceText(ctx, String(i + 1), b.x + b.w - 8, b.y + 6, this.print(7), 'right'), false);
     });
     const last = boxes[boxes.length - 1];
-    if (last) this.centred(this.input === 'keys' ? 'CLICK ONE OR PRESS ITS NUMBER' : 'TAP ONE', last.y + last.h + 12, 8, alpha * 0.6);
+    if (last) this.centred(this.input === 'keys' ? 'CLICK ONE OR PRESS ITS NUMBER' : 'TAP ONE', last.y + last.h + 12, this.print(8), alpha * 0.6);
   }
 
   private renderBreak(b: Break): void {
@@ -2515,7 +3262,7 @@ export class Game {
     const { ctx } = this;
     const alpha = Math.min(1, c.age / 0.35);
     const done = c.outcome !== null;
-    this.centred(title, top, 11, alpha * (titleColor === SAND ? 0.8 : 1), titleColor);
+    this.centred(title, top, this.print(11), alpha * (titleColor === SAND ? 0.8 : 1), titleColor);
 
     if (c.kind === 'line') {
       this.renderLine(c, top + 40, alpha);
@@ -2537,7 +3284,7 @@ export class Game {
           });
           this.ink(correct ? PINK : SAND, a, 1.8, () => traceText(ctx, c.options[i]!, b.x + b.w / 2, b.y + (b.h - 16) / 2, 16, 'center'));
           // The number key that picks this answer, for players at a keyboard.
-          if (!done && this.input === 'keys') this.ink(SAND, a * 0.55, 1, () => traceText(ctx, String(i + 1), b.x + 6, b.y + 6, 7), false);
+          if (!done && this.input === 'keys') this.ink(SAND, a * 0.55, 1, () => traceText(ctx, String(i + 1), b.x + 6, b.y + 6, this.print(7)), false);
         });
       } else {
         // The answer field: what has been typed so far, and a cursor after it.
@@ -2569,11 +3316,11 @@ export class Game {
           ? c.kind === 'line' ? 'NICE TYPING' : 'CORRECT'
           : c.kind === 'line' ? 'OUT OF TIME'
             : `${c.timeLeft <= 0 ? 'OUT OF TIME' : 'NOT QUITE'} - ${c.question} = ${c.kind === 'choice' ? c.options[c.correct] : c.answer}`;
-      this.centred(said, hintY, 10, 1, o.success ? PINK : SAND);
+      this.centred(said, hintY, this.print(10), 1, o.success ? PINK : SAND);
     } else if (c.kind !== 'line') {
       const again = c.kind === 'entry' && c.misses > 0;
       const how = again ? 'NOT QUITE - ONE MORE TRY' : c.kind === 'entry' ? 'TYPE THE ANSWER' : this.input === 'keys' ? 'CLICK AN ANSWER OR PRESS ITS NUMBER' : 'TAP THE ANSWER';
-      this.centred(how, hintY, again ? 10 : 8, alpha * (again ? 1 : 0.6), again ? NEON.red : SAND);
+      this.centred(how, hintY, this.print(again ? 10 : 8), alpha * (again ? 1 : 0.6), again ? NEON.red : SAND);
     }
   }
 
@@ -2581,7 +3328,7 @@ export class Game {
     const { ctx } = this;
     const wrong = c.error > 0;
     // The line is laid out once, so typed and untyped letters keep their places as the colour moves across.
-    const size = this.fit(c.text, 20);
+    const size = this.fitTo(c.text, 20, this.room);
     const step = advance(size);
     const x = this.w / 2 - textWidth(c.text, size) / 2 + (wrong && !this.reduceMotion ? rand(-3, 3) : 0);
     const next = x + c.index * step;
@@ -2596,7 +3343,7 @@ export class Game {
     }
     this.renderTimer(c, y + size + 30, alpha);
     const pressed = c.index + c.misses;
-    if (!c.outcome) this.centred(`ACCURACY ${pressed ? percent(c.index / pressed) : 100}%`, y + size + 46, 9, alpha * 0.7);
+    if (!c.outcome) this.centred(`ACCURACY ${pressed ? percent(c.index / pressed) : 100}%`, y + size + 46, this.print(9), alpha * 0.7);
   }
 
   /** Time left, as a line that shrinks toward the centre and turns pink for the last quarter. */

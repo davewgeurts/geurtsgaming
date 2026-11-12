@@ -9,14 +9,16 @@ export type Sfx =
   | 'capsule' | 'bomb' | 'blast'
   | 'warning' | 'lock' | 'core' | 'armOff' | 'bossDown' | 'fanfare' | 'escape' | 'laugh' | 'taunt'
   | 'beam' | 'rocket' | 'nova' | 'shield' | 'shieldUp'
-  | 'radio' | 'liftoff' | 'sonic';
+  | 'radio' | 'liftoff' | 'sonic' | 'bell' | 'step' | 'canopy'
+  | 'free' | 'tanker' | 'hook' | 'snap' | 'pump' | 'alarm';
 
 const STORE_KEY = 'gg-arcade-sound';
 /** Overall loudness. Each sound's own level below is a fraction of this. */
 const VOLUME = 0.55;
 /** Seconds that must pass before the same sound may play again, for the ones that come in bursts. */
 const GAP: Partial<Record<Sfx, number>> = {
-  shot: 0.06, enemyShot: 0.12, hit: 0.04, clang: 0.05, boom: 0.06, lock: 0.04, core: 0.04, laugh: 0.8, taunt: 0.3,
+  shot: 0.06, enemyShot: 0.12, step: 0.12, hit: 0.04, clang: 0.05, boom: 0.06, lock: 0.04, core: 0.04, laugh: 0.8, taunt: 0.3,
+  free: 0.06, pump: 0.2,
 };
 
 export class Sound {
@@ -68,7 +70,8 @@ export class Sound {
         this.out = out;
         this.hiss = hiss;
       }
-      if (this.ctx.state === 'suspended') void this.ctx.resume().catch(() => {});
+      // Anything but running: suspended until a first tap, or interrupted (a phone call, the app switcher on an iPhone).
+      if (this.ctx.state !== 'running') void this.ctx.resume().catch(() => {});
     } catch {
       /* no sound on this device; the game plays on without it */
     }
@@ -84,7 +87,8 @@ export class Sound {
 
   play(name: Sfx): void {
     const ctx = this.ctx;
-    if (!this.on || !ctx || ctx.state === 'closed') return;
+    // Sounds asked for while the audio is not running are dropped. Queued up, they would all go off at once later.
+    if (!this.on || !ctx || ctx.state !== 'running') return;
     const gap = GAP[name];
     if (gap !== undefined) {
       if (ctx.currentTime - (this.last.get(name) ?? -1) < gap) return;
@@ -222,6 +226,50 @@ export class Sound {
         break;
       case 'shieldUp':
         tone('sine', 440, 880, 0.18, 0.035);
+        break;
+      case 'alarm':
+        // Asteroids ahead: three urgent double beeps.
+        for (let i = 0; i < 3; i++) {
+          tone('square', 880, 880, 0.09, 0.035, i * 0.26);
+          tone('square', 660, 660, 0.09, 0.035, i * 0.26 + 0.1);
+        }
+        break;
+      case 'free':
+        // Somebody set free: a small bright chime.
+        tone('sine', 1175, 1760, 0.14, 0.03);
+        tone('sine', 2349, 2349, 0.1, 0.01, 0.04);
+        break;
+      case 'tanker':
+        // The fuel ship announcing itself: two notes on a horn.
+        tone('triangle', 196, 196, 0.22, 0.05);
+        tone('triangle', 147, 147, 0.34, 0.05, 0.2);
+        break;
+      case 'hook':
+        tone('square', 520, 520, 0.04, 0.03);
+        tone('square', 780, 780, 0.06, 0.03, 0.06);
+        break;
+      case 'snap':
+        noise(0.14, 0.07, 2600, 500);
+        tone('sawtooth', 520, 130, 0.2, 0.04);
+        break;
+      case 'pump':
+        tone('sine', 300, 380, 0.09, 0.022);
+        break;
+      case 'bell':
+        // A school bell: two bright dings.
+        for (const delay of [0, 0.36]) {
+          tone('sine', 1320, 1320, 0.5, 0.035, delay);
+          tone('sine', 1980, 1980, 0.4, 0.014, delay);
+        }
+        break;
+      case 'step':
+        tone('triangle', 150, 95, 0.05, 0.02);
+        noise(0.04, 0.012, 900, 300);
+        break;
+      case 'canopy':
+        tone('sine', 300, 620, 0.35, 0.03);
+        noise(0.3, 0.02, 600, 2400);
+        tone('square', 880, 880, 0.05, 0.018, 0.36);
         break;
       case 'radio':
         tone('square', 1250, 1250, 0.04, 0.016);

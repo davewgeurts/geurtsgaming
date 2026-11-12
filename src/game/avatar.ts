@@ -81,16 +81,25 @@ function commanderFace(mood: Mood, time: number): Line[] {
   const ey = -0.14;
   const my = 0.62;
   const lines: Line[] = [...PILOT_NOSE];
+  const worried = mood === 'worried';
   if (mood === 'happy') {
     lines.push(...both(flat([[ex - 0.13, ey + 0.04], [ex, ey - 0.08], [ex + 0.13, ey + 0.04]])));
+  } else if (worried) {
+    // Eyes wide open.
+    lines.push(...both(flat([[ex - 0.13, ey - 0.1], [ex + 0.13, ey - 0.1], [ex + 0.11, ey + 0.09], [ex - 0.11, ey + 0.09]], true)));
   } else if (time % 4.3 < 0.12) {
     lines.push(...both(flat([[ex - 0.12, ey], [ex + 0.12, ey]])));
   } else {
     lines.push(...both(flat([[ex - 0.12, ey - 0.05], [ex + 0.12, ey - 0.05], [ex + 0.1, ey + 0.06], [ex - 0.1, ey + 0.06]], true)));
   }
-  lines.push(...both(flat([[ex - 0.17, ey - 0.2], [ex + 0.17, ey - 0.2]])));
+  // Brows: level, or with the inner ends up when something is wrong.
+  lines.push(...both(worried ? flat([[ex - 0.17, ey - 0.37], [ex + 0.19, ey - 0.22]]) : flat([[ex - 0.17, ey - 0.2], [ex + 0.17, ey - 0.2]])));
   lines.push(flat([[-0.3, 0.44], [-0.12, 0.34], [0, 0.4], [0.12, 0.34], [0.3, 0.44]]));
-  if (mood === 'talk') {
+  if (worried) {
+    // Shouting: the mouth opens wide, and wider at the bottom.
+    const gape = 0.06 + 0.13 * Math.abs(Math.sin(time * 12));
+    lines.push(flat([[-0.12, my - 0.05], [0.12, my - 0.05], [0.19, my + 0.02 + gape], [-0.19, my + 0.02 + gape]], true));
+  } else if (mood === 'talk') {
     const gape = 0.03 + 0.13 * Math.abs(Math.sin(time * 11));
     lines.push(flat([[-0.16, my - 0.04], [0.16, my - 0.04], [0.11, my - 0.04 + gape], [-0.11, my - 0.04 + gape]], true));
   } else if (mood === 'happy') {

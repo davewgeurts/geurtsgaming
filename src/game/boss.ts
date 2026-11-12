@@ -40,8 +40,15 @@ const POD_GAP = 92;
 const LOCK = 5;
 /** How far open the armour must be before shots reach the core. */
 const EXPOSED = 0.6;
-/** Seconds the boss stays before it gives up and leaves, so nobody is ever stuck on it. */
+/**
+ * Seconds the boss stays before it gives up and leaves, so nobody is ever stuck on it. Later bosses are
+ * tougher, so they stay a little longer; and past LAST_GROWTH they stop getting tougher at all, so a
+ * good pilot can always finish one off in the time there is.
+ */
 const PATIENCE = 45;
+const PATIENCE_MORE = 2.5;
+const PATIENCE_MOST = 70;
+const LAST_GROWTH = 12;
 
 export interface BossEnv {
   w: number;
@@ -49,6 +56,14 @@ export interface BossEnv {
   /** Top safe-area inset. */
   top: number;
   scale: number;
+  /** How fast things fly on this screen, as a multiple of normal: a short screen is a slower one. */
+  pace: number;
+  /** Px below the top inset that the boss (and the sum over its head) must stay under: the room the HUD takes. */
+  headroom: number;
+  /** The furthest, in px, the boss may sweep to either side of the middle: less where the HUD needs the room. */
+  sweep: number;
+  /** True for people who have asked for less motion: nothing flickers. */
+  calm: boolean;
   shipX: number;
   shipY: number;
   fire(x: number, y: number, vx: number, vy: number, color: string): void;
@@ -106,7 +121,8 @@ const rand = (min: number, max: number) => min + Math.random() * (max - min);
 
 export function createBoss(wave: number, env: BossEnv): Boss {
   const kind = wave % 2 === 0 ? 'sum' : 'arms';
-  const hp = kind === 'arms' ? 16 + 7 * wave : 14 + 6 * wave;
+  const grown = Math.min(wave, LAST_GROWTH);
+  const hp = kind === 'arms' ? 16 + 7 * grown : 14 + 6 * grown;
   const count = Math.min(4, 2 + Math.floor((wave - 1) / 2));
   // Arms fan out below the body, from lower left round to lower right.
   const arms: Arm[] =
@@ -129,7 +145,7 @@ export function createBoss(wave: number, env: BossEnv): Boss {
     open: 0, openFor: 0, cycle: 2.2,
     arms,
     problem: null, problemId: 0, pods: [], nextSum: 0.4,
-    fireIn: 2.4, bombIn: 5, timeLeft: PATIENCE, popIn: 0,
+    fireIn: 2.4, bombIn: 5, timeLeft: Math.min(PATIENCE_MOST, PATIENCE + PATIENCE_MORE * (wave - 1)), popIn: 0,
   };
 }
 
@@ -142,7 +158,7 @@ function aim(b: Boss, env: BossEnv, x: number, y: number, color: string): void {
   const dx = env.shipX - x;
   const dy = env.shipY - y;
   const dist = Math.hypot(dx, dy) || 1;
-  const speed = Math.min(280, 200 + b.wave * 8);
+  const speed = Math.min(280, 200 + b.wave * 8) * env.pace;
   env.fire(x, y, (dx / dist) * speed, (dy / dist) * speed, color);
 }
 
@@ -155,7 +171,7 @@ function lashOut(env: BossEnv, x: number, y: number, count: number, color: strin
   const offset = rand(0, Math.PI * 2);
   for (let i = 0; i < count; i++) {
     const a = offset + (i / count) * Math.PI * 2;
-    env.fire(x, y, Math.cos(a) * 170, Math.sin(a) * 170, color);
+    env.fire(x, y, Math.cos(a) * 170 * env.pace, Math.sin(a) * 170 * env.pace, color);
   }
 }
 
@@ -184,16 +200,20 @@ function newSum(b: Boss, env: BossEnv): void {
   b.pods = b.problem.options.map((value, slot) => ({ slot, value, hits: 0, cool: 0, flash: 0 }));
 }
 
-export function updateBoss(b: Boss, dt: number, env: BossEnv): void {
+/**
+ * Move the boss on by `dt` seconds of game time. `real` is the time that actually passed, which is longer
+ * while a question has the game in slow motion: flashes run on it, so a hit never stays lit for seconds.
+ */
+export function updateBoss(b: Boss, dt: number, env: BossEnv, real = dt): void {
   const s = env.scale * SIZE;
   b.age += dt;
   b.stateTime += dt;
-  b.flash = Math.max(0, b.flash - dt);
-  b.clang = Math.max(0, b.clang - dt);
+  b.flash = Math.max(0, b.flash - real);
+  b.clang = Math.max(0, b.clang - real);
   b.rage = Math.max(0, b.rage - dt);
-  for (const arm of b.arms) arm.flash = Math.max(0, arm.flash - dt);
+  for (const arm of b.arms) arm.flash = Math.max(0, arm.flash - real);
   for (const pod of b.pods) {
-    pod.flash = Math.max(0, pod.flash - dt);
+    pod.flash = Math.max(0, pod.flash - real);
     // A lock that is not kept up fades, so brushing past a ship never adds up to choosing it.
     pod.cool -= dt;
     if (pod.cool <= 0) pod.hits = 0;
@@ -202,7 +222,7 @@ export function updateBoss(b: Boss, dt: number, env: BossEnv): void {
 
   if (b.state === 'enter') {
     // Low enough to leave room above for its sum and for the faces in the corners.
-    const restY = Math.max(env.top + 104 + 72 * s, env.h * 0.25);
+    const restY = Math.max(env.top + env.headroom + 72 * s, env.h * 0.25);
     b.y += (restY - b.y) * (1 - Math.exp(-dt * 2.4));
     if (b.stateTime > 2) setState(b, 'fight');
     return;
@@ -240,7 +260,7 @@ export function updateBoss(b: Boss, dt: number, env: BossEnv): void {
   }
   // It sweeps from side to side, but never so far that its wings or its answer ships leave the screen.
   const halfWidth = b.kind === 'sum' ? POD_GAP + POD_R + 6 : 106;
-  b.x = env.w / 2 + Math.sin(b.stateTime * 0.55) * Math.max(0, Math.min(env.w / 2 - halfWidth * s, 190 * s));
+  b.x = env.w / 2 + Math.sin(b.stateTime * 0.55) * Math.max(0, Math.min(env.w / 2 - halfWidth * s, 190 * s, env.sweep));
 
   b.bombIn -= dt;
   if (b.bombIn <= 0) {
@@ -395,7 +415,8 @@ export function bossParts(b: Boss, env: BossEnv, time: number): Part[] {
   const parts: Part[] = [];
   if (b.state === 'gone') return parts;
   // It fades in as it arrives and flickers as it dies.
-  const alpha = b.state === 'enter' ? Math.min(1, b.stateTime / 0.8) : b.state === 'dying' ? (Math.floor(time * 30) % 2 ? 1 : 0.35) : 1;
+  const dying = env.calm ? 0.7 : Math.floor(time * 30) % 2 ? 1 : 0.35;
+  const alpha = b.state === 'enter' ? Math.min(1, b.stateTime / 0.8) : b.state === 'dying' ? dying : 1;
   const add = (shape: Shape, x: number, y: number, scale: number, rot: number, color: string, width: number, a = 1, label?: string) =>
     parts.push({ shape, x, y, scale, rot, color, width, alpha: alpha * a, label });
 

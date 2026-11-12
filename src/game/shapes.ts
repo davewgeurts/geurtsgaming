@@ -92,7 +92,25 @@ export const MINE: Shape = [
 /** A seeker rocket, nose up. */
 export const ROCKET: Shape = [closed([0, -8], [3, -2], [3, 5], [-3, 5], [-3, -2]), open([-3, 2], [-6, 7]), open([3, 2], [6, 7])];
 /** A friend's ship: the player's own outline without the cockpit, drawn small. */
-export const FRIEND: Shape = [closed([0, -16], [4, -4], [13, 10], [5, 7], [3, 12], [-3, 12], [-5, 7], [-13, 10], [-4, -4])];
+export const FRIEND: Shape = [SHIP[0]!];
+
+/** The fuel ship, nose up: a fat hull with a fuel tank slung on each side. Its fuel line leaves from the tail. */
+export const TANKER: Shape = [
+  closed([0, -34], [9, -24], [11, 4], [20, 12], [20, 22], [9, 20], [6, 30], [-6, 30], [-9, 20], [-20, 22], [-20, 12], [-11, 4], [-9, -24]),
+  closed([-30, -18], [-24, -24], [-18, -18], [-18, 0], [-24, 6], [-30, 0]),
+  closed([30, -18], [24, -24], [18, -18], [18, 0], [24, 6], [30, 0]),
+  open([-18, -9], [-10, -9]),
+  open([18, -9], [10, -9]),
+  // The mark on its back: a drop of fuel.
+  closed([0, -17], [4.5, -8], [0, -3], [-4.5, -8]),
+];
+/** The basket on the end of the fuel line, open toward the ship that is to fly into it. */
+export const DROGUE: Shape = [closed([-3, -5], [3, -5], [8, 4], [-8, 4]), open([-5.5, -0.5], [5.5, -0.5])];
+
+/** Somebody set free, cheering: arms up, then arms out. Drawn one after the other, they wave. */
+const person = (...arms: Pt[]): Shape => [closed(...ngon(6, 2.6).map(([x, y]) => [x, round1(y - 6.6)] as const)), open([0, -4], [0, 2]), open(...arms), open([-3.5, 8], [0, 2], [3.5, 8])];
+export const PERSON_UP: Shape = person([-5, -8], [0, -2.5], [5, -8]);
+export const PERSON_OUT: Shape = person([-6, -3.5], [0, -2.5], [6, -3.5]);
 
 /** Mini boss. The core is the weak spot; the shell is one half of its armour (drawn twice, the second turned round). */
 export const BOSS_CORE: Shape = [closed(...ngon(8, 24, Math.PI / 8))];
