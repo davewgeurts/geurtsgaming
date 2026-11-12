@@ -1,0 +1,228 @@
+/**
+ * Speech: the flight commander, the boss and the pilot say their lines out loud.
+ *
+ * It uses the voices built in to the browser (the Web Speech API), so there are no audio files and nothing to
+ * download. Only voices that run on the device are used: some browsers also offer voices that send the text to
+ * a server to be spoken, and this site makes no requests of that kind. A device with no English voice of its
+ * own simply stays silent, and the lines are on screen as before.
+ *
+ * One line is spoken at a time. A new line cuts in on the one being spoken if its speaker matters at least as
+ * much (the commander over the boss, the boss over the pilot); otherwise it is dropped, not queued, because a
+ * line that arrives late is worse than one that is missed.
+ */
+
+export type Speaker = 'commander' | 'boss' | 'pilot';
+
+/** How each speaker sounds, and who may talk over whom (a higher `rank` wins). */
+const CAST: Record<Speaker, { rank: number; pitch: number; rate: number }> = {
+  commander: { rank: 3, pitch: 0.9, rate: 1.08 },
+  boss: { rank: 2, pitch: 0.35, rate: 0.92 },
+  pilot: { rank: 1, pitch: 1.4, rate: 1.12 },
+};
+
+const VOLUME = 0.9;
+
+/** Voices that are jokes or sound effects (macOS has many). Nobody should be given one by accident. */
+const NOVELTY = /albert|bad news|bahh|bells|boing|bubbles|cellos|good news|jester|organ|superstar|trinoids|whisper|wobble|zarvox|deranged|hysterical|pipe organ/i;
+/** Names that are usually a deeper voice, to tell the boss from the commander when there is a choice, and a lighter one for the pilot. */
+const DEEPER = /daniel|alex|fred|david|mark|george|guy|ralph|arthur|oliver|aaron|rishi|\bmale\b/i;
+const LIGHTER = /samantha|karen|zira|aria|jenny|susan|victoria|moira|tessa|kathy|hazel|serena|martha|female/i;
+
+/** The parts of the browser's speech engine this uses. Stood in for in the tests. */
+export interface SpeechEngine {
+  speaking: boolean;
+  pending: boolean;
+  getVoices(): VoiceLike[];
+  speak(utterance: UtteranceLike): void;
+  cancel(): void;
+  addEventListener?(type: 'voiceschanged', listener: () => void): void;
+  removeEventListener?(type: 'voiceschanged', listener: () => void): void;
+}
+export interface VoiceLike { name: string; lang: string; localService: boolean; default: boolean }
+export interface UtteranceLike {
+  text: string;
+  lang: string;
+  voice: VoiceLike | null;
+  pitch: number;
+  rate: number;
+  volume: number;
+  onend: (() => void) | null;
+  onerror: (() => void) | null;
+}
+
+/**
+ * Turn a line as it is written on screen (upper case, for the stroke font) into one a voice reads well.
+ * Lower case stops short words being spelled out letter by letter; the few things that should be are put back.
+ */
+export function spoken(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\bwasd\b/g, 'W, A, S, D')
+    .replace(/\bp pauses\b/g, 'P pauses')
+    // A long wail reads better as a short one.
+    .replace(/no{3,}/g, 'nooo')
+    // On-screen notes carry points ("FULL TANK +400") and dashes; a voice should not read those out.
+    .replace(/\s*[+-]\s*\d+%?/g, '')
+    .replace(/\s+-\s+/g, ', ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Roughly how long a line takes to say, in seconds: used only to give up waiting on an engine that never reports back. */
+function longest(text: string, rate: number): number {
+  return 2.5 + (text.length * 0.11) / rate;
+}
+
+/**
+ * Choose a voice for each speaker from what the device offers: English, running on the device, and not a
+ * novelty. Returns null when there is no such voice (stay silent), or an empty cast when the browser has
+ * not listed its voices yet (speak with its default).
+ */
+export function castVoices(voices: readonly VoiceLike[], language = 'en-GB'): Record<Speaker, VoiceLike | null> | null {
+  const none = { commander: null, boss: null, pilot: null };
+  if (!voices.length) return none;
+  const english = voices.filter((v) => v.localService && /^en(?:[-_]|$)/i.test(v.lang) && !NOVELTY.test(v.name));
+  if (!english.length) return null;
+  // The reader's own kind of English first (the script is written in British English, so that is the fallback).
+  const want = /^en(?:[-_]|$)/i.test(language) ? language.toLowerCase().replace('_', '-') : 'en-gb';
+  const near = english.filter((v) => v.lang.toLowerCase().replace('_', '-') === want);
+  const pool = near.length ? near : english;
+  const commander = pool.find((v) => v.default) ?? pool[0]!;
+  const others = english.filter((v) => v !== commander);
+  // The pilot gets a lighter voice if there is one. The boss gets a deeper one, or failing that shares the
+  // commander's, pitched right down: that still sounds like someone else, where a light voice would not.
+  const light = others.find((v) => LIGHTER.test(v.name));
+  const spare = others.filter((v) => v !== light);
+  const boss = spare.find((v) => DEEPER.test(v.name)) ?? spare.find((v) => !LIGHTER.test(v.name)) ?? commander;
+  const pilot = light ?? spare.find((v) => v !== boss) ?? commander;
+  return { commander, boss, pilot };
+}
+
+export class Voice {
+  private on = true;
+  private cast: Record<Speaker, VoiceLike | null> | null | undefined;
+  /** The line being spoken, who is speaking it, and when to stop waiting for it to finish. */
+  private current: { utterance: UtteranceLike; rank: number; until: number } | null = null;
+  private primed = false;
+  private readonly engine: SpeechEngine | null;
+  private readonly make: (text: string) => UtteranceLike;
+  private readonly now: () => number;
+  private readonly language: string;
+
+  /**
+   * With no arguments this uses the browser's speech engine, if it has one. The arguments are for tests:
+   * an engine, how to make an utterance, a clock in seconds, and the reader's language.
+   */
+  constructor(
+    engine?: SpeechEngine | null,
+    make?: (text: string) => UtteranceLike,
+    now?: () => number,
+    language?: string,
+  ) {
+    const hasSpeech = typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined';
+    this.engine = engine !== undefined ? engine : hasSpeech ? (speechSynthesis as unknown as SpeechEngine) : null;
+    this.make = make ?? ((text) => new SpeechSynthesisUtterance(text) as unknown as UtteranceLike);
+    this.now = now ?? (() => performance.now() / 1000);
+    this.language = language ?? (typeof navigator !== 'undefined' ? navigator.language : 'en-GB');
+    // Browsers often list their voices a moment after the page loads: choose again when they do.
+    this.engine?.addEventListener?.('voiceschanged', this.recast);
+  }
+
+  private recast = (): void => {
+    this.cast = undefined;
+  };
+
+  get enabled(): boolean {
+    return this.on;
+  }
+
+  /** Switch speech on or off. Switching it off stops whatever is being said. */
+  setEnabled(on: boolean): void {
+    this.on = on;
+    if (!on) this.hush();
+  }
+
+  /**
+   * Some browsers (Safari on a phone above all) only let a page speak once it has spoken during a key press
+   * or a tap. The game calls this from each of those; the first time, it says nothing, silently.
+   */
+  unlock(): void {
+    if (this.primed || !this.on || !this.engine) return;
+    this.primed = true;
+    try {
+      const silent = this.make(' ');
+      silent.volume = 0;
+      this.engine.speak(silent);
+    } catch {
+      /* a browser that refuses is a browser that stays silent */
+    }
+  }
+
+  /** Someone is talking: the line has not finished, as far as can be told. */
+  get busy(): boolean {
+    const c = this.current;
+    if (!c) return false;
+    if (this.now() < c.until) return true;
+    this.current = null;
+    return false;
+  }
+
+  /**
+   * Say a line. Returns whether it is being said: false when speech is off or the device has no suitable
+   * voice, or when someone who matters more is still talking.
+   */
+  say(who: Speaker, text: string): boolean {
+    const engine = this.engine;
+    if (!this.on || !engine) return false;
+    const line = spoken(text);
+    if (!line) return false;
+    const part = CAST[who];
+    if (this.busy && this.current!.rank > part.rank) return false;
+    try {
+      if (this.cast === undefined) this.cast = castVoices(engine.getVoices(), this.language);
+      const cast = this.cast;
+      if (!cast) return false;
+      // Stop whatever was being said. (Asking an idle engine to stop can make some browsers drop the next line.)
+      if (this.current || engine.speaking || engine.pending) engine.cancel();
+      const utterance = this.make(line);
+      const voice = cast[who];
+      if (voice) {
+        utterance.voice = voice;
+        utterance.lang = voice.lang;
+      } else {
+        utterance.lang = /^en(?:[-_]|$)/i.test(this.language) ? this.language : 'en-GB';
+      }
+      // When the boss or the pilot has to share the commander's voice, pitch alone tells them apart.
+      utterance.pitch = part.pitch;
+      utterance.rate = part.rate;
+      utterance.volume = VOLUME;
+      const done = (): void => {
+        if (this.current?.utterance === utterance) this.current = null;
+      };
+      utterance.onend = done;
+      utterance.onerror = done;
+      this.current = { utterance, rank: part.rank, until: this.now() + longest(line, part.rate) };
+      engine.speak(utterance);
+      return true;
+    } catch {
+      this.current = null;
+      return false;
+    }
+  }
+
+  /** Stop talking, now: the game has been paused, closed or muted. */
+  hush(): void {
+    this.current = null;
+    try {
+      this.engine?.cancel();
+    } catch {
+      /* nothing was being said */
+    }
+  }
+
+  /** Stop talking and stop listening for new voices. */
+  dispose(): void {
+    this.hush();
+    this.engine?.removeEventListener?.('voiceschanged', this.recast);
+  }
+}

@@ -301,5 +301,11 @@ export function heroScene(ctx: CanvasRenderingContext2D) {
     ctx.globalAlpha = 1;
   }
 
-  return { layout, frame };
+  /** The room each skirmish going on now takes up, so that whatever else is in the sky can keep out of it. */
+  function busy(): Rect[] {
+    const half = HALF * size + PAD;
+    return live.map((k): Rect => [k.x - half, k.y - ABOVE * size - PAD, k.x + half, k.y + BELOW * size + PAD]);
+  }
+
+  return { layout, frame, busy };
 }

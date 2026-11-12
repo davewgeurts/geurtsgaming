@@ -7,6 +7,11 @@ export default defineConfig({
   site: 'https://geurtsgaming.com',
   trailingSlash: 'always',
   integrations: [sitemap()],
+  vite: {
+    server: {
+      allowedHosts: ['geurtsgaming.localdev', 'localhost'],
+    },
+  },
   // Fonts are downloaded at build time and served from this site, so pages make no third-party requests.
   fonts: [
     {

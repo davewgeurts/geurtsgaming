@@ -82,6 +82,8 @@ const FADE_TO = 110;
 /** Letters a second the commander's words appear at, and how long a finished line stays up. */
 const TYPE_RATE = 46;
 const LINE_HOLD = 2.3;
+/** When a line is being spoken out loud: the pause after the voice finishes before the next line starts. */
+const BREATH = 0.45;
 
 /** Seconds the cockpit takes to fade in after the hangar. */
 const FADE_IN = 0.45;
@@ -105,6 +107,9 @@ export class Intro {
   /** What the commander is saying, how long ago they started, and which line of the briefing it is. */
   private said = '';
   private saidAge = 0;
+  /** Whether that line is being said out loud as well, and how long it has been since the voice finished it. */
+  private voiced = false;
+  private rest = 0;
   private line = -1;
   private wished = false;
   private warned = false;
@@ -113,9 +118,11 @@ export class Intro {
   /** Heights of the hills along the horizon, 0 to 1, left to right. */
   private readonly hills: number[] = Array.from({ length: 31 }, (_, i) => (i % 2 ? rand(0.45, 1) : rand(0.1, 0.5)));
 
+  /** `radio`, if there is one, says the commander's lines out loud and tells whether it is still talking. */
   constructor(
     private readonly reduceMotion: boolean,
     private readonly cue: (cue: IntroCue) => void,
+    private readonly radio?: { say(text: string): boolean; busy(): boolean },
   ) {
     this.hangar = reduceMotion ? null : new Hangar(cue);
     this.phase = this.hangar ? 'hangar' : 'brief';
@@ -157,7 +164,9 @@ export class Intro {
   private say(text: string): void {
     this.said = text;
     this.saidAge = 0;
+    this.rest = 0;
     this.cue('radio');
+    this.voiced = this.radio?.say(text) ?? false;
   }
 
   /** The pilot has asked to go. */
@@ -193,7 +202,11 @@ export class Intro {
     this.saidAge += dt;
     if (this.phase === 'brief') {
       const lines = BRIEFING[touch ? 'touch' : 'keys'];
-      const spoken = this.saidAge > this.said.length / TYPE_RATE + LINE_HOLD;
+      const typed = this.saidAge > this.said.length / TYPE_RATE;
+      // Out loud, the next line waits for the voice to finish this one, and then a breath. In silence it
+      // waits long enough for the line to be read.
+      if (this.voiced && typed && !this.radio!.busy()) this.rest += dt;
+      const spoken = this.voiced ? this.rest > BREATH : this.saidAge > this.said.length / TYPE_RATE + LINE_HOLD;
       if (this.line < 0 || (spoken && this.line < lines.length - 1)) {
         this.line += 1;
         this.say(lines[this.line]!);

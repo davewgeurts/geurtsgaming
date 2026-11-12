@@ -9,7 +9,8 @@
  * - Every wave ends with a mini boss, in neon (see boss.ts). It throws bombs of its own, and taunts.
  * - Upgrade capsules ask a question too; a right answer offers three upgrades to pick from (see upgrades.ts).
  * - Two wireframe faces watch from the top corners: the pilot's, and the boss's (see avatar.ts & hud.ts).
- * - Sound effects are synthesised (see sound.ts); the overlay's Sound button switches them off.
+ * - Sound effects are synthesised (see sound.ts), and the commander, the boss and the pilot say their lines
+ *   out loud in the browser's own voices (see voice.ts); the overlay's Sound button switches both off.
  * - Every enemy ship holds somebody prisoner. Destroying it sets them free, and they fly up to be counted;
  *   a beaten boss lets out a whole crowd.
  * - About a third of the way through each wave a fuel ship arrives (see tanker.ts): hook on to its fuel line and stay on.
@@ -19,80 +20,50 @@
  * - It opens in the cockpit: a briefing from the flight commander, then a take-off that hands over to
  *   the top-down view (see intro.ts).
  *
- * Core math/colours live in core.ts; enemies in enemies.ts; weapons/projectiles in weapons.ts; HUD/panels in hud.ts.
+ * This file is the conductor: the loop, the ship, collisions and the order things are drawn in. Core maths and
+ * colours are in core.ts, enemies in enemies.ts, weapons in weapons.ts, the HUD and panels in hud.ts, the fuel
+ * ship and asteroid field's running order in setpieces.ts, the questions in questions.ts, keys and touch in input.ts.
  */
-import { createField, gapAt, updateField, type Field, type FieldEnv, type Rock } from './asteroids';
+import { gapAt, type Rock } from './asteroids';
 import type { Mood } from './avatar';
 import { Backdrop } from './backdrop';
 import { bossParts, createBoss, shootBoss, tapBoss, touchesBoss, updateBoss, type Boss, type BossEnv, type Hit } from './boss';
-import {
-  accepts, choiceChallenge, choose, entryChallenge, lineChallenge, press, tick,
-  type Challenge, type ChoiceChallenge,
-} from './challenge';
-import { NEON, PEBBLE, PINK, ROCK, SAND, clamp, percent, pick, rand, strokeInk, type Ink } from './core';
+import { choose } from './challenge';
+import { NEON, PEBBLE, PINK, ROCK, SAND, clamp, pick, rand, strokeInk, type Ink } from './core';
 import { KINDS, buildWavePlan, renderEnemies, spawnEnemy, spawnX, splitShards, updateEnemies, type Enemy, type Spawn } from './enemies';
 import { textWidth, traceText } from './font';
 import {
-  ALERT_LEAD, ALERT_SECONDS, ALERT_TURN, BOSS_CORNER, STAKES,
+  BOSS_CORNER,
   challengeTopY, faceBoxSize, freedCounterPos, freshVillain, offerBoxes, optionBoxes, printSize,
   renderAlert, renderHud, renderMessages, renderTanker,
-  type Banner, type Box, type Break, type HudViewContext, type Prompt, type Reward, type Stake,
+  type HudViewContext,
 } from './hud';
+import { Input, boxAt } from './input';
 import { Intro, type IntroCue, type IntroView } from './intro';
-import { BRIEFING, LINES, TAUNTS, WORDS, type Taunt } from './lines';
+import { TAUNTS, type Taunt } from './lines';
 import { makeProblem } from './maths';
+import { MultiplayerClient, renderWingmen } from './multiplayer';
+import { Questions, STAKES, sumLevel, type QuestionEnv, type Reward } from './questions';
+import { SetPieces, type SetPieceEnv } from './setpieces';
 import { CAPSULE, FRIEND, MINE, SHIP, trace, type Shape } from './shapes';
 import { Sound, type Sfx } from './sound';
-import { FUEL_SECONDS, createTanker, dismissTanker, updateTanker, type Tanker, type TankerEnv } from './tanker';
-import { UPGRADES, offerUpgrades, type UpgradeId } from './upgrades';
+import { UPGRADES, type UpgradeId } from './upgrades';
+import { Voice } from './voice';
 import {
-  LANCE_SECONDS, NOVA_SECONDS, ORBIT, ROCKET_SECONDS, SHIELD_SECONDS, TRIPLE_AT, WING,
+  LANCE_SECONDS, NOVA_SECONDS, ORBIT, ROCKET_SECONDS, SHIELD_SECONDS, WING,
   burstShape, fireVolley, freeSouls, isHostile, isOwn, renderDebris, renderHostileShots,
   renderOwnShotsAndWeapons, renderRingsAndSouls, sparkAt, updateRockets, updateSouls,
   type Beam, type Debris, type Ring, type Rocket, type Shot, type Soul,
 } from './weapons';
 
-/** Points for filling the tank from the fuel ship. */
-const FULL_TANK_POINTS = 400;
-/** Points for breaking a little rock and a tough one, for getting through a field, and for doing it without a scratch. */
-const PEBBLE_POINTS = 20;
-const ROCK_POINTS = 150;
-const FIELD_POINTS = 150;
-const CLEAN_FIELD_POINTS = 400;
 /** How far the scenery slides when the ship crosses the whole screen, as a share of the screen's width. */
 const PARALLAX = 0.3;
 const BEST_KEY = 'gg-arcade-best';
 const MAX_HULL = 3;
 /** Seconds a full energy gauge lasts. */
 const ENERGY_SECONDS = 18;
-/** Accuracy needed on a finished line to repair one point of hull. */
-const REPAIR_ACCURACY = 0.9;
-/** Points for clean work when the hull has nothing to repair. */
-const FULL_HULL_BONUS = 250;
-/** Seconds at the start of a question when answers are ignored, so a last tap of Space is not a mistake. */
-const BREAK_GRACE = 0.6;
-const PROMPT_GRACE = 0.35;
-/** Sums in the pre-wave break on touch, and the seconds allowed for each. */
-const ROUND_PROBLEMS = 3;
-const ROUND_SECONDS = 8;
-/** Seconds to answer a boost capsule's question, and how slowly the game runs meanwhile. */
-const PROMPT_SECONDS = 10;
+/** How slowly the game runs while a capsule's question waits for its answer. */
 const SLOW_MOTION = 0.06;
-/** Seconds the cannons stay jammed after a wrong answer. */
-const JAM_SECONDS = 2.5;
-/** Points for defusing a bomb. */
-const DEFUSE_POINTS = 300;
-/** Seconds before an offered upgrade can be picked, so a key or finger still down from the question picks nothing. */
-const OFFER_GRACE = 0.4;
-
-const GAME_KEYS = new Set([
-  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
-  'KeyW', 'KeyA', 'KeyS', 'KeyD',
-  'Space', 'Enter', 'KeyP',
-]);
-
-/** Keys that would scroll the page behind the game; swallowed while it is open. */
-const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'Home', 'End']);
 
 type State = 'ready' | 'playing' | 'over';
 
@@ -117,6 +88,10 @@ export interface GameOptions {
   onStatus?: (message: string) => void;
   /** Called whenever the game is paused or resumed, however that happened, so a Pause button can keep in step. */
   onPause?: (paused: boolean) => void;
+  /** Optional shared MultiplayerClient instance from the page. */
+  multiplayer?: MultiplayerClient;
+  /** Called when the Top 10 Pilots leaderboard overlay is shown or hidden. */
+  onLeaderboard?: (open: boolean) => void;
 }
 
 /** What a shot landing on each part of a boss sounds like. */
@@ -129,6 +104,7 @@ export class Game {
   private readonly reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
   private readonly coarse = matchMedia('(pointer: coarse)').matches;
   private readonly sound = new Sound();
+  private readonly voice = new Voice();
 
   private w = 0;
   private h = 0;
@@ -146,13 +122,8 @@ export class Game {
   private state: State = 'ready';
   private stateTime = 0;
   private paused = false;
-  private keys = new Set<string>();
-  /** How the player last steered. Typing is only asked of players at a keyboard. */
-  private input: 'keys' | 'touch' = this.coarse ? 'touch' : 'keys';
-  private touchId: number | null = null;
-  private touch = { x: 0, y: 0 };
-  /** Where the canvas's top left corner is in the window, measured when it is laid out rather than on every touch. */
-  private origin = { x: 0, y: 0 };
+  /** The keyboard, the mouse and the touch screen (see input.ts). */
+  private readonly input: Input;
   /** Counts the ship's volleys, for the things that fire every other one. */
   private volley = 0;
   /** Scratch space for sorting things by colour before drawing them. */
@@ -186,9 +157,8 @@ export class Game {
   private bossNote = '';
   private intermission = 0;
 
-  private brk: Break | null = null;
-  private prompt: Prompt | null = null;
-  private lastText = '';
+  /** The break before each wave, and the questions that capsules and bombs ask (see questions.ts). */
+  private readonly questions = new Questions();
 
   private enemies: Enemy[] = [];
   private shots: Shot[] = [];
@@ -203,22 +173,8 @@ export class Game {
   private freedPulse = 0;
   /** How many the last boss was holding. */
   private bossFreed = 0;
-  /**
-   * The set pieces in a wave, in order: the fuel ship and the asteroid field, and when each is due.
-   * `due` is the one waiting for a clear sky before it starts; the wave's clock stops from then until it is over.
-   */
-  private stops: { at: number; kind: 'fuel' | 'rocks' }[] = [];
-  private due: 'fuel' | 'rocks' | null = null;
-  private dueWait = 0;
-  private tanker: Tanker | null = null;
-  /** The asteroid field, the rocks of it that are on screen, and how many times it has hit the ship. */
-  private field: Field | null = null;
-  private near: Rock[] = [];
-  private fieldHits = 0;
-  /** Seconds the commander's asteroid warning has been up, or null when it is not. */
-  private alert: number | null = null;
-  /** A line about how the refuelling or the asteroids went, and when it fades. */
-  private fuelNote = { text: '', until: 0, color: SAND };
+  /** The fuel ship, the commander's warning and the asteroid field (see setpieces.ts). */
+  private readonly sets = new SetPieces();
   private readonly backdrop = new Backdrop();
   /** The view from the cockpit that opens the game. null once the ship has taken off. */
   private intro: Intro | null = null;
@@ -247,11 +203,28 @@ export class Game {
   /** How hard the pilot is leaning into a turn, -1 to 1. It turns the pilot's head. */
   private lean = 0;
   private lastShipX = 0;
+  private readonly mp: MultiplayerClient;
+  private showLeaderboard = false;
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly opts: GameOptions) {
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('2D canvas is not available');
     this.ctx = ctx;
+    this.input = new Input(window, canvas, {
+      wake: () => {
+        this.sound.unlock();
+        this.voice.unlock();
+      },
+      exit: () => this.opts.onExit(),
+      wants: (key) => !this.paused && this.questions.wants(key),
+      type: (key) => this.questions.type(key, this.quizEnv()),
+      command: (code) => this.command(code),
+      pick: (x, y) => this.pick(x, y),
+      touched: () => this.questions.byTouch(this.quizEnv()),
+      press: () => this.press(),
+    }, this.coarse ? 'touch' : 'keys');
+    this.mp = opts.multiplayer ?? new MultiplayerClient();
+    this.mp.start();
     try {
       this.best = Number(localStorage.getItem(BEST_KEY)) || 0;
     } catch {
@@ -261,23 +234,21 @@ export class Game {
     this.resize();
     this.shipScale = 1.15 * this.scale;
     // The game opens in the cockpit; the ship itself is out of sight below the screen until it has taken off.
-    this.intro = new Intro(this.reduceMotion, this.onIntroCue);
+    this.voice.setEnabled(this.sound.enabled);
+    this.intro = new Intro(this.reduceMotion, this.onIntroCue, {
+      say: (text) => this.voice.say('commander', text),
+      busy: () => this.voice.busy,
+    });
     this.ship.x = this.homeX;
     this.ship.y = this.h + 80;
-    opts.onStatus?.(Intro.script(this.input === 'touch', !this.reduceMotion));
+    opts.onStatus?.(Intro.script(this.input.mode === 'touch', !this.reduceMotion));
 
-    addEventListener('keydown', this.onKeyDown);
-    addEventListener('keyup', this.onKeyUp);
-    addEventListener('blur', this.onBlur);
     addEventListener('resize', this.resize);
     document.addEventListener('visibilitychange', this.onVisibility);
-    canvas.addEventListener('pointerdown', this.onPointerDown);
-    canvas.addEventListener('pointermove', this.onPointerMove);
-    canvas.addEventListener('pointerup', this.onPointerUp);
-    canvas.addEventListener('pointercancel', this.onPointerUp);
 
     // The click that opened the game is what allows it to make sound.
     this.sound.unlock();
+    this.voice.unlock();
     // Draw once straight away, so the overlay never fades in on an empty canvas.
     this.render();
     this.last = performance.now();
@@ -300,21 +271,36 @@ export class Game {
   destroy(): void {
     // Leaving in the middle of a record run still counts.
     this.saveBest();
+    this.mp.rest();
+    if (!this.opts.multiplayer) this.mp.stop();
     cancelAnimationFrame(this.raf);
     this.sound.dispose();
-    removeEventListener('keydown', this.onKeyDown);
-    removeEventListener('keyup', this.onKeyUp);
-    removeEventListener('blur', this.onBlur);
+    this.voice.dispose();
+    this.input.detach();
     removeEventListener('resize', this.resize);
-    document.addEventListener('visibilitychange', this.onVisibility);
-    this.canvas.removeEventListener('pointerdown', this.onPointerDown);
-    this.canvas.removeEventListener('pointermove', this.onPointerMove);
-    this.canvas.removeEventListener('pointerup', this.onPointerUp);
-    this.canvas.removeEventListener('pointercancel', this.onPointerUp);
+    document.removeEventListener('visibilitychange', this.onVisibility);
   }
 
   get isPaused(): boolean {
     return this.paused;
+  }
+
+  get isLeaderboardOpen(): boolean {
+    return this.showLeaderboard;
+  }
+
+  /** Toggle the Top 10 Pilots leaderboard overlay (pausing first if currently flying). */
+  toggleLeaderboard(): boolean {
+    if (!this.showLeaderboard && this.state === 'playing' && !this.paused) {
+      this.setPaused(true);
+    }
+    if (this.state === 'ready' && !this.paused) {
+      return false;
+    }
+    this.showLeaderboard = !this.showLeaderboard;
+    this.opts.onLeaderboard?.(this.showLeaderboard);
+    this.opts.onStatus?.(this.showLeaderboard ? 'Top 10 Pilots leaderboard open.' : 'Leaderboard closed.');
+    return this.showLeaderboard;
   }
 
   /** Pause or resume: this is what the overlay's Pause button does. Only a game in play can be paused. */
@@ -325,8 +311,14 @@ export class Game {
   private setPaused(on: boolean): void {
     if (on === this.paused || (on && this.state !== 'playing')) return;
     this.paused = on;
-    this.keys.clear();
-    this.touchId = null;
+    if (!on && this.showLeaderboard) {
+      this.showLeaderboard = false;
+      this.opts.onLeaderboard?.(false);
+    }
+    this.input.drop();
+    // A paused pilot is not flying: other pilots stop seeing this ship until the game is resumed.
+    if (on) this.mp.rest();
+    if (on) this.voice.hush();
     this.opts.onPause?.(on);
     this.opts.onStatus?.(on ? 'Paused.' : 'Resumed.');
   }
@@ -338,6 +330,7 @@ export class Game {
   /** Switch the sound effects on or off. The choice is remembered for next time. */
   setSound(on: boolean): void {
     this.sound.setEnabled(on);
+    this.voice.setEnabled(on);
   }
 
   private get maxHull(): number {
@@ -369,6 +362,7 @@ export class Game {
     v.nextIdle = this.time + rand(6, 9);
     v.show = Math.max(v.show, this.time + 3);
     this.sound.play(mood === 'laugh' ? 'laugh' : 'taunt');
+    this.voice.say('boss', line);
   }
 
   private get pilotMood(): Mood {
@@ -408,8 +402,7 @@ export class Game {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.w = canvas.clientWidth;
     this.h = canvas.clientHeight;
-    const box = canvas.getBoundingClientRect();
-    this.origin = { x: box.left, y: box.top };
+    this.input.measure();
     canvas.width = Math.round(this.w * dpr);
     canvas.height = Math.round(this.h * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -465,103 +458,75 @@ export class Game {
 
   // ----------------------------------------------------------------- input
 
-  /** The question waiting for an answer, if there is one. */
-  private get challenge(): Challenge | null {
-    if (this.brk) return this.brk.result ? null : this.brk.challenge;
-    return this.prompt?.challenge ?? null;
-  }
-
-  private onKeyDown = (e: KeyboardEvent): void => {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
-    this.sound.unlock();
-    const code = e.code;
-    if (code === 'Escape') {
-      e.preventDefault();
-      this.opts.onExit();
-      return;
+  /** One of the game's keys has gone down (see input.ts). True if it was a command, and so not a control to hold. */
+  private command(code: string): boolean {
+    const confirm = code === 'Space' || code === 'Enter';
+    if (code === 'KeyL' && (this.paused || this.state === 'over')) {
+      this.sound.play('key');
+      this.toggleLeaderboard();
+      return true;
     }
-    if (SCROLL_KEYS.has(code)) {
-      e.preventDefault();
-      return;
+    if (code === 'KeyC' && (this.showLeaderboard || this.state === 'over' || this.paused)) {
+      this.sound.play('key');
+      const next = this.mp.cycleCallsign();
+      this.opts.onStatus?.(`Pilot callsign set to ${next}.`);
+      return true;
     }
-    // Enter still activates a focused button (Exit). Space always belongs to the game,
-    // so tabbing to Exit and then firing cannot end a run by accident.
-    if (e.target instanceof HTMLButtonElement && code === 'Enter') return;
-
-    // A key that answers the open question goes to the question. It is matched on the character, not the
-    // physical key, so a line can be typed on any keyboard layout. Everything else (arrow keys, and any
-    // key once the answer is in) falls through, so a key held ready for the wave still counts.
-    const challenge = this.paused ? null : this.challenge;
-    if (challenge && accepts(challenge, e.key)) {
-      e.preventDefault();
-      if (!e.repeat) {
-        this.input = 'keys';
-        this.type(challenge, e.key);
-      }
-      return;
-    }
-
-    // Number keys pick one of the upgrades on offer.
-    const offer = this.paused ? null : this.prompt?.offer;
-    if (offer && e.key >= '1' && e.key <= String(offer.length)) {
-      e.preventDefault();
-      if (!e.repeat) {
-        this.input = 'keys';
-        this.chooseUpgrade(Number(e.key) - 1);
-      }
-      return;
-    }
-
-    if (!GAME_KEYS.has(code)) return;
-    e.preventDefault();
-    if (e.repeat) return;
-    this.input = 'keys';
-
     if (this.paused) {
-      if (code === 'KeyP' || code === 'Space' || code === 'Enter') this.setPaused(false);
-      return;
+      if (code === 'KeyP' || confirm) this.setPaused(false);
+      return true;
     }
     if (code === 'KeyP') {
       this.setPaused(true);
-      return;
+      return true;
     }
-    this.keys.add(code);
     if (this.state === 'ready') {
-      if (code === 'Space' || code === 'Enter') this.go();
-    } else if (this.state === 'over' && this.stateTime > 0.9 && (code === 'Space' || code === 'Enter')) this.begin();
-  };
-
-  /** Pass a key to the open question, with a click for a key that counted and a buzz for a wrong letter. */
-  private type(c: Challenge, key: string): void {
-    const before = c.kind === 'line' ? c.index : c.kind === 'entry' ? c.typed.length : 0;
-    const misses = c.kind === 'choice' ? 0 : c.misses;
-    press(c, key);
-    if (c.kind === 'line') {
-      if (c.index > before) this.sound.play('key');
-      else if (c.misses > misses) this.sound.play('slip');
-    } else if (c.kind === 'entry' && c.misses > misses) {
-      this.sound.play('slip');
-      this.opts.onStatus?.(`Not quite. One more try. What is ${c.question}?`);
-    } else if (c.kind === 'entry' && c.typed.length !== before) {
-      this.sound.play('key');
+      if (confirm) this.go();
+    } else if (this.state === 'over' && this.stateTime > 0.9 && confirm) {
+      if (this.showLeaderboard) {
+        this.showLeaderboard = false;
+        this.opts.onLeaderboard?.(false);
+      } else {
+        this.begin();
+      }
     }
+    return false;
   }
 
-  private onKeyUp = (e: KeyboardEvent): void => {
-    // A button is clicked when Space is released on it; see onKeyDown for why that is blocked.
-    if (e.code === 'Space' && e.target instanceof HTMLButtonElement) e.preventDefault();
-    this.keys.delete(e.code);
-  };
+  /** A click or tap at (x, y): on an upgrade on offer, an answer to a sum, or one of a sum boss's little ships. */
+  private pick(x: number, y: number): boolean {
+    if (this.paused) return false;
+    const { brk, prompt, challenge } = this.questions;
+    const top = challengeTopY(this.h, this.inset.top, this.homeY, Boolean(brk));
+    const offer = prompt?.offer;
+    const offered = offer ? boxAt(x, y, offerBoxes(this.w, this.h, this.room, top, offer.length)) : null;
+    if (offered !== null) {
+      this.questions.chooseUpgrade(offered, this.quizEnv());
+      return true;
+    }
+    if (challenge && challenge.kind === 'choice' && !challenge.outcome) {
+      const option = boxAt(x, y, optionBoxes(this.w, this.room, challenge.options.length, top));
+      if (option !== null) {
+        choose(challenge, option);
+        return true;
+      }
+    }
+    return this.state === 'playing' && !prompt && this.boss !== null && this.strikeBoss(x, y, true, true);
+  }
 
-  private onBlur = (): void => {
-    this.keys.clear();
-  };
+  /** A click or tap that picked nothing: resume, launch, or try again. */
+  private press(): void {
+    if (this.paused) this.setPaused(false);
+    else if (this.state === 'ready') this.go();
+    else if (this.state === 'over' && this.stateTime > 0.9) this.begin();
+  }
 
   private onVisibility = (): void => {
     cancelAnimationFrame(this.raf);
     if (document.hidden) {
       this.saveBest();
-      this.keys.clear();
+      this.voice.hush();
+      this.input.letGo();
       this.setPaused(true);
     } else {
       // Coming back from another app, the phone may have taken the audio away: ask for it back.
@@ -570,94 +535,6 @@ export class Game {
       this.raf = requestAnimationFrame(this.frame);
     }
   };
-
-  private onPointerDown = (e: PointerEvent): void => {
-    const touch = e.pointerType !== 'mouse';
-    // Only the main mouse button plays; the others are the browser's.
-    if (!touch && e.button !== 0) return;
-    this.sound.unlock();
-    const box = this.canvas.getBoundingClientRect();
-    this.origin = { x: box.left, y: box.top };
-    if (!this.paused) {
-      // A click or tap on an upgrade or an answer picks it, and is not a steering touch.
-      const offer = this.prompt?.offer;
-      const top = challengeTopY(this.h, this.inset.top, this.homeY, Boolean(this.brk));
-      const offered = offer ? this.boxAt(e, offerBoxes(this.w, this.h, this.room, top, offer.length)) : null;
-      if (offered !== null) {
-        if (touch) this.input = 'touch';
-        this.chooseUpgrade(offered);
-        return;
-      }
-      const option = this.optionAt(e);
-      if (option !== null && this.challenge) {
-        if (touch) this.input = 'touch';
-        choose(this.challenge, option);
-        return;
-      }
-      // On a sum boss, a tap or click on a little ship chooses its answer.
-      if (this.state === 'playing' && !this.prompt && this.boss) {
-        if (this.strikeBoss(e.clientX - this.origin.x, e.clientY - this.origin.y, true, true)) {
-          if (touch) this.input = 'touch';
-          return;
-        }
-      }
-    }
-    if (touch) {
-      this.input = 'touch';
-      this.askByTouch();
-      this.touchId = e.pointerId;
-      this.trackTouch(e);
-      try {
-        this.canvas.setPointerCapture(e.pointerId);
-      } catch {
-        /* capture is a nicety, not a requirement */
-      }
-    }
-    if (this.paused) this.setPaused(false);
-    else if (this.state === 'ready') this.go();
-    else if (this.state === 'over' && this.stateTime > 0.9) this.begin();
-  };
-
-  private onPointerMove = (e: PointerEvent): void => {
-    if (e.pointerId === this.touchId) this.trackTouch(e);
-  };
-
-  private onPointerUp = (e: PointerEvent): void => {
-    if (e.pointerId === this.touchId) this.touchId = null;
-  };
-
-  /** The ship rides a little above the finger so the finger does not cover it. */
-  private trackTouch(e: PointerEvent): void {
-    this.touch.x = e.clientX - this.origin.x;
-    this.touch.y = e.clientY - this.origin.y - 64;
-  }
-
-  /** Which answer box, if any, a click or tap landed on. */
-  private optionAt(e: PointerEvent): number | null {
-    const c = this.challenge;
-    if (!c || c.kind !== 'choice' || c.outcome) return null;
-    const top = challengeTopY(this.h, this.inset.top, this.homeY, Boolean(this.brk));
-    return this.boxAt(e, optionBoxes(this.w, this.room, c.options.length, top));
-  }
-
-  /** Which of these boxes, if any, a click or tap landed on (with a little slack for fingers). */
-  private boxAt(e: PointerEvent, boxes: Box[]): number | null {
-    const x = e.clientX - this.origin.x;
-    const y = e.clientY - this.origin.y;
-    const slack = 4;
-    const index = boxes.findIndex((b) => x >= b.x - slack && x <= b.x + b.w + slack && y >= b.y - slack && y <= b.y + b.h + slack);
-    return index < 0 ? null : index;
-  }
-
-  /** Someone on a touch screen has no keys, so a question that needs typing becomes one with answers to tap. */
-  private askByTouch(): void {
-    if (this.brk && !this.brk.result && this.brk.challenge.kind === 'line') {
-      this.startBreak(this.brk.wave);
-    } else if (this.prompt && !this.prompt.challenge.outcome && this.prompt.challenge.kind !== 'choice') {
-      this.prompt.challenge = this.sum(PROMPT_SECONDS, PROMPT_GRACE);
-      this.announce(this.prompt.challenge, '');
-    }
-  }
 
   // ------------------------------------------------------------ game state
 
@@ -672,6 +549,8 @@ export class Game {
 
   private onIntroCue = (cue: IntroCue): void => {
     this.sound.play(cue);
+    // The school bell, and the announcement that goes with it (the words are on screen too).
+    if (cue === 'bell') this.voice.say('commander', 'TIME FOR FLIGHT CLASS');
     if (cue === 'sonic') {
       // The boom: a ring bursts out from dead ahead as the view changes.
       this.rings.push({ x: this.w / 2, y: this.h * 0.38, age: 0, color: NEON.cyan });
@@ -702,14 +581,8 @@ export class Game {
     this.rings = [];
     this.souls = [];
     this.freed = 0;
-    this.tanker = null;
-    this.field = null;
-    this.near = [];
-    this.alert = null;
-    this.due = null;
-    this.stops = [];
-    this.fuelNote.until = 0;
-    this.prompt = null;
+    this.sets.reset();
+    this.questions.prompt = null;
     this.boss = null;
     this.intermission = 0;
     this.upgrades.clear();
@@ -724,9 +597,11 @@ export class Game {
       this.ship.x = this.homeX;
       this.ship.y = this.homeY;
     }
+    this.showLeaderboard = false;
+    this.opts.onLeaderboard?.(false);
     this.setState('playing');
     this.sound.play('start');
-    this.startBreak(1);
+    this.questions.startBreak(1, this.quizEnv());
   }
 
   private startWave(n: number): void {
@@ -734,17 +609,12 @@ export class Game {
     this.waveTime = 0;
     this.banner = 2.2;
     this.rest = 0;
-    this.tanker = null;
-    this.field = null;
-    this.near = [];
-    this.alert = null;
-    this.due = null;
     const plan = buildWavePlan(n, this.w, this.inset, this.scale, this.margin, this.upgrades.size < UPGRADES.length);
     this.queue = plan.queue;
     this.pickupTimes = plan.pickupTimes;
     this.upgradeTimes = plan.upgradeTimes;
     this.mineTimes = plan.mineTimes;
-    this.stops = plan.stops;
+    this.sets.plan(plan.stops);
     this.sound.play('wave');
     this.opts.onStatus?.(`Wave ${n}.`);
   }
@@ -787,7 +657,7 @@ export class Game {
       this.burst(shape, x, y, scale, rot, color);
       this.sound.play('boom');
     },
-    problem: () => makeProblem(this.level),
+    problem: () => makeProblem(sumLevel(this.wave)),
   };
 
   private bossEnv(): BossEnv {
@@ -806,157 +676,106 @@ export class Game {
     return env;
   }
 
-  /** What the fuel ship knows of the game: made once, and brought up to date each time it is asked for. */
-  private readonly fuelEnv: TankerEnv = { w: 0, h: 0, top: 0, left: 0, right: 0, scale: 1, noseX: 0, noseY: 0 };
+  /** What the fuel ship and the asteroids know of the game: made once, and brought up to date each time it is asked for. */
+  private readonly setsEnv: SetPieceEnv = {
+    w: 0, h: 0, top: 0, left: 0, right: 0, scale: 1, pace: 1, shipScale: 1, wave: 1, time: 0, playing: false, shipX: 0, shipY: 0,
+    play: (sound) => this.sound.play(sound),
+    say: (message) => this.opts.onStatus?.(message),
+    radio: (text) => void this.voice.say('commander', text),
+    call: (text) => void this.voice.say('pilot', `${text}!`),
+    feel: (mood, seconds, soft) => this.feel(mood, seconds, soft),
+    award: (points) => {
+      this.score += points;
+    },
+    charge: (amount) => {
+      this.energy = Math.min(1, this.energy + amount);
+    },
+    ring: (x, y, color, reach) => {
+      this.rings.push({ x, y, age: 0, color, reach });
+    },
+    spark: (x, y, color) => this.spark(x, y, color),
+    burst: (shape, x, y, rot, color) => this.burst(shape, x, y, 1, rot, color),
+    bomb: (x, y, ride) => {
+      this.mines.push({ x, y, anchorX: x, phase: 0, age: 0, dead: false, thrown: false, ride });
+    },
+    capsule: (x, y, ride, last) => {
+      // At the far end of the hard way is the big prize: an upgrade, while there are any left to win.
+      const reward = last && this.upgrades.size < UPGRADES.length ? 'upgrade' : this.pickReward();
+      this.pickups.push({ reward, x, y, anchorX: x, phase: 0, age: 0, dead: false, ride });
+    },
+  };
 
-  private tankerEnv(): TankerEnv {
-    const env = this.fuelEnv;
+  private setEnv(): SetPieceEnv {
+    const env = this.setsEnv;
     env.w = this.w;
     env.h = this.h;
     env.top = this.inset.top;
     env.left = this.inset.left;
     env.right = this.inset.right;
     env.scale = this.scale;
-    env.noseX = this.ship.x;
-    env.noseY = this.ship.y - 16 * this.shipScale;
-    return env;
-  }
-
-  private callTanker(): void {
-    this.tanker = createTanker(this.wave, this.tankerEnv());
-    this.sound.play('tanker');
-    this.opts.onStatus?.(`A fuel ship has arrived. Fly up behind it, catch the end of its fuel line with the nose of the ship, and stay hooked on for ${FUEL_SECONDS} seconds. It will not hold still.`);
-  }
-
-  /** Fly the fuel ship, and pay out its fuel: energy for as long as the line is on, and a bonus for a full tank. */
-  private flyTanker(dt: number): void {
-    const t = this.tanker;
-    if (!t) return;
-    const playing = this.state === 'playing';
-    const event = updateTanker(t, dt, this.tankerEnv());
-    const note = (text: string, color: string, seconds = 1.8) => {
-      this.fuelNote = { text, until: this.time + seconds, color };
-    };
-    if (t.hooked && playing) {
-      this.energy = Math.min(1, this.energy + dt / FUEL_SECONDS);
-      this.sound.play('pump');
-    }
-    if (event === 'hook') {
-      this.sound.play('hook');
-      this.feel('happy', 0.8, true);
-      if (!t.snaps) this.opts.onStatus?.('Fuel line hooked on. Stay with the fuel ship.');
-    } else if (event === 'snap') {
-      this.sound.play('snap');
-      this.spark(this.ship.x, this.ship.y - 16 * this.shipScale, NEON.red);
-      this.feel('worried', 1, true);
-      this.opts.onStatus?.(`The fuel line came off: too ${t.why === 'close' ? 'close' : 'far away'}. Catch it again.`);
-    } else if (event === 'full') {
-      this.energy = 1;
-      this.score += FULL_TANK_POINTS;
-      this.feel('happy', 1.4);
-      this.sound.play('power');
-      this.rings.push({ x: this.ship.x, y: this.ship.y, age: 0, color: NEON.lime, reach: 120 * this.scale });
-      note(`FULL TANK +${FULL_TANK_POINTS}`, NEON.lime, 2);
-      this.opts.onStatus?.('Tank full. Cannons at full power.');
-    } else if (event === 'leave') {
-      note(t.fuel > 0 ? `FUEL SHIP LEAVING - TANK ${percent(t.fuel)}% FULL` : 'THE FUEL SHIP COULD NOT WAIT', SAND);
-      this.opts.onStatus?.('The fuel ship has left.');
-    }
-    if (t.state === 'gone') this.tanker = null;
-  }
-
-  private readonly rockEnv: FieldEnv = { w: 0, h: 0, left: 0, right: 0, scale: 1, pace: 1, wave: 1 };
-
-  private fieldEnv(): FieldEnv {
-    const env = this.rockEnv;
-    env.w = this.w;
-    env.h = this.h;
-    env.left = this.inset.left;
-    env.right = this.inset.right;
-    env.scale = this.scale;
     env.pace = this.pace;
+    env.shipScale = this.shipScale;
     env.wave = this.wave;
+    env.time = this.time;
+    env.playing = this.state === 'playing';
+    env.shipX = this.ship.x;
+    env.shipY = this.ship.y;
     return env;
   }
 
-  /** The flight commander bursts in, worried: asteroids ahead. The field itself sets off a moment later. */
-  private raiseAlarm(): void {
-    this.alert = 0;
-    this.sound.play('alarm');
-    this.feel('worried', ALERT_TURN + 1);
-    this.opts.onStatus?.(
-      `Flight commander: ${BRIEFING.asteroids.join(' ')} ${BRIEFING.choice.join(' ')} An asteroid field is coming down the screen, with two winding ways through. ` +
-      'The easy way is wide and has bombs in it, which ask a question if touched. The hard way is narrow and has power-ups instead. ' +
-      'Little rocks break in one shot; the rest take many.',
-    );
-  }
+  /** What the questions know of the game: made once, and brought up to date each time it is asked for. */
+  private readonly quizzing: QuestionEnv = {
+    touch: false, wave: 1, hull: 0, maxHull: 0, energy: 0, boss: false, owned: new Set(),
+    play: (sound) => this.sound.play(sound),
+    say: (message) => this.opts.onStatus?.(message),
+    call: (text) => void this.voice.say('pilot', `${text}!`),
+    feel: (mood, seconds) => this.feel(mood, seconds),
+    taunt: (kind, mood, seconds) => this.taunt(kind, mood, seconds, 1, true),
+    award: (points) => {
+      this.score += points;
+    },
+    charge: (amount) => {
+      this.energy = Math.min(1, this.energy + amount);
+    },
+    repair: () => {
+      this.hull += 1;
+    },
+    jam: (seconds) => {
+      this.jam = seconds;
+    },
+    blast: () => this.detonate(),
+    equip: (id) => this.equip(id),
+    explode: () => {
+      this.hull = 0;
+      this.rings.push({ x: this.ship.x, y: this.ship.y, age: 0, color: NEON.red }, { x: this.ship.x, y: this.ship.y, age: -0.1, color: NEON.orange });
+      if (!this.reduceMotion) this.shake = 0.5;
+      this.sound.play('blast');
+      this.gameOver();
+    },
+    shelter: (seconds) => {
+      this.ship.invulnerable = Math.max(this.ship.invulnerable, seconds);
+    },
+    park: (wave) => {
+      this.wave = wave;
+      this.input.letGo();
+      this.shots = [];
+      this.pickups = [];
+      this.mines = [];
+      this.rockets = [];
+    },
+    launch: (wave) => this.startWave(wave),
+  };
 
-  private startField(): void {
-    const f = createField(this.fieldEnv());
-    this.field = f;
-    this.fieldHits = 0;
-    for (const b of f.bombs) {
-      this.mines.push({ x: b.x, y: f.front - b.d, anchorX: b.x, phase: 0, age: 0, dead: false, thrown: false, ride: f.speed });
-    }
-    // The hard way's power-ups: boosts, and at the far end the big prize, an upgrade (while there are any left to win).
-    f.prizes.forEach((p, i) => {
-      const last = i === f.prizes.length - 1 && this.upgrades.size < UPGRADES.length;
-      this.pickups.push({ reward: last ? 'upgrade' : this.pickReward(), x: p.x, y: f.front - p.d, anchorX: p.x, phase: 0, age: 0, dead: false, ride: f.speed });
-    });
-  }
-
-  /** Run the warning and then the asteroid field. `dt` is the world's time, `real` the clock's. */
-  private flyField(dt: number, real: number): void {
-    if (this.alert !== null) {
-      const was = this.alert;
-      this.alert += dt;
-      if (was < ALERT_TURN && this.alert >= ALERT_TURN) this.sound.play('radio');
-      if (was < ALERT_LEAD && this.alert >= ALERT_LEAD) this.startField();
-      if (this.alert >= ALERT_SECONDS) this.alert = null;
-    }
-    const f = this.field;
-    if (!f) return;
-    updateField(f, dt, real, this.fieldEnv());
-    if (f.rocks.some((rock) => rock.dead)) f.rocks = f.rocks.filter((rock) => !rock.dead);
-    // Only the rocks on screen are drawn or can be hit.
-    this.near.length = 0;
-    for (const rock of f.rocks) {
-      const y = f.front - rock.d;
-      if (y > -rock.r - 8 && y < this.h + rock.r + 8) this.near.push(rock);
-    }
-    if (!f.done) return;
-    this.field = null;
-    this.near.length = 0;
-    if (this.state !== 'playing') return;
-    const clean = this.fieldHits === 0;
-    const points = clean ? CLEAN_FIELD_POINTS : FIELD_POINTS;
-    this.score += points;
-    this.fuelNote = { text: `${clean ? 'NOT A SCRATCH' : 'THROUGH THE ASTEROIDS'} +${points}`, until: this.time + 2, color: clean ? NEON.lime : SAND };
-    this.feel('happy', 1.4);
-    this.sound.play('right');
-    this.opts.onStatus?.(`Through the asteroid field${clean ? ' without a scratch' : ''}.`);
-  }
-
-  /** A shot has landed on a rock. Little ones break after a couple; on the rest it mostly just sparks. */
-  private hitRock(rock: Rock, x: number, y: number): void {
-    rock.hp -= 1;
-    rock.flash = 0.08;
-    if (rock.hp <= 0) {
-      this.breakRock(rock);
-    } else if (rock.tough) {
-      this.spark(x, y, ROCK);
-      this.sound.play('clang');
-    } else {
-      this.sound.play('hit');
-    }
-  }
-
-  private breakRock(rock: Rock): void {
-    if (rock.dead || !this.field) return;
-    rock.dead = true;
-    this.score += rock.tough ? ROCK_POINTS : PEBBLE_POINTS;
-    this.burst(rock.shape, rock.x, this.field.front - rock.d, 1, rock.rot, rock.tough ? ROCK : PEBBLE);
-    this.sound.play('boom');
+  private quizEnv(): QuestionEnv {
+    const env = this.quizzing;
+    env.touch = this.input.mode === 'touch';
+    env.wave = this.wave;
+    env.hull = this.hull;
+    env.maxHull = this.maxHull;
+    env.energy = this.energy;
+    env.boss = this.boss !== null;
+    env.owned = this.upgrades;
+    return env;
   }
 
   /** Set people free at (x, y): one from an ordinary ship, a crowd from a boss. They fly up to the counter. */
@@ -985,7 +804,7 @@ export class Game {
     this.sound.play('warning');
     this.opts.onStatus?.(
       this.boss.kind === 'sum'
-        ? `Mini boss. ${this.input === 'touch' ? 'Tap' : 'Keep shooting'} the little ship carrying the right answer to open its armour, then shoot the red core.`
+        ? `Mini boss. ${this.input.mode === 'touch' ? 'Tap' : 'Keep shooting'} the little ship carrying the right answer to open its armour, then shoot the red core.`
         : 'Mini boss. Shoot its arms off, and shoot the red core when its armour opens.',
     );
   }
@@ -1000,7 +819,7 @@ export class Game {
     }
     const v = this.villain;
     if (this.state === 'playing') {
-      if (b.state === 'fight' && this.time > v.nextIdle && !this.prompt) this.taunt('idle', 'talk', 1.2);
+      if (b.state === 'fight' && this.time > v.nextIdle && !this.questions.prompt) this.taunt('idle', 'talk', 1.2);
       if (b.state === 'leaving' && !v.bye) {
         v.bye = true;
         this.taunt('bored', 'talk', 2, 1, true);
@@ -1099,7 +918,7 @@ export class Game {
     for (const e of this.enemies) if (!e.dead) this.destroyEnemy(e);
     for (const s of this.shots) if (s.hostile) s.dead = true;
     // In an asteroid field it clears the little rocks on screen. The tough ones shrug it off.
-    for (const rock of this.near) if (!rock.tough) this.breakRock(rock);
+    this.sets.blast(this.setEnv());
     this.rings.push({ x: this.ship.x, y: this.ship.y, age: 0, color: SAND });
     this.sound.play('blast');
     if (!this.reduceMotion) this.shake = 0.4;
@@ -1120,13 +939,9 @@ export class Game {
     this.mines = [];
     this.rockets = [];
     this.beams = [];
-    this.prompt = null;
+    this.questions.prompt = null;
     this.intermission = 0;
-    this.due = null;
-    this.stops = [];
-    this.alert = null;
-    this.fuelNote.until = 0;
-    if (this.tanker) dismissTanker(this.tanker);
+    this.sets.stop();
     if (this.boss) this.taunt('win', 'laugh', 6, 1, true);
     // A boss that has won does not hang about over the game over screen.
     if (this.boss && this.boss.state !== 'dying') {
@@ -1138,7 +953,9 @@ export class Game {
     this.sound.play('over');
     // (Anyone still on their way to the counter has been freed all the same.)
     const freed = this.freed + this.souls.length;
-    this.opts.onStatus?.(`Game over. Score ${this.score}. Wave ${this.wave}. You set ${freed} ${freed === 1 ? 'person' : 'people'} free.`);
+    const rank = this.mp.recordScore(this.score, this.wave, freed);
+    const rankMsg = rank ? ` Ranked #${rank} on Top 10 Pilots.` : '';
+    this.opts.onStatus?.(`Game over. Score ${this.score}. Wave ${this.wave}. You set ${freed} ${freed === 1 ? 'person' : 'people'} free.${rankMsg}`);
   }
 
   /** Break a shape into its line segments and send them tumbling outward. */
@@ -1146,268 +963,14 @@ export class Game {
     burstShape(this.debris, shape, x, y, scale, rot, color);
   }
 
-  // ------------------------------------------------------------- questions
-
-  /** How hard the sums are: 1 for the first two waves, 2 for the next two, 3 from wave five. */
-  private get level(): number {
-    return Math.min(3, 1 + Math.floor((Math.max(1, this.wave) - 1) / 2));
-  }
-
-  /** A sum with answers to pick from. */
-  private sum(seconds: number, grace: number): ChoiceChallenge {
-    return choiceChallenge(makeProblem(this.level), seconds, grace);
-  }
-
-  /** A piece of text to type, never the same one twice running. */
-  private text(from: readonly string[]): string {
-    let text = pick(from);
-    if (text === this.lastText) text = from[(from.indexOf(text) + 1) % from.length]!;
-    this.lastText = text;
-    return text;
-  }
-
-  /** Read the question out for a screen reader, after `lead` (what just happened). */
-  private announce(c: Challenge, lead: string): void {
-    const ask =
-      c.kind === 'line'
-        ? `Type: ${c.text}`
-        : c.kind === 'choice'
-          ? this.input === 'touch'
-            ? `What is ${c.question}? Tap the answer: ${c.options.join(', ')}.`
-            : `What is ${c.question}? ${c.options.map((o, i) => `Press ${i + 1} for ${o}`).join(', ')}.`
-          : `What is ${c.question}? Type the answer.`;
-    this.opts.onStatus?.(`${lead} ${ask}`.trim());
-  }
-
-  /** Run a question's clock, with a tick for each of its last three seconds. */
-  private clock(c: Challenge, dt: number): void {
-    const before = Math.ceil(c.timeLeft);
-    tick(c, dt);
-    const left = Math.ceil(c.timeLeft);
-    if (!c.outcome && left < before && left <= 3) this.sound.play('tick');
-  }
-
-  private startBreak(wave: number): void {
-    this.wave = wave;
-    this.keys.clear();
-    this.shots = [];
-    this.pickups = [];
-    this.mines = [];
-    this.rockets = [];
-    const typing = this.input === 'keys';
-    let challenge: Challenge;
-    if (typing) {
-      // Lines get longer every two waves. The time allowed is generous enough for a beginner
-      // (about 15 words a minute); a fast typist simply finishes early.
-      const text = this.text(LINES[Math.min(LINES.length - 1, Math.floor((wave - 1) / 2))]!);
-      challenge = lineChallenge(text, 5 + text.length * 0.6, BREAK_GRACE);
-    } else {
-      challenge = this.sum(ROUND_SECONDS, BREAK_GRACE);
-    }
-    this.brk = {
-      wave, challenge,
-      total: typing ? 1 : ROUND_PROBLEMS, left: typing ? 0 : ROUND_PROBLEMS - 1,
-      right: 0, earned: 0, pause: 0, counted: false, result: null, hold: 0,
-    };
-    this.announce(challenge, `${wave === 1 ? 'Game started.' : `Wave ${wave - 1} cleared.`} Charge the ship for wave ${wave}.`);
-  }
-
-  private updateBreak(dt: number): void {
-    const b = this.brk;
-    if (!b) return;
-    if (b.result) {
-      b.hold -= dt;
-      if (b.hold <= 0) {
-        this.brk = null;
-        this.startWave(b.wave);
-      }
-      return;
-    }
-    const c = b.challenge;
-    this.clock(c, dt);
-    if (!c.outcome) return;
-    if (c.kind === 'line') {
-      this.scoreBreak(b);
-      return;
-    }
-    // A round of sums: leave each answer up for a moment (longer when it was wrong, to read the right one).
-    if (!b.counted) {
-      b.counted = true;
-      b.earned += c.outcome.quality;
-      if (c.outcome.success) b.right += 1;
-      this.sound.play(c.outcome.success ? 'right' : 'wrong');
-      this.feel(c.outcome.success ? 'happy' : 'hurt', 1.2);
-      b.pause = c.outcome.success ? 0.7 : 1.7;
-    }
-    b.pause -= dt;
-    if (b.pause > 0) return;
-    if (b.left > 0) {
-      b.left -= 1;
-      b.counted = false;
-      b.challenge = this.sum(ROUND_SECONDS, 0.25);
-      this.announce(b.challenge, c.outcome.success ? 'Correct.' : 'Not quite.');
-    } else {
-      this.scoreBreak(b);
-    }
-  }
-
-  /** Turn the break's work into rewards: energy for how well it went, a repair for clean work. */
-  private scoreBreak(b: Break): void {
-    const o = b.challenge.outcome;
-    if (!o) return;
-    const typed = b.challenge.kind === 'line';
-    const gain = typed ? o.quality : b.earned / b.total;
-    const clean = typed ? o.success && o.accuracy >= REPAIR_ACCURACY : b.right === b.total;
-    const hurt = this.hull < this.maxHull;
-    const repaired = clean && hurt;
-    const bonus = clean && !hurt ? FULL_HULL_BONUS : 0;
-    if (repaired) this.hull += 1;
-    this.score += bonus;
-    this.energy = Math.min(1, this.energy + gain);
-
-    const lines: Banner[] = [];
-    const add = (text: string, size: number, color = SAND, alpha = 1) => lines.push({ text, size, color, alpha });
-    if (typed && !o.success) {
-      add('OUT OF TIME', 24);
-      add(`ENERGY +${percent(gain)}%`, 13);
-    } else if (typed) {
-      add(`ENERGY +${percent(gain)}%`, 24);
-      add(`ACCURACY ${percent(o.accuracy)}% - SPEED ${Math.round(o.wpm)} WPM`, 11, SAND, 0.85);
-    } else {
-      add(`${b.right} OF ${b.total} CORRECT`, 24);
-      add(`ENERGY +${percent(gain)}%`, 13);
-    }
-    const cannons = this.energy > TRIPLE_AT ? 'TRIPLE CANNONS' : this.energy > 0 ? 'TWIN CANNONS' : '';
-    if (cannons) add(cannons, 13, PINK);
-    if (repaired) add('HULL REPAIRED', 11, PINK);
-    else if (bonus) add(`HULL IS FULL - BONUS ${bonus}`, 11, PINK);
-    else if (hurt) {
-      const how = !typed ? 'ALL CORRECT REPAIRS' : o.success ? `${percent(REPAIR_ACCURACY)}% ACCURACY REPAIRS` : 'FINISHING THE LINE REPAIRS';
-      add(`${how} THE HULL`, 11, SAND, 0.8);
-    }
-    b.result = lines;
-    b.hold = 2.6;
-    if (typed && !o.success) this.sound.play('wrong');
-    if (gain > 0) this.sound.play('power');
-    this.feel(gain >= 0.5 || clean ? 'happy' : gain > 0 ? 'calm' : 'hurt', 2.2);
-    if (repaired) this.sound.play('repair');
-    this.opts.onStatus?.(
-      lines.map((l) => l.text.replace('%', ' percent').replace(' - ', ', ').toLowerCase()).join('. ') + '.',
-    );
-  }
-
-  /** Flying into a boost capsule or a bomb: time slows and one question decides what happens next. */
-  private startPrompt(stake: Stake): void {
-    const roll = Math.random();
-    const challenge =
-      this.input === 'touch' || roll < 0.4
-        ? this.sum(PROMPT_SECONDS, PROMPT_GRACE)
-        : roll < 0.7
-          ? // A bomb is do or die, so one slip of the finger on a typed answer is forgiven.
-            entryChallenge(makeProblem(this.level), PROMPT_SECONDS, PROMPT_GRACE, stake === 'defuse' ? 1 : 0)
-          : lineChallenge(this.text(WORDS), PROMPT_SECONDS, PROMPT_GRACE);
-    this.prompt = { stake, challenge, settled: false, fatal: false, note: '', hold: 0, offer: null, offerAge: 0 };
-    this.sound.play(stake === 'defuse' ? 'bomb' : 'capsule');
-    const what = stake === 'defuse' ? 'You hit a bomb' : stake === 'upgrade' ? 'Upgrade capsule' : 'Boost capsule';
-    this.announce(challenge, `${what}. Answer in ${PROMPT_SECONDS} seconds ${STAKES[stake].goal.toLowerCase()}.`);
-  }
-
-  private updatePrompt(dt: number): void {
-    const p = this.prompt;
-    if (!p) return;
-    const o = p.challenge.outcome;
-    if (!o) {
-      this.clock(p.challenge, dt);
-      return;
-    }
-    if (!p.settled) {
-      p.settled = true;
-      if (p.stake === 'defuse') {
-        if (o.success) {
-          this.score += DEFUSE_POINTS;
-          p.note = `BOMB DEFUSED +${DEFUSE_POINTS}`;
-          p.hold = 1;
-          if (this.boss) this.taunt('defused', 'hurt', 1.5, 1, true);
-        } else {
-          p.fatal = true;
-          p.note = 'THE BOMB GOES OFF';
-          p.hold = 1.7;
-          if (this.boss) this.taunt('boom', 'laugh', 4, 1, true);
-        }
-      } else if (!o.success) {
-        p.note = 'CANNONS JAMMED';
-        p.hold = 1.8;
-        this.jam = JAM_SECONDS + p.hold;
-        this.sound.play('jam');
-      } else {
-        p.hold = 1;
-        if (p.stake === 'upgrade') {
-          const offer = offerUpgrades(this.upgrades);
-          if (offer.length) {
-            p.offer = offer;
-          } else {
-            this.score += 500;
-            p.note = 'EVERY UPGRADE OWNED - BONUS 500';
-          }
-        } else if (p.stake === 'blast') {
-          this.detonate();
-          p.note = 'BOOM';
-        } else if (p.stake === 'energy') {
-          const gain = 0.6 * o.quality;
-          this.energy = Math.min(1, this.energy + gain);
-          p.note = `POWER +${percent(gain)}%`;
-        } else if (this.hull < this.maxHull) {
-          this.hull += 1;
-          p.note = 'HULL REPAIRED';
-        } else {
-          this.score += FULL_HULL_BONUS;
-          p.note = `HULL IS FULL - BONUS ${FULL_HULL_BONUS}`;
-        }
-      }
-      this.sound.play(o.success ? 'right' : 'wrong');
-      this.feel(o.success ? 'happy' : 'hurt', 1.6);
-      this.opts.onStatus?.(
-        p.offer
-          ? `Correct. Choose an upgrade. ${p.offer.map((u, i) => `${this.input === 'touch' ? 'Tap' : `Press ${i + 1} for`} ${u.name.toLowerCase()}: ${u.blurb.toLowerCase()}`).join('. ')}.`
-          : `${o.success ? 'Correct.' : 'Not quite.'} ${p.note.toLowerCase().replace('%', ' percent')}.`,
-      );
-    }
-    if (p.offer) {
-      p.offerAge += dt;
-      return;
-    }
-    p.hold -= dt;
-    if (p.hold <= 0) {
-      this.prompt = null;
-      if (p.fatal) {
-        this.hull = 0;
-        this.rings.push({ x: this.ship.x, y: this.ship.y, age: 0, color: NEON.red }, { x: this.ship.x, y: this.ship.y, age: -0.1, color: NEON.orange });
-        if (!this.reduceMotion) this.shake = 0.5;
-        this.sound.play('blast');
-        this.gameOver();
-        return;
-      }
-      this.ship.invulnerable = Math.max(this.ship.invulnerable, 1);
-    }
-  }
-
-  /** Take one of the upgrades on offer. */
-  private chooseUpgrade(index: number): void {
-    const p = this.prompt;
-    const u = p?.offer?.[index];
-    if (!p || !u || p.offerAge < OFFER_GRACE) return;
-    this.upgrades.add(u.id);
-    if (u.id === 'armour') this.hull = Math.min(this.maxHull, this.hull + 1);
-    if (u.id === 'shield') this.shield = { ready: true, recharge: 0 };
-    if (u.id === 'lance') this.lanceIn = 0.8;
-    if (u.id === 'rockets') this.rocketIn = 0.5;
-    if (u.id === 'nova') this.novaIn = 1.5;
-    p.offer = null;
-    p.note = `${u.name} READY`;
-    p.hold = 1.3;
-    this.sound.play('power');
-    this.feel('happy', 2);
-    this.opts.onStatus?.(`${u.name.toLowerCase()} ready.`);
+  /** Fit an upgrade that has just been chosen. */
+  private equip(id: UpgradeId): void {
+    this.upgrades.add(id);
+    if (id === 'armour') this.hull = Math.min(this.maxHull, this.hull + 1);
+    if (id === 'shield') this.shield = { ready: true, recharge: 0 };
+    if (id === 'lance') this.lanceIn = 0.8;
+    if (id === 'rockets') this.rocketIn = 0.5;
+    if (id === 'nova') this.novaIn = 1.5;
   }
 
   // ---------------------------------------------------------------- update
@@ -1430,7 +993,7 @@ export class Game {
     this.banner = Math.max(0, this.banner - sim);
 
     if (this.intro) {
-      this.intro.update(dt, this.input === 'touch');
+      this.intro.update(dt, this.input.mode === 'touch');
       if (this.intro.done) {
         this.intro = null;
         this.warp = 3.2;
@@ -1442,7 +1005,7 @@ export class Game {
       this.flyStars(view, dt);
       this.backdrop.update(dt, 3.2 * view.settle);
     } else {
-      const flying = this.state === 'playing' && !this.brk;
+      const flying = this.state === 'playing' && !this.questions.brk;
       const targetWarp = flying ? 3.2 : this.state === 'over' ? 0.6 : 1;
       this.warp += (targetWarp - this.warp) * (1 - Math.exp(-dt * 1.8));
       for (const star of this.stars) {
@@ -1466,8 +1029,7 @@ export class Game {
     for (const ring of this.rings) ring.age += dt;
     this.rings = this.rings.filter((ring) => ring.age < 0.7);
     if (this.boss && this.state !== 'playing') this.updateBossFight(sim, dt);
-    if (this.tanker && this.state !== 'playing') this.flyTanker(sim);
-    if (this.field && this.state !== 'playing') this.flyField(sim, dt);
+    if (this.state !== 'playing') this.sets.coast(sim, dt, this.setEnv());
     this.updateSoulsOnScreen(sim);
 
     this.updateShip(sim);
@@ -1475,12 +1037,12 @@ export class Game {
     this.lastShipX = this.ship.x;
     this.lean += (clamp(drift / 380, -1, 1) - this.lean) * (1 - Math.exp(-dt * 8));
     if (this.state === 'playing') {
-      if (this.brk) {
-        this.updateBreak(dt);
+      if (this.questions.brk) {
+        this.questions.updateBreak(dt, this.quizEnv());
       } else {
         if (this.intermission > 0) {
           this.intermission -= sim;
-          if (this.intermission <= 0) this.startBreak(this.wave + 1);
+          if (this.intermission <= 0) this.questions.startBreak(this.wave + 1, this.quizEnv());
         } else if (this.boss) {
           this.updateBossFight(sim, dt);
         } else {
@@ -1489,7 +1051,7 @@ export class Game {
         this.updatePickups(sim);
         this.updateMines(sim);
         this.updateUpgrades(sim);
-        this.updatePrompt(dt);
+        this.questions.updatePrompt(dt, this.quizEnv());
       }
     }
     updateEnemies(this.enemies, sim, dt, {
@@ -1510,6 +1072,21 @@ export class Game {
     });
     this.updateShots(sim);
     if (this.state === 'playing') this.collide();
+    this.mp.updateFlight(sim, {
+      active: this.state === 'playing' && !this.questions.brk && !this.intro,
+      w: this.w,
+      h: this.h,
+      scale: this.scale,
+      pace: this.pace,
+      shipX: this.ship.x,
+      shipY: this.ship.y,
+      wave: this.wave,
+      score: this.score,
+      freed: this.freed,
+      hull: this.hull,
+      firing: this.input.firing && !this.asking && !this.sets.tanker?.hooked,
+      enemies: this.enemies,
+    });
 
     this.enemies = this.enemies.filter((e) => !e.dead);
     this.shots = this.shots.filter((s) => !s.dead);
@@ -1517,9 +1094,9 @@ export class Game {
     this.mines = this.mines.filter((m) => !m.dead);
   }
 
-  /** A question is open and still waiting for its answer (or an upgrade is being chosen, or a bomb is about to go off). */
+  /** A capsule's question is open, which is when the world runs in slow motion and the cannons hold their fire. */
   private get asking(): boolean {
-    return this.prompt !== null && (!this.prompt.settled || this.prompt.fatal || this.prompt.offer !== null);
+    return this.questions.asking;
   }
 
   private updateShip(dt: number): void {
@@ -1532,7 +1109,7 @@ export class Game {
       ship.y = this.homeY + (1 - risen) * (this.h - this.homeY + 80);
       return;
     }
-    if (this.brk) {
+    if (this.questions.brk) {
       ship.x += (this.homeX - ship.x) * k;
       ship.y += (this.homeY - ship.y) * k;
       return;
@@ -1543,9 +1120,9 @@ export class Game {
     ship.cooldown = Math.max(0, ship.cooldown - dt);
     this.jam = Math.max(0, this.jam - dt);
 
-    const keys = this.keys;
-    let dx = (keys.has('ArrowRight') || keys.has('KeyD') ? 1 : 0) - (keys.has('ArrowLeft') || keys.has('KeyA') ? 1 : 0);
-    let dy = (keys.has('ArrowDown') || keys.has('KeyS') ? 1 : 0) - (keys.has('ArrowUp') || keys.has('KeyW') ? 1 : 0);
+    const input = this.input;
+    let dx = input.across;
+    let dy = input.down;
     if (dx && dy) {
       dx *= Math.SQRT1_2;
       dy *= Math.SQRT1_2;
@@ -1554,9 +1131,9 @@ export class Game {
     ship.x += dx * speed * dt;
     ship.y += dy * speed * dt;
 
-    if (this.touchId !== null) {
-      const tx = this.touch.x - ship.x;
-      const ty = this.touch.y - ship.y;
+    if (input.touching) {
+      const tx = input.touch.x - ship.x;
+      const ty = input.touch.y - ship.y;
       const dist = Math.hypot(tx, ty);
       if (dist > 0.5) {
         const step = Math.min(dist, 760 * dt);
@@ -1566,7 +1143,7 @@ export class Game {
     }
     this.keepShipInBounds();
 
-    if ((keys.has('Space') || this.touchId !== null) && ship.cooldown <= 0 && this.jam <= 0 && !this.asking && !this.tanker?.hooked) {
+    if (input.firing && ship.cooldown <= 0 && this.jam <= 0 && !this.asking && !this.sets.tanker?.hooked) {
       ship.cooldown = this.upgrades.has('rapid') ? 0.11 : 0.17;
       this.volley += 1;
       this.sound.play('shot');
@@ -1608,29 +1185,10 @@ export class Game {
   }
 
   private updateWave(dt: number, real: number): void {
-    if (this.tanker) {
-      this.flyTanker(dt);
-      return;
-    }
-    if (this.field || this.alert !== null) {
-      this.flyField(dt, real);
-      return;
-    }
-    if (this.due) {
-      this.dueWait += dt;
-      if (!this.prompt && (!this.enemies.length || this.dueWait > 12)) {
-        if (this.due === 'fuel') this.callTanker();
-        else this.raiseAlarm();
-        this.due = null;
-      }
-      return;
-    }
-    const next = this.stops[0]?.at ?? Infinity;
-    this.waveTime = Math.min(this.waveTime + dt, next);
-    if (this.waveTime >= next) {
-      this.due = this.stops.shift()!.kind;
-      this.dueWait = 0;
-    }
+    const asking = this.questions.prompt !== null;
+    // While the fuel ship or the asteroids have the stage, nothing else in the wave moves on.
+    if (this.sets.run(dt, real, this.setEnv(), this.enemies.length, asking)) return;
+    this.waveTime = this.sets.advance(this.waveTime, dt);
     while (this.queue.length && this.queue[0]!.at <= this.waveTime) this.spawn(this.queue.shift()!);
     while (this.pickupTimes.length && this.pickupTimes[0]! <= this.waveTime) {
       this.pickupTimes.shift();
@@ -1647,7 +1205,7 @@ export class Game {
     const cleared = !this.queue.length && !this.enemies.length;
     const quiet =
       !this.pickups.length && !this.pickupTimes.length && !this.upgradeTimes.length && !this.mines.length && !this.mineTimes.length;
-    if (cleared && quiet && !this.prompt) {
+    if (cleared && quiet && !asking) {
       this.rest += dt;
       if (this.rest > 0.9) this.startBoss();
     }
@@ -1662,9 +1220,9 @@ export class Game {
       if (m.thrown) m.anchorX += clamp(this.ship.x - m.anchorX, -1, 1) * 30 * this.scale * dt;
       m.x = m.ride !== undefined ? m.anchorX : m.anchorX + Math.sin(m.age * 0.9 + m.phase) * (m.thrown ? 12 : 34) * this.scale;
       if (m.y > this.h + 40) m.dead = true;
-      else if (this.state === 'playing' && !this.prompt && this.ship.invulnerable <= 0 && Math.hypot(m.x - this.ship.x, m.y - this.ship.y) < reach) {
+      else if (this.state === 'playing' && !this.questions.prompt && this.ship.invulnerable <= 0 && Math.hypot(m.x - this.ship.x, m.y - this.ship.y) < reach) {
         m.dead = true;
-        this.startPrompt('defuse');
+        this.questions.startPrompt('defuse', this.quizEnv());
       }
     }
   }
@@ -1676,15 +1234,15 @@ export class Game {
       if (p.ride !== undefined) {
         p.age += dt;
         p.y += p.ride * dt;
-      } else if (!this.prompt) {
+      } else if (!this.questions.prompt) {
         p.age += dt;
         p.y += 60 * this.pace * hurry * dt;
         p.x = p.anchorX + Math.sin(p.age * 1.3 + p.phase) * 18 * this.scale;
       }
       if (p.y > this.h + 40) p.dead = true;
-      else if (!this.prompt && Math.hypot(p.x - this.ship.x, p.y - this.ship.y) < reach) {
+      else if (!this.questions.prompt && Math.hypot(p.x - this.ship.x, p.y - this.ship.y) < reach) {
         p.dead = true;
-        this.startPrompt(p.reward);
+        this.questions.startPrompt(p.reward, this.quizEnv());
       }
     }
   }
@@ -1822,7 +1380,7 @@ export class Game {
   private collide(): void {
     const ship = this.ship;
     const shipRadius = 9 * this.scale;
-    const safe = ship.invulnerable > 0 || this.prompt !== null;
+    const safe = ship.invulnerable > 0 || this.questions.prompt !== null;
 
     for (const s of this.shots) {
       if (s.dead) continue;
@@ -1834,7 +1392,7 @@ export class Game {
         }
         continue;
       }
-      if (this.strikeBoss(s.x, s.y, !s.stray && this.input !== 'touch')) {
+      if (this.strikeBoss(s.x, s.y, !s.stray && this.input.mode !== 'touch')) {
         s.dead = true;
         continue;
       }
@@ -1845,11 +1403,10 @@ export class Game {
         this.sound.play('clang');
         continue;
       }
-      const field = this.field;
-      const rock = field && this.near.find((r) => !r.dead && Math.hypot(s.x - r.x, s.y - (field.front - r.d)) < r.r + 2);
+      const rock = this.sets.rockAt(s.x, s.y);
       if (rock) {
         s.dead = true;
-        this.hitRock(rock, s.x, s.y);
+        this.sets.hitRock(rock, s.x, s.y, this.setEnv());
         continue;
       }
       for (const e of this.enemies) {
@@ -1883,16 +1440,12 @@ export class Game {
         return;
       }
     }
-    if (this.field) {
-      const front = this.field.front;
-      for (const rock of this.near) {
-        if (rock.dead || Math.hypot(rock.x - ship.x, front - rock.d - ship.y) >= rock.r * 0.9 + shipRadius) continue;
-        if (!rock.tough) this.breakRock(rock);
-        this.fieldHits += 1;
-        this.hitShip();
-        if (this.state === 'playing') ship.invulnerable = Math.max(ship.invulnerable, 2.2);
-        return;
-      }
+    const rock = this.sets.rockTouching(ship.x, ship.y, shipRadius);
+    if (rock) {
+      this.sets.scrape(rock, this.setEnv());
+      this.hitShip();
+      // Long enough to get clear of the rocks before the next one can hurt.
+      if (this.state === 'playing') ship.invulnerable = Math.max(ship.invulnerable, 2.2);
     }
   }
 
@@ -1906,6 +1459,7 @@ export class Game {
   }
 
   private hudContext(): HudViewContext {
+    const squad = this.mp.snapshot();
     return {
       ctx: this.ctx,
       ink: this.ink,
@@ -1919,7 +1473,7 @@ export class Game {
       time: this.time,
       reduceMotion: this.reduceMotion,
       coarse: this.coarse,
-      input: this.input,
+      input: this.input.mode,
       state: this.state,
       stateTime: this.stateTime,
       paused: this.paused,
@@ -1941,15 +1495,22 @@ export class Game {
       bossFreed: this.bossFreed,
       bossNote: this.bossNote,
       intermission: this.intermission,
-      fuelNote: this.fuelNote,
+      fuelNote: this.sets.note,
       upgrades: this.upgrades,
       boss: this.boss,
-      tanker: this.tanker,
-      brk: this.brk,
-      prompt: this.prompt,
+      tanker: this.sets.tanker,
+      brk: this.questions.brk,
+      prompt: this.questions.prompt,
       pilotMood: this.pilotMood,
       villainMood: this.villainMood,
       villain: this.villain,
+      callsign: squad.callsign,
+      onlineCount: squad.onlineCount,
+      wingmenCount: squad.wingmenCount,
+      lastRank: squad.lastRank,
+      totalLiberated: squad.totalLiberated,
+      topPilots: squad.topPilots,
+      showLeaderboard: this.showLeaderboard,
     };
   }
 
@@ -1961,7 +1522,7 @@ export class Game {
     const view = this.view;
     const shake = Math.max(this.shake, view?.shake ?? 0);
     if (shake > 0) ctx.translate(rand(-1, 1) * shake * 14, rand(-1, 1) * shake * 14);
-    const frame = this.intro ? { ctx, ink: this.ink, w, h, inset: this.inset, time: this.time, touch: this.input === 'touch' } : null;
+    const frame = this.intro ? { ctx, ink: this.ink, w, h, inset: this.inset, time: this.time, touch: this.input.mode === 'touch' } : null;
     const framed = view !== null && (view.horizon !== null || view.sky !== null);
     if (view && framed) {
       ctx.save();
@@ -2042,8 +1603,9 @@ export class Game {
       });
     }
 
-    if (this.field && this.near.length) {
-      const field = this.field;
+    const { field, near, tanker, alert } = this.sets;
+    const { brk, prompt } = this.questions;
+    if (field && near.length) {
       const front = field.front;
       const step = 54 * sc;
       for (const hard of [false, true]) {
@@ -2073,7 +1635,7 @@ export class Game {
         }, false);
       }
       const rocks = (keep: (rock: Rock) => boolean) => () => {
-        for (const rock of this.near) if (!rock.dead && keep(rock)) trace(ctx, rock.shape, rock.x, front - rock.d, 1, rock.rot);
+        for (const rock of near) if (!rock.dead && keep(rock)) trace(ctx, rock.shape, rock.x, front - rock.d, 1, rock.rot);
       };
       this.ink(ROCK, 1, 1.5, rocks((rock) => rock.tough && rock.flash <= 0), false);
       this.ink(PEBBLE, 1, 1.4, rocks((rock) => !rock.tough && rock.flash <= 0));
@@ -2084,7 +1646,7 @@ export class Game {
     renderHostileShots(ctx, this.ink, this.shots, this.tintsOf(this.shots, isHostile), sc);
 
     const hudCtx = this.hudContext();
-    if (this.tanker) renderTanker(hudCtx, this.tanker, this.tankerEnv());
+    if (tanker) renderTanker(hudCtx, tanker, this.sets.tankerEnv(this.setEnv()));
 
     renderOwnShotsAndWeapons(ctx, this.ink, this.shots, this.tintsOf(this.shots, isOwn), this.rockets, this.beams, sc);
 
@@ -2103,7 +1665,7 @@ export class Game {
         const beside = qy < this.inset.top + 64 + face + 6 ? w - this.inset.right - 12 - face - 10 - half : Infinity;
         const qx = Math.max(this.inset.left + 8 + half, Math.min(b.x, beside));
         this.ink(NEON.yellow, 1, 1.8, () => traceText(ctx, question, qx, qy, 18, 'center'));
-        if (this.input === 'touch') {
+        if (this.input.mode === 'touch') {
           const x = clamp(b.x, this.inset.left + 70, w - this.inset.right - 70);
           this.ink(NEON.yellow, 0.6 + 0.3 * Math.sin(this.time * 6), 1.2, () => traceText(ctx, 'TAP THE ANSWER', x, b.y + 150 * sc, 9, 'center'), false);
         }
@@ -2118,7 +1680,11 @@ export class Game {
       ctx.fillRect(-20, -20, w + 40, h + 40);
     }
 
-    const blinking = this.state === 'playing' && !this.paused && !this.prompt && !this.brk && this.ship.invulnerable > 0;
+    if (this.state === 'playing' && !brk && !view) {
+      renderWingmen(ctx, this.ink, this.mp.wingmen, this.mp.lasers, sc, this.shipScale, this.time);
+    }
+
+    const blinking = this.state === 'playing' && !this.paused && !prompt && !brk && this.ship.invulnerable > 0;
     const shipVisible = this.state !== 'over' && (!view || view.ship > 0) && (!blinking || this.reduceMotion || Math.floor(this.time * 14) % 2 === 0);
     if (shipVisible) {
       const s = this.shipScale;
@@ -2129,7 +1695,7 @@ export class Game {
         ctx.lineTo(this.ship.x, this.ship.y + 13 * s + flame);
         ctx.lineTo(this.ship.x + 3 * s, this.ship.y + 13 * s);
       });
-      if (this.prompt) this.ink(SAND, 0.5, 1.2, () => trace(ctx, CAPSULE, this.ship.x, this.ship.y, 2.1 * s, this.time * 0.5), false);
+      if (prompt) this.ink(SAND, 0.5, 1.2, () => trace(ctx, CAPSULE, this.ship.x, this.ship.y, 2.1 * s, this.time * 0.5), false);
 
       if (this.shield.ready) {
         this.ink(NEON.cyan, 0.5 + 0.2 * Math.sin(this.time * 4), 1.3, () => {
@@ -2163,6 +1729,6 @@ export class Game {
 
     if (this.state !== 'ready') renderHud(hudCtx);
     renderMessages(hudCtx);
-    if (this.alert !== null && this.state === 'playing' && !this.paused) renderAlert(hudCtx, this.alert);
+    if (alert !== null && this.state === 'playing' && !this.paused) renderAlert(hudCtx, alert);
   }
 }

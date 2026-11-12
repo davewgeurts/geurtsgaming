@@ -1,7 +1,8 @@
 ---
 /**
  * Ambient backdrop behind the hero: drifting particles on three depth layers that slide a little against the pointer
- * and the scroll, and tiny far-off skirmishes where a ship answers a sum or types a word (see hero-scene.ts).
+ * and the scroll, a few of them twinkling; tiny far-off skirmishes where a ship answers a sum or types a word
+ * (see hero-scene.ts); and little things passing by, like a flight-school line or a fuel ship (see hero-cameos.ts).
  * Pauses for reduced-motion users, hidden tabs, the arcade game, and once the hero has scrolled out of view.
  */
 ---
@@ -19,6 +20,7 @@
 
 <script>
   import { rand } from '../game/core';
+  import { heroCameos } from './hero-cameos';
   import { heroScene, type Rect } from './hero-scene';
 
   const canvas = document.querySelector<HTMLCanvasElement>('.starfield');
@@ -30,10 +32,11 @@
     const depths = [4, 12, 25];
     /** Spare particles past each edge, so a layer that has slid sideways leaves no bare strip. */
     const spill = 30;
-    type P = { x: number; y: number; r: number; vy: number; a: number; c: string; streak: boolean; d: number };
+    type P = { x: number; y: number; r: number; vy: number; a: number; c: string; streak: boolean; d: number; /** How fast it twinkles (0 for the steady ones), and where in its twinkle it starts. */ tw: number; ph: number };
     let w = 0, h = 0, dpr = 0, ps: P[] = [], raf = 0;
-    // No skirmishes for reduced-motion users: they get the still stars only.
+    // No skirmishes or passers-by for reduced-motion users: they get the still stars only.
     const scene = reduce ? null : heroScene(ctx);
+    const cameos = reduce ? null : heroCameos(ctx);
 
     const make = (y?: number): P => {
       const streak = Math.random() < 0.12;
@@ -46,6 +49,9 @@
         a: rand(0.15, 0.75),
         c: colors[Math.floor(Math.random() * colors.length)],
         streak,
+        // One dot in seven twinkles.
+        tw: !streak && Math.random() < 0.14 ? rand(1.2, 3.2) : 0,
+        ph: rand(0, Math.PI * 2),
         // Bigger dots and the streaks are the near ones.
         d: depths[streak ? 2 : Math.min(2, Math.floor((r - 0.6) / 0.54))],
       };
@@ -71,7 +77,9 @@
         ? copy
         : [[Math.min(...copy.map((r) => r[0])), 0, Math.max(...copy.map((r) => r[2])), h] as const];
       const nav = document.querySelector('header');
-      scene.layout(w, h, nav ? [...keepClear, rect(nav)] : keepClear, compact);
+      const clear = nav ? [...keepClear, rect(nav)] : keepClear;
+      scene.layout(w, h, clear, compact);
+      cameos?.layout(w, h, clear, compact);
     };
 
     const resize = () => {
@@ -108,7 +116,8 @@
       ctx.clearRect(0, 0, w, h);
       for (const p of ps) {
         const x = p.x + slideX * p.d, y = p.y + slideY * p.d;
-        ctx.fillStyle = `rgba(${p.c},${p.a})`;
+        const a = p.tw && !reduce ? p.a * (0.5 + 0.5 * Math.sin(now * 0.001 * p.tw + p.ph)) : p.a;
+        ctx.fillStyle = `rgba(${p.c},${a.toFixed(3)})`;
         if (p.streak) {
           ctx.fillRect(x, y, p.r, 40 + p.vy * 30);
         } else {
@@ -121,6 +130,8 @@
       }
       // The skirmishes sit with the far layer.
       scene?.frame(dt, slideX * depths[0], slideY * depths[0]);
+      // The passers-by are a little nearer, with the middle layer.
+      cameos?.frame(dt, slideX * depths[1], slideY * depths[1], scene?.busy());
       if (!reduce) raf = requestAnimationFrame(draw);
     };
 

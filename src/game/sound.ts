@@ -11,7 +11,7 @@ export type Sfx =
   | 'beam' | 'rocket' | 'nova' | 'shield' | 'shieldUp'
   | 'radio' | 'liftoff' | 'sonic' | 'bell' | 'step' | 'canopy'
   | 'free' | 'tanker' | 'hook' | 'snap' | 'pump' | 'alarm'
-  | 'coin' | 'success';
+  | 'coin' | 'success' | 'terminalKey' | 'terminalError';
 
 const STORE_KEY = 'gg-arcade-sound';
 /** Overall loudness. Each sound's own level below is a fraction of this. */
@@ -152,11 +152,11 @@ export class Sound {
     }
   }
 
-  // `@funsociety/corepak` SoundEffects convenience aliases
-  playKey(): void { this.play('key'); }
+  // `@funsociety/corepak` SoundEffects convenience aliases (preserving original retro terminal recipes)
+  playKey(): void { this.play('terminalKey'); }
   playSuccess(): void { this.play('success'); }
   playWin(): void { this.play('fanfare'); }
-  playError(): void { this.play('wrong'); }
+  playError(): void { this.play('terminalError'); }
   playCoin(): void { this.play('coin'); }
 
   private recipe(name: Sfx): void {
@@ -200,6 +200,14 @@ export class Sound {
         break;
       case 'key':
         tone('sine', 1500, 1250, 0.03, 0.028);
+        break;
+      case 'terminalKey':
+        // Original retro terminal key chirp used by davegeurts & exponentialblissmanifesto (600–800 Hz -> 100 Hz, effective gain ~0.05)
+        tone('triangle', 600 + Math.random() * 200, 100, 0.05, 0.09);
+        break;
+      case 'terminalError':
+        // Original retro terminal error buzz (150 Hz -> 100 Hz over 0.3s, effective gain ~0.10)
+        tone('sawtooth', 150, 100, 0.3, 0.18);
         break;
       case 'slip':
         tone('sawtooth', 150, 105, 0.09, 0.035);

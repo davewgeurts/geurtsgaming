@@ -7,6 +7,7 @@
   },
   "scripts": {
     "dev": "astro dev",
+    "dev:api": "node --watch lambda/dev-server.mjs",
     "build": "astro check && astro build",
     "check": "astro check",
     "test": "node --disable-warning=ExperimentalWarning --import ./tests/ts-resolve.mjs --test \"tests/*.test.ts\"",

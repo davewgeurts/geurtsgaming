@@ -7,18 +7,13 @@ import type { Challenge, LineChallenge } from './challenge';
 import { NEON, NEON_LIST, PINK, SAND, SOUL, clamp, pad6, percent, rand, type Ink } from './core';
 import { advance, fitTo, textWidth, traceText } from './font';
 import { BRIEFING } from './lines';
-import { DROGUE, MARK_BOMB, MARK_ENERGY, MARK_HULL, MARK_STAR, MINE, PERSON_OUT, PERSON_UP, SHIP, TANKER, trace, type Shape } from './shapes';
+import { renderLeaderboardPanel, type PilotScore } from './multiplayer';
+import { STAKES, type Break, type Prompt } from './questions';
+import { ALERT_SECONDS, ALERT_TURN } from './setpieces';
+import { DROGUE, PERSON_OUT, PERSON_UP, SHIP, TANKER, trace } from './shapes';
 import { FUEL_SECONDS, TANKER_SIZE, tankerTail, type Tanker, type TankerEnv } from './tanker';
 import { UPGRADES, type Upgrade, type UpgradeId } from './upgrades';
 import { TRIPLE_AT } from './weapons';
-
-/**
- * The commander's warning: how long it is on screen, when the commander turns from the alarm to the choice
- * of ways through, and how far in the asteroids set off.
- */
-export const ALERT_SECONDS = 6;
-export const ALERT_TURN = 2.4;
-export const ALERT_LEAD = 3.4;
 
 /**
  * On a short screen: how far in from the right edge the boss's corner reaches (its face, then its health
@@ -27,54 +22,7 @@ export const ALERT_LEAD = 3.4;
 export const SHORT_TAUNT = 130;
 export const BOSS_CORNER = 12 + 50 + 10 + SHORT_TAUNT + 10;
 
-/** What a boost capsule pays out. A blast clears the screen. */
-export type Reward = 'hull' | 'energy' | 'blast' | 'upgrade';
-/** What a question is being answered for: a capsule's reward, or to defuse a bomb. */
-export type Stake = Reward | 'defuse';
-
-export const STAKES: Record<Stake, { mark: Shape; label: string; goal: string }> = {
-  hull: { mark: MARK_HULL, label: 'HULL', goal: 'TO REPAIR THE HULL' },
-  energy: { mark: MARK_ENERGY, label: 'POWER', goal: 'TO POWER UP' },
-  blast: { mark: MARK_BOMB, label: 'BLAST', goal: 'TO SET OFF A BLAST' },
-  upgrade: { mark: MARK_STAR, label: 'UPGRADE', goal: 'TO WIN AN UPGRADE' },
-  defuse: { mark: MINE, label: 'BOMB', goal: 'OR THE BOMB GOES OFF' },
-};
-
 export interface Box { x: number; y: number; w: number; h: number }
-export interface Banner { text: string; size: number; color: string; alpha: number }
-
-/** The stop before a wave: the ship holds still while the player earns energy for it. */
-export interface Break {
-  /** The wave this break leads into. */
-  wave: number;
-  challenge: Challenge;
-  /** A round of sums asks several in a row: how many there are, how many are still to come, how they went. */
-  total: number;
-  left: number;
-  right: number;
-  earned: number;
-  /** Counts down while an answered sum stays on screen, before the next one. */
-  pause: number;
-  counted: boolean;
-  /** Set once the break is scored; the lines then stay on screen for `hold` seconds. */
-  result: Banner[] | null;
-  hold: number;
-}
-
-/** The question a boost capsule asks in the middle of a wave, while the game runs in slow motion. */
-export interface Prompt {
-  stake: Stake;
-  challenge: Challenge;
-  settled: boolean;
-  /** A bomb that was not defused: when the result has been read, the ship is lost. */
-  fatal: boolean;
-  /** What the answer earned or cost, shown once it is settled. */
-  note: string;
-  hold: number;
-  /** An upgrade capsule answered right: the upgrades to choose from, until one is picked. */
-  offer: Upgrade[] | null;
-  offerAge: number;
-}
 
 export interface VillainState {
   mood: Mood;
@@ -209,6 +157,13 @@ export interface HudViewContext {
   pilotMood: Mood;
   villainMood: Mood;
   villain: VillainState;
+  callsign?: string;
+  onlineCount?: number;
+  wingmenCount?: number;
+  lastRank?: number | null;
+  totalLiberated?: number;
+  topPilots?: readonly PilotScore[];
+  showLeaderboard?: boolean;
 }
 
 function drawCentred(
@@ -433,6 +388,10 @@ export function renderHud(v: HudViewContext): void {
     for (let i = 0; i < hull; i++) trace(ctx, SHIP, x0 + 8 + i * hullGap, hullY, hullScale, 0);
     if (w >= 720) traceText(ctx, `BEST ${pad6(best)}`, w / 2, top + 1, 12, 'center');
   });
+  if (w >= 720 && v.callsign) {
+    const squadText = `${v.callsign} - ${Math.max(1, v.onlineCount ?? 1)} ONLINE`;
+    ink(NEON.cyan, 0.65, 1.1, () => traceText(ctx, squadText, w / 2, top + 18, 7.5, 'center'), false);
+  }
   // Hull points that have been lost stay as faint outlines, so it is clear how many there are to win back.
   if (hull < maxHull) {
     ink(SAND, 0.25, 1, () => {
@@ -510,9 +469,29 @@ export function renderMessages(v: HudViewContext): void {
   const mid = h * 0.42;
   const blink = time % 1.1 < 0.75;
 
+  if (v.showLeaderboard && (paused || state === 'over')) {
+    renderLeaderboardPanel(
+      v.ctx,
+      v.ink,
+      v.w,
+      h,
+      v.room,
+      Math.max(inset.top + 64, h * 0.14),
+      v.topPilots ?? [],
+      v.callsign ?? 'PILOT',
+      v.lastRank ?? null,
+      v.totalLiberated ?? 0,
+      v.onlineCount ?? 1,
+      1,
+      coarse,
+    );
+    return;
+  }
+
   if (paused) {
     drawCentred(v, 'PAUSED', mid, 28);
     drawCentred(v, coarse ? 'TAP TO RESUME' : 'PRESS P TO RESUME', mid + 52, 11, 0.8);
+    drawCentred(v, coarse ? 'TAP THE STAR FOR THE TOP 10 PILOTS' : 'PRESS L FOR TOP 10 PILOTS', mid + 78, 9, 0.72, NEON.cyan);
     return;
   }
 
@@ -580,13 +559,18 @@ export function renderMessages(v: HudViewContext): void {
 
   if (state === 'over') {
     const alpha = Math.min(1, stateTime / 0.5);
-    drawCentred(v, 'GAME OVER', mid - 30, 32, alpha);
-    drawCentred(v, `SCORE ${pad6(score)}`, mid + 30, 15, alpha);
-    drawCentred(v, newBest ? 'NEW BEST!' : `BEST ${pad6(best)}`, mid + 60, 11, alpha * 0.8, newBest ? PINK : SAND);
+    drawCentred(v, 'GAME OVER', mid - 38, 32, alpha);
+    drawCentred(v, `SCORE ${pad6(score)}`, mid + 20, 15, alpha);
+    drawCentred(v, newBest ? 'NEW BEST!' : `BEST ${pad6(best)}`, mid + 48, 11, alpha * 0.8, newBest ? PINK : SAND);
     const totalFreed = freed + soulsInFlight;
-    drawCentred(v, totalFreed === 1 ? 'YOU SET 1 PERSON FREE' : `YOU SET ${totalFreed} PEOPLE FREE`, mid + 86, 11, alpha, SOUL);
+    drawCentred(v, totalFreed === 1 ? 'YOU SET 1 PERSON FREE' : `YOU SET ${totalFreed} PEOPLE FREE`, mid + 72, 11, alpha, SOUL);
+    if (v.lastRank) {
+      drawCentred(v, `TOP 10 PILOT RANK ${v.lastRank} - ${v.callsign ?? 'PILOT'}`, mid + 96, 10, alpha, NEON.cyan);
+    } else if (v.callsign) {
+      drawCentred(v, coarse ? `PILOT ${v.callsign} - TAP THE STAR FOR THE TOP 10` : `PILOT ${v.callsign} - L: TOP 10 PILOTS`, mid + 96, 9, alpha * 0.8, NEON.cyan);
+    }
     if (stateTime > 0.9 && blink) {
-      drawCentred(v, coarse ? 'TAP TO RETRY' : 'PRESS SPACE TO RETRY - ESC TO EXIT', mid + 122, 11, 0.9);
+      drawCentred(v, coarse ? 'TAP TO RETRY' : 'PRESS SPACE TO RETRY - L FOR TOP 10 - ESC TO EXIT', mid + 126, 10, 0.9);
     }
   }
 }
