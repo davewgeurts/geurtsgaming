@@ -87,6 +87,8 @@ const CALLSIGN_PREFIXES = [
 ] as const;
 
 const PROD_LAMBDA_URL = 'https://64nyizvtcs7b7qwjjcpgumre7i0zweoe.lambda-url.us-west-2.on.aws';
+const PILOT_ACTIVE_WINDOW_MS = 30_000;
+const WINGMAN_ACTIVE_WINDOW_MS = 12_000;
 
 /** Pick a clean arcade callsign like `NOVA-7` or `FALCON-3`. */
 export function generateCallsign(seed = Math.random()): string {
@@ -135,18 +137,18 @@ export function mergeTopPilots(
   return { topPilots: sorted, rank: rank && rank > 0 ? rank : null };
 }
 
-function detectApiBaseUrl(): { url: string; fallbackUrl: string | null } {
-  if (typeof window === 'undefined') return { url: '', fallbackUrl: null };
+function detectApiBaseUrl(): string {
+  if (typeof window === 'undefined') return '';
   const win = window as unknown as { __GG_API_URL__?: string };
-  if (win.__GG_API_URL__) return { url: win.__GG_API_URL__.replace(/\/$/, ''), fallbackUrl: null };
+  if (win.__GG_API_URL__) return win.__GG_API_URL__.replace(/\/$/, '');
   const { hostname, port } = window.location;
   // Inside Docker Nginx (:84 or geurtsgaming.localdev), /api proxies to the local Lambda container.
-  if (port === '84' || hostname.endsWith('.localdev')) return { url: '/api', fallbackUrl: PROD_LAMBDA_URL };
-  // On localhost Astro dev/preview, talk to local API if running, or fall back to the shared Lambda.
+  if (port === '84' || hostname.endsWith('.localdev')) return '/api';
+  // On localhost Astro dev/preview, talk only to the local API server so local testing never writes to prod.
   if (hostname === 'localhost' || hostname === '127.0.0.1') {
-    return { url: 'http://localhost:4322', fallbackUrl: PROD_LAMBDA_URL };
+    return 'http://localhost:4322';
   }
-  return { url: PROD_LAMBDA_URL, fallbackUrl: null };
+  return PROD_LAMBDA_URL;
 }
 
 /** IDs already claimed in this JS context so multiple instances in one process never share an ID. */
@@ -167,12 +169,12 @@ export class MultiplayerClient {
   readonly lasers: WingmanLaser[] = [];
 
   private apiBase: string;
-  private fallbackApiBase: string | null = null;
   private readonly siteId = 'geurtsgaming';
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private warmupTimers: Array<ReturnType<typeof setTimeout>> = [];
   private channel: BroadcastChannel | null = null;
   private started = false;
+  private hasPolled = false;
   /**
    * Whether the server at `apiBase` has this game's dedicated leaderboard room (`topPilots`).
    * Even on the shared presence server ('shared'), `/presence` still tracks active `pilot-*` souls
@@ -191,14 +193,7 @@ export class MultiplayerClient {
   private listeners = new Set<(snap: MultiplayerSnapshot) => void>();
 
   constructor(apiBaseOverride?: string) {
-    if (apiBaseOverride !== undefined) {
-      this.apiBase = apiBaseOverride;
-      this.fallbackApiBase = null;
-    } else {
-      const detected = detectApiBaseUrl();
-      this.apiBase = detected.url;
-      this.fallbackApiBase = detected.fallbackUrl;
-    }
+    this.apiBase = apiBaseOverride ?? detectApiBaseUrl();
     this.callsign = this.loadCallsign();
     this.userId = this.loadUserId();
     this.seenPilots.set(this.userId, Date.now());
@@ -316,6 +311,7 @@ export class MultiplayerClient {
       if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this.onVisibility);
       if (typeof window !== 'undefined') {
         window.addEventListener('focus', this.onFocus);
+        window.addEventListener('pagehide', this.onPageHide);
         this.openChannel();
       }
     }
@@ -337,15 +333,20 @@ export class MultiplayerClient {
   stop(): void {
     if (this.started) {
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this.onVisibility);
-      if (typeof window !== 'undefined') window.removeEventListener('focus', this.onFocus);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', this.onFocus);
+        window.removeEventListener('pagehide', this.onPageHide);
+      }
     }
     this.started = false;
+    this.flight = null;
     for (const t of this.warmupTimers) clearTimeout(t);
     this.warmupTimers = [];
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.broadcastPresence('leave');
     if (this.channel) {
       try {
         this.channel.close();
@@ -353,6 +354,43 @@ export class MultiplayerClient {
         /* ignore */
       }
       this.channel = null;
+    }
+    if (this.hasPolled) {
+      this.sendLeave();
+    }
+  }
+
+  private onPageHide = (): void => {
+    this.flight = null;
+    this.broadcastPresence('leave');
+    if (this.hasPolled) {
+      this.sendLeave();
+    }
+  };
+
+  private sendLeave(): void {
+    this.hasPolled = false;
+    if (typeof fetch === 'undefined' || !this.apiBase) return;
+    try {
+      void fetch(this.endpoint('/presence'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          site: 'theloneliestday',
+          siteId: this.siteId,
+          sid: this.userId,
+          userId: this.userId,
+          persona: this.callsign,
+          callsign: this.callsign,
+          chapter: 'gg-left',
+          leave: true,
+        }),
+        keepalive: true,
+      }).catch(() => {
+        /* ignore */
+      });
+    } catch {
+      /* ignore */
     }
   }
 
@@ -363,6 +401,14 @@ export class MultiplayerClient {
       this.channel.onmessage = (ev: MessageEvent) => {
         const msg = ev.data as { type?: string; sid?: string; seen?: Array<[string, number]> } | null;
         if (!msg || typeof msg !== 'object') return;
+        if (msg.type === 'leave' && typeof msg.sid === 'string') {
+          if (this.seenPilots.delete(msg.sid)) {
+            this.onlineCount = Math.max(1, this.seenPilots.size);
+            this.remoteWingmen = this.remoteWingmen.filter((w) => w.id !== msg.sid);
+            this.notify();
+          }
+          return;
+        }
         const now = Date.now();
         let changed = false;
         if (typeof msg.sid === 'string' && msg.sid.startsWith('pilot-')) {
@@ -372,7 +418,7 @@ export class MultiplayerClient {
         if (Array.isArray(msg.seen)) {
           for (const entry of msg.seen) {
             if (!Array.isArray(entry) || typeof entry[0] !== 'string' || typeof entry[1] !== 'number') continue;
-            if (now - entry[1] <= 110_000) {
+            if (now - entry[1] <= PILOT_ACTIVE_WINDOW_MS) {
               if (!this.seenPilots.has(entry[0])) changed = true;
               const prev = this.seenPilots.get(entry[0]) ?? 0;
               if (entry[1] > prev) this.seenPilots.set(entry[0], entry[1]);
@@ -393,7 +439,7 @@ export class MultiplayerClient {
     }
   }
 
-  private broadcastPresence(type: 'hello' | 'ack' | 'sync'): void {
+  private broadcastPresence(type: 'hello' | 'ack' | 'sync' | 'leave'): void {
     if (!this.channel) return;
     try {
       this.channel.postMessage({
@@ -406,13 +452,15 @@ export class MultiplayerClient {
     }
   }
 
-  /** Hidden or occluded browser windows poll more slowly so they stay counted as online without busy-polling. */
   private onVisibility = (): void => {
     if (!this.started) return;
-    if (!document.hidden) {
+    if (document.hidden) {
+      if (this.pollTimer) clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    } else {
       void this.pollPresence();
+      this.resetPollInterval(this.fastPolling);
     }
-    this.resetPollInterval(this.fastPolling);
   };
 
   private onFocus = (): void => {
@@ -441,9 +489,9 @@ export class MultiplayerClient {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
     if (!this.started || typeof fetch === 'undefined' || !this.apiBase) return;
-    const hidden = typeof document !== 'undefined' && document.hidden;
+    if (typeof document !== 'undefined' && document.hidden) return;
     const jitter = Math.floor(Math.random() * 600);
-    const ms = hidden ? 8000 + jitter : fast ? 2600 + jitter : 5000 + jitter;
+    const ms = (fast ? 2600 : 5000) + jitter;
     this.pollTimer = setInterval(() => {
       void this.pollPresence();
     }, ms);
@@ -457,11 +505,15 @@ export class MultiplayerClient {
   async pollPresence(flight: Omit<WingmanTelemetry, 'callsign'> | null = this.flight): Promise<void> {
     if (typeof fetch === 'undefined' || !this.apiBase) return;
     this.lastPollMs = Date.now();
+    this.hasPolled = true;
     const chapter = flight
       ? `gg:${flight.wave}:${flight.x.toFixed(3)}:${flight.y.toFixed(3)}:${flight.firing ? 1 : 0}:${Math.round(flight.score)}:${Math.round(flight.freed)}`
       : 'geurtsgaming';
+    // `site: 'theloneliestday'` keeps the v1 shared Lambda from putting game pilots into
+    // exponentialblissmanifesto.com's default `META` room, while `siteId` + `?site=geurtsgaming`
+    // route the v2 Lambda to `SITE#geurtsgaming`.
     const payload = JSON.stringify({
-      site: this.siteId,
+      site: 'theloneliestday',
       siteId: this.siteId,
       sid: this.userId,
       userId: this.userId,
@@ -472,26 +524,11 @@ export class MultiplayerClient {
     });
 
     try {
-      let res: Response;
-      try {
-        res = await fetch(this.endpoint('/presence'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: payload,
-        });
-      } catch (err) {
-        if (this.fallbackApiBase && this.apiBase !== this.fallbackApiBase) {
-          this.apiBase = this.fallbackApiBase;
-          this.fallbackApiBase = null;
-          res = await fetch(this.endpoint('/presence'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: payload,
-          });
-        } else {
-          throw err;
-        }
-      }
+      const res = await fetch(this.endpoint('/presence'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      });
       if (!res.ok) return;
       const data = (await res.json()) as {
         activeCount?: number;
@@ -507,6 +544,7 @@ export class MultiplayerClient {
         wingmen?: Array<
           WingmanTelemetry & {
             sid?: string;
+            lastSeen?: number;
             flight?: Partial<WingmanTelemetry>;
           }
         >;
@@ -518,20 +556,24 @@ export class MultiplayerClient {
 
       this.seenPilots.set(this.userId, now);
       for (const [id, ts] of this.seenPilots) {
-        if (now - ts > 110_000) this.seenPilots.delete(id);
+        if (now - ts > PILOT_ACTIVE_WINDOW_MS) this.seenPilots.delete(id);
       }
 
       const activeSouls = Array.isArray(data.activeSouls) ? data.activeSouls : null;
       if (activeSouls) {
         for (const s of activeSouls) {
           if (!s || typeof s.sid !== 'string') continue;
+          if (s.chapter === 'gg-left') {
+            if (s.sid !== this.userId) this.seenPilots.delete(s.sid);
+            continue;
+          }
           const isPilot =
             hasBoard ||
             s.sid.startsWith('pilot-') ||
             (typeof s.chapter === 'string' && (s.chapter === 'geurtsgaming' || s.chapter.startsWith('gg:')));
           if (!isPilot) continue;
           const seenAt = typeof s.lastSeen === 'number' && s.lastSeen > 0 && s.lastSeen <= now ? s.lastSeen : now;
-          if (now - seenAt <= 110_000) {
+          if (now - seenAt <= PILOT_ACTIVE_WINDOW_MS) {
             const prev = this.seenPilots.get(s.sid) ?? 0;
             if (seenAt >= prev) this.seenPilots.set(s.sid, seenAt);
           }
@@ -555,6 +597,9 @@ export class MultiplayerClient {
             if (!w) return null;
             const id = w.sid || w.id || '';
             if (id === this.userId) return null;
+            if (typeof w.lastSeen === 'number' && w.lastSeen > 0 && now - w.lastSeen > WINGMAN_ACTIVE_WINDOW_MS) {
+              return null;
+            }
             const f = w.flight ?? w;
             if (typeof f.x !== 'number' || typeof f.y !== 'number') return null;
             return {
@@ -577,6 +622,9 @@ export class MultiplayerClient {
         this.remoteWingmen = activeSouls
           .map((s): WingmanTelemetry | null => {
             if (!s || typeof s.sid !== 'string' || s.sid === this.userId) return null;
+            if (typeof s.lastSeen === 'number' && s.lastSeen > 0 && now - s.lastSeen > WINGMAN_ACTIVE_WINDOW_MS) {
+              return null;
+            }
             if (typeof s.chapter !== 'string' || !s.chapter.startsWith('gg:')) return null;
             const m = /^gg:(\d+):([0-9.]+):([0-9.]+):([01]):(\d+)(?::(\d+))?$/.exec(s.chapter);
             if (!m) return null;

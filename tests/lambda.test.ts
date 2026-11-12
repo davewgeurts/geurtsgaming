@@ -89,10 +89,20 @@ test('presence heartbeat tracks active pilots, wingman flight telemetry, hugs, a
   assert.equal(wingman.flight.weapon, 'laser');
 });
 
-test('score submission updates Top 10 leaderboard, sorts descending, and clamps implausible scores', async () => {
-  const scoreRes = await handler(
+test('score submission updates Top 10 leaderboard, sorts descending, validates callsigns, and clamps implausible scores', async () => {
+  const invalidRes = await handler(
     makeEvent('POST', '/score', {
       callsign: 'maverick',
+      score: 21500,
+      wave: 8,
+      freed: 72,
+    }),
+  );
+  assert.equal(invalidRes.statusCode, 400, 'rejects arbitrary free-text callsigns');
+
+  const scoreRes = await handler(
+    makeEvent('POST', '/score', {
+      callsign: 'NOVA-7',
       score: 21500,
       wave: 8,
       freed: 72,
@@ -106,13 +116,13 @@ test('score submission updates Top 10 leaderboard, sorts descending, and clamps 
   assert.equal(data.qualified, true);
   assert.equal(data.rank, 1);
   assert.equal(data.topPilots.length, 1, 'the board starts empty, so this is the only score on it');
-  assert.equal(data.topPilots[0].callsign, 'MAVERICK');
+  assert.equal(data.topPilots[0].callsign, 'NOVA-7');
   assert.equal(data.topPilots[0].score, 21500);
 
   // Verify wave-based anti-cheat score clamp (wave 1 max is 40,000)
   const clampedRes = await handler(
     makeEvent('POST', '/score', {
-      callsign: 'spoof',
+      callsign: 'FALCON-3',
       score: 9999999,
       wave: 1,
       freed: 9999,

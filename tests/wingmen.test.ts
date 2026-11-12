@@ -183,7 +183,14 @@ test('counts only pilots of this game on a shared server, and tracks 3 browsers 
     assert.ok(!paths.some((p) => p.includes('/score')), 'does not call /score on a server without topPilots');
     assert.equal(browser1.snapshot().topPilots.length, 1, 'the run is kept on this browser\'s own board');
 
+    // When browser 1 leaves (stop/pagehide), the other browsers drop its ship and pilot count on the next heartbeat.
     browser1.stop();
+    await settle();
+    await browser2.pollPresence();
+    browser2.updateFlight(0.016, flying(500));
+    assert.equal(liveShips(browser2, browser1).length, 0, 'leaving pilot disappears from other screens right away');
+    assert.equal(browser2.snapshot().onlineCount, 2, 'pilot count drops from 3 to 2 on the next heartbeat');
+
     browser2.stop();
     browser3.stop();
   } finally {

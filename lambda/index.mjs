@@ -30,12 +30,18 @@ if (SHOULD_USE_DDB) {
 const TABLE = process.env.TABLE_NAME || 'exponentialbliss-pledges';
 const DEFAULT_SITE = process.env.DEFAULT_SITE || 'geurtsgaming';
 const SOUL_ACTIVE_WINDOW_MS = 110_000;
+const PILOT_ACTIVE_WINDOW_MS = 30_000;
+const WINGMAN_ACTIVE_WINDOW_MS = 12_000;
 const EVENT_RECENT_WINDOW_MS = 90_000;
 const MAX_RECENT_EVENTS = 12;
 const MAX_ACTIVE_SOULS = 24;
 const MAX_HUG_PINS = 64;
 const MAX_LEADERBOARD_PILOTS = 10;
 const DDB_SYNC_COALESCE_MS = 1_500;
+const VALID_CALLSIGN_RE = /^(NOVA|FALCON|VIPER|STAR|ORION|LYRA|VEGA|COMET|APEX|DRIFT|PULSE|SOLAR)-[1-9]$/;
+const SCORE_RATE_WINDOW_MS = 60_000;
+const SCORE_RATE_MAX = 10;
+const scoreRateByIp = new Map();
 
 
 function createInitialPins() {
@@ -370,7 +376,7 @@ export async function handler(event) {
       const siteKey =
         path === '/loneliest-presence'
           ? 'theloneliestday'
-          : querySite || body.site || DEFAULT_SITE;
+          : querySite || body.siteId || body.site || DEFAULT_SITE;
       const room = getRoom(siteKey);
 
       const nowMs = Date.now();
@@ -380,23 +386,28 @@ export async function handler(event) {
       }
       room.cachedDayKey = todayKey;
 
+      const activeWindowMs = room.pk.startsWith('SITE#')
+        ? PILOT_ACTIVE_WINDOW_MS
+        : SOUL_ACTIVE_WINDOW_MS;
       for (const [k, s] of room.activeSouls.entries()) {
-        if (nowMs - s.lastSeen > SOUL_ACTIVE_WINDOW_MS) {
+        if (nowMs - s.lastSeen > activeWindowMs || s.chapter === 'gg-left') {
           room.activeSouls.delete(k);
         }
       }
 
       const hasHug = Boolean(body.hug && typeof body.hug === 'object');
+      const isLeaving = method === 'POST' && (body.leave === true || body.chapter === 'gg-left');
       const incomingSid =
         method === 'POST'
           ? sanitize(body.sid, 64) ||
             `anon-${Math.random().toString(36).slice(2, 8)}`
           : '';
-      const isNewSoul = method === 'POST' && !room.activeSouls.has(incomingSid);
+      const isNewSoul = method === 'POST' && !isLeaving && !room.activeSouls.has(incomingSid);
       const shouldSyncDdb =
         Boolean(ddb) &&
         (body.isInitialView === true ||
           isNewSoul ||
+          isLeaving ||
           body.gong === true ||
           hasHug ||
           nowMs - room.lastDdbSyncMs > DDB_SYNC_COALESCE_MS);
@@ -426,17 +437,21 @@ export async function handler(event) {
         const persona = sanitize(body.persona, 64) || undefined;
         const flight = sanitizeFlightTelemetry(body.flight);
 
-        room.activeSouls.set(sid, {
-          sid,
-          region,
-          lat,
-          lon,
-          color,
-          chapter,
-          persona,
-          flight,
-          lastSeen: nowMs,
-        });
+        if (isLeaving) {
+          room.activeSouls.delete(sid);
+        } else {
+          room.activeSouls.set(sid, {
+            sid,
+            region,
+            lat,
+            lon,
+            color,
+            chapter,
+            persona,
+            flight,
+            lastSeen: nowMs,
+          });
+        }
 
         if (body.gong === true) {
           mergeAndPruneRecentEvents(
@@ -564,7 +579,10 @@ export async function handler(event) {
         MAX_ACTIVE_SOULS
       );
       const wingmen = activeSouls
-        .filter((s) => Boolean(s.flight))
+        .filter(
+          (s) =>
+            Boolean(s.flight) && nowMs - s.lastSeen <= WINGMAN_ACTIVE_WINDOW_MS
+        )
         .map((s) => ({
           sid: s.sid,
           callsign: s.persona || 'WINGMAN',
@@ -609,10 +627,31 @@ export async function handler(event) {
 
     if (method === 'POST' && (path === '/score' || path === '/leaderboard')) {
       const body = JSON.parse(event.body || '{}');
-      const room = getRoom(querySite || body.site || 'geurtsgaming');
+      const room = getRoom(querySite || body.siteId || body.site || 'geurtsgaming');
       const nowMs = Date.now();
 
-      const callsign = sanitize(body.callsign, 18).toUpperCase() || 'PILOT';
+      const clientIp = sanitize(event.requestContext?.http?.sourceIp, 64);
+      if (clientIp) {
+        const recent = (scoreRateByIp.get(clientIp) || []).filter(
+          (ts) => nowMs - ts < SCORE_RATE_WINDOW_MS
+        );
+        if (recent.length >= SCORE_RATE_MAX) {
+          return respond(429, {
+            ok: false,
+            error: 'Too many score submissions',
+          });
+        }
+        recent.push(nowMs);
+        scoreRateByIp.set(clientIp, recent);
+      }
+
+      const callsign = sanitize(body.callsign, 18).toUpperCase();
+      if (!VALID_CALLSIGN_RE.test(callsign)) {
+        return respond(400, {
+          ok: false,
+          error: 'Invalid callsign format',
+        });
+      }
       const wave = Math.round(clampCoordinate(body.wave, 1, 99, 1));
       const maxPlausibleScore = wave * 25_000 + 15_000;
       const score = Math.round(

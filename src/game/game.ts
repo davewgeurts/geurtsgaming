@@ -961,6 +961,7 @@ export class Game {
     this.newBest = this.saveBest();
     this.setState('over');
     this.sound.play('over');
+    this.mp.rest();
     // (Anyone still on their way to the counter has been freed all the same.)
     const freed = this.freed + this.souls.length;
     const rank = this.mp.recordScore(this.score, this.wave, freed);
