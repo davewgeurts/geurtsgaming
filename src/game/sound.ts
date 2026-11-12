@@ -1,7 +1,7 @@
 /**
- * Sound effects for the arcade demo, made on the spot with Web Audio: there are no audio files to download.
- * Everything is a short beep, sweep or puff of noise, in keeping with the vintage look, and deliberately quiet.
- * game.ts decides when a sound plays; this file decides what it sounds like.
+ * Unified Web Audio synthesizer for the arcade demo and `@funsociety/corepak`.
+ * Everything is synthesised on the spot with Web Audio (oscillators, pitch sweeps, filtered white noise,
+ * and a dynamics compressor limiter): there are no audio files to download.
  */
 export type Sfx =
   | 'start' | 'wave' | 'shot' | 'enemyShot' | 'hit' | 'clang' | 'boom' | 'hurt' | 'over'
@@ -10,7 +10,8 @@ export type Sfx =
   | 'warning' | 'lock' | 'core' | 'armOff' | 'bossDown' | 'fanfare' | 'escape' | 'laugh' | 'taunt'
   | 'beam' | 'rocket' | 'nova' | 'shield' | 'shieldUp'
   | 'radio' | 'liftoff' | 'sonic' | 'bell' | 'step' | 'canopy'
-  | 'free' | 'tanker' | 'hook' | 'snap' | 'pump' | 'alarm';
+  | 'free' | 'tanker' | 'hook' | 'snap' | 'pump' | 'alarm'
+  | 'coin' | 'success';
 
 const STORE_KEY = 'gg-arcade-sound';
 /** Overall loudness. Each sound's own level below is a fraction of this. */
@@ -21,6 +22,29 @@ const GAP: Partial<Record<Sfx, number>> = {
   free: 0.06, pump: 0.2,
 };
 
+let userInteracted = false;
+
+if (typeof window !== 'undefined') {
+  const markInteracted = () => {
+    userInteracted = true;
+  };
+  const events = ['pointerdown', 'keydown', 'touchstart', 'mousedown', 'click'];
+  for (const evt of events) {
+    window.addEventListener(evt, markInteracted, { once: true, capture: true, passive: true });
+  }
+}
+
+export function hasUserInteracted(): boolean {
+  if (typeof window === 'undefined') return false;
+  if (userInteracted) return true;
+  const ua = (navigator as unknown as { userActivation?: { hasBeenActive?: boolean } }).userActivation;
+  if (ua && ua.hasBeenActive) {
+    userInteracted = true;
+    return true;
+  }
+  return false;
+}
+
 export class Sound {
   private ctx: AudioContext | null = null;
   private out: GainNode | null = null;
@@ -28,11 +52,13 @@ export class Sound {
   private last = new Map<Sfx, number>();
   private on = true;
 
-  constructor() {
-    try {
-      this.on = localStorage.getItem(STORE_KEY) !== 'off';
-    } catch {
-      /* storage can be blocked; sound simply starts switched on */
+  constructor(private readonly storeKey: string | null = STORE_KEY) {
+    if (storeKey && typeof localStorage !== 'undefined') {
+      try {
+        this.on = localStorage.getItem(storeKey) !== 'off';
+      } catch {
+        /* storage can be blocked; sound simply starts switched on */
+      }
     }
   }
 
@@ -40,23 +66,44 @@ export class Sound {
     return this.on;
   }
 
+  set enabled(on: boolean) {
+    this.setEnabled(on);
+  }
+
   setEnabled(on: boolean): void {
     this.on = on;
-    try {
-      localStorage.setItem(STORE_KEY, on ? 'on' : 'off');
-    } catch {
-      /* see constructor */
+    if (this.storeKey && typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(this.storeKey, on ? 'on' : 'off');
+      } catch {
+        /* see constructor */
+      }
     }
     if (on) this.unlock();
     else void this.ctx?.suspend().catch(() => {});
   }
 
+  /** Toggle mute state (corepak compatibility); returns whether sound is now muted. */
+  toggleMute(): boolean {
+    this.setEnabled(!this.on);
+    return !this.on;
+  }
+
   /** Browsers only let a page make sound after a key press, click or tap, so the game calls this from each of those. */
   unlock(): void {
-    if (!this.on || typeof AudioContext === 'undefined') return;
+    userInteracted = true;
+    this.ensureContext();
+  }
+
+  private ensureContext(): boolean {
+    if (!this.on || typeof window === 'undefined') return false;
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return false;
     try {
       if (!this.ctx) {
-        const ctx = new AudioContext();
+        const ctx = new AudioCtx();
         // A limiter, so several sounds landing together get quieter instead of crackling.
         const limiter = ctx.createDynamicsCompressor();
         const out = ctx.createGain();
@@ -72,8 +119,10 @@ export class Sound {
       }
       // Anything but running: suspended until a first tap, or interrupted (a phone call, the app switcher on an iPhone).
       if (this.ctx.state !== 'running') void this.ctx.resume().catch(() => {});
+      return true;
     } catch {
       /* no sound on this device; the game plays on without it */
+      return false;
     }
   }
 
@@ -86,9 +135,11 @@ export class Sound {
   }
 
   play(name: Sfx): void {
+    if (!this.on) return;
+    if (!this.ctx && hasUserInteracted()) this.ensureContext();
     const ctx = this.ctx;
     // Sounds asked for while the audio is not running are dropped. Queued up, they would all go off at once later.
-    if (!this.on || !ctx || ctx.state !== 'running') return;
+    if (!ctx || ctx.state !== 'running') return;
     const gap = GAP[name];
     if (gap !== undefined) {
       if (ctx.currentTime - (this.last.get(name) ?? -1) < gap) return;
@@ -100,6 +151,13 @@ export class Sound {
       /* a sound that cannot be made must never interrupt the game */
     }
   }
+
+  // `@funsociety/corepak` SoundEffects convenience aliases
+  playKey(): void { this.play('key'); }
+  playSuccess(): void { this.play('success'); }
+  playWin(): void { this.play('fanfare'); }
+  playError(): void { this.play('wrong'); }
+  playCoin(): void { this.play('coin'); }
 
   private recipe(name: Sfx): void {
     const tone = this.tone;
@@ -153,6 +211,13 @@ export class Sound {
         tone('triangle', 660, 660, 0.1, 0.055);
         tone('triangle', 880, 880, 0.1, 0.055, 0.07);
         tone('triangle', 1320, 1320, 0.16, 0.055, 0.14);
+        break;
+      case 'success':
+        [440, 554.37, 659.25, 880].forEach((f, i) => tone('sine', f, f, i === 3 ? 0.45 : 0.11, 0.055, i * 0.1));
+        break;
+      case 'coin':
+        tone('sine', 987.77, 987.77, 0.08, 0.055);
+        tone('sine', 1318.51, 1318.51, 0.42, 0.055, 0.08);
         break;
       case 'wrong':
         tone('square', 220, 165, 0.16, 0.035);
@@ -332,3 +397,6 @@ export class Sound {
     return gain;
   }
 }
+
+export { Sound as SoundEffects, Sound as SoundSystem };
+export const sounds = new Sound(null);

@@ -1,8 +1,9 @@
 /**
  * The questions the arcade demo asks: a line to type, a sum with options to pick from, or a sum
  * whose answer is typed in. This file is the rules only (what counts as right, how much it is
- * worth, when time runs out); game.ts decides when to ask and draws it.
+ * worth, when time runs out); game.ts decides when to ask and hud.ts draws it.
  */
+import { clamp01 } from './core';
 import type { Problem } from './maths';
 
 export interface Outcome {
@@ -58,7 +59,6 @@ export type Challenge = LineChallenge | ChoiceChallenge | EntryChallenge;
 const SLOW_WPM = 10;
 const FAST_WPM = 40;
 
-const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 const common = (limit: number, grace: number): Common => ({ age: 0, grace, limit, timeLeft: limit, error: 0, outcome: null });
 
 export function lineChallenge(text: string, limit: number, grace: number): LineChallenge {

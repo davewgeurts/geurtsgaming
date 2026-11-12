@@ -12,19 +12,10 @@
  * This file is the boss's behaviour and geometry. game.ts feeds it the world through `BossEnv`
  * and draws the `Part`s it hands back.
  */
+import { NEON, NEON_LIST, pick, rand } from './core';
 import type { Problem } from './maths';
 import { BOSS_CORE, BOSS_EYE, BOSS_SHELL, BOSS_WINGS, CLAW, POD, type Shape } from './shapes';
 
-/** The loud colours kept for the boss and for anything exploding. */
-export const NEON = {
-  cyan: '#42f5ff',
-  lime: '#9bff4d',
-  yellow: '#ffe84a',
-  orange: '#ff9b2f',
-  red: '#ff3552',
-  violet: '#b98cff',
-} as const;
-export const NEON_LIST: readonly string[] = Object.values(NEON);
 const ARM_COLORS = [NEON.lime, NEON.yellow, NEON.orange, NEON.violet];
 const WHITE = '#ffffff';
 
@@ -116,8 +107,6 @@ export interface Part { shape: Shape; x: number; y: number; scale: number; rot: 
 
 /** What a player's shot did. */
 export type Hit = 'miss' | 'blocked' | 'core' | 'down' | 'arm' | 'armOff' | 'lock' | 'right' | 'wrong';
-
-const rand = (min: number, max: number) => min + Math.random() * (max - min);
 
 export function createBoss(wave: number, env: BossEnv): Boss {
   const kind = wave % 2 === 0 ? 'sum' : 'arms';
@@ -237,7 +226,7 @@ export function updateBoss(b: Boss, dt: number, env: BossEnv, real = dt): void {
     b.popIn -= dt;
     if (b.popIn <= 0) {
       b.popIn = 0.1;
-      env.burst(BOSS_EYE, b.x + rand(-60, 60) * s, b.y + rand(-40, 40) * s, s * rand(0.8, 1.8), rand(0, 6), NEON_LIST[Math.floor(rand(0, NEON_LIST.length))]!);
+      env.burst(BOSS_EYE, b.x + rand(-60, 60) * s, b.y + rand(-40, 40) * s, s * rand(0.8, 1.8), rand(0, 6), pick(NEON_LIST));
     }
     if (b.stateTime > 1.2) {
       env.burst(BOSS_CORE, b.x, b.y, s * 1.4, 0, NEON.red);

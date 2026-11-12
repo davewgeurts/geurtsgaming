@@ -4,6 +4,7 @@
  * It borrows the arcade demo's shapes, stroke font, sums and words, so the backdrop shows what the game teaches.
  * Only the small data modules are imported here: the game itself stays lazy-loaded.
  */
+import { NEON, PINK, SAND, pick, rand } from '../game/core';
 import { textWidth, traceText } from '../game/font';
 import { WORDS } from '../game/lines';
 import { makeProblem } from '../game/maths';
@@ -12,9 +13,7 @@ import { DART, DRIFTER, HEX, SHIP, segments, trace, type Shape } from '../game/s
 /** An area the skirmishes must keep clear of, as [left, top, right, bottom] in canvas px. */
 export type Rect = readonly [number, number, number, number];
 
-const SAND = '#ecdfd2';
-const PINK = '#d98ac0';
-const LIME = '#9bff4d';
+const LIME = NEON.lime;
 const ENEMIES = [DRIFTER, DART, HEX];
 const SHORT = WORDS.filter((word) => word.length < 6);
 
@@ -74,9 +73,6 @@ interface Skirmish {
   shotY: number;
   bits: Bit[];
 }
-
-const rand = (a: number, b: number) => a + Math.random() * (b - a);
-const pick = <T>(items: readonly T[]): T => items[Math.floor(Math.random() * items.length)]!;
 
 export function heroScene(ctx: CanvasRenderingContext2D) {
   /** Places a skirmish fits, as x, y pairs. */

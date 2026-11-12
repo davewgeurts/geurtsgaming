@@ -5,8 +5,10 @@
  * Fall too far behind and the line pulls off; crowd it and the line kinks and comes off. A line that has
  * come off can be hooked on again, and the fuel already taken is kept.
  *
- * This file is the rules and the motion. game.ts draws it, plays its sounds and pays out the fuel.
+ * This file is the rules and the motion. hud.ts draws it; game.ts plays its sounds and pays out the fuel.
  */
+
+import { clamp, rand, smooth } from './core';
 
 /** Seconds on the line for a full tank. */
 export const FUEL_SECONDS = 6;
@@ -62,10 +64,6 @@ export interface Tanker {
   /** Its sidesteps: where the last one started and is going, how far through it is, and when the next comes. */
   jink: { from: number; to: number; t: number; next: number };
 }
-
-const rand = (min: number, max: number) => min + Math.random() * (max - min);
-const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
-const smooth = (t: number) => t * t * (3 - 2 * t);
 
 /** The height it flies at: clear of the top of the screen, and low enough that the ship can reach its line. */
 function stationY(env: TankerEnv): number {

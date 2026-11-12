@@ -74,6 +74,29 @@ export function textWidth(text: string, size: number): number {
   return (text.length * ADVANCE - (ADVANCE - CELL_WIDTH)) * (size / CELL_HEIGHT);
 }
 
+/** Largest cap height up to `size` at which `text` fits in `width` px. */
+export function fitTo(text: string, size: number, width: number): number {
+  const full = textWidth(text, size);
+  return full > width ? (size * width) / full : size;
+}
+
+/** Break `text` into lines no wider than `width` px at the given cap height `size`. */
+export function wrapText(text: string, size: number, width: number): string[] {
+  const lines: string[] = [];
+  let line = '';
+  for (const word of text.split(' ')) {
+    const next = line ? `${line} ${word}` : word;
+    if (line && textWidth(next, size) > width) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = next;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
 /** Add a line of text to the current canvas path. `y` is the top of the caps; `size` is the cap height in px. */
 export function traceText(
   ctx: CanvasRenderingContext2D,

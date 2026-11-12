@@ -18,6 +18,7 @@
 </style>
 
 <script>
+  import { rand } from '../game/core';
   import { heroScene, type Rect } from './hero-scene';
 
   const canvas = document.querySelector<HTMLCanvasElement>('.starfield');
@@ -34,7 +35,6 @@
     // No skirmishes for reduced-motion users: they get the still stars only.
     const scene = reduce ? null : heroScene(ctx);
 
-    const rand = (a: number, b: number) => a + Math.random() * (b - a);
     const make = (y?: number): P => {
       const streak = Math.random() < 0.12;
       const r = streak ? rand(0.6, 1.2) : rand(0.6, 2.2);

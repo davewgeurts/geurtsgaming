@@ -10,6 +10,8 @@
  * here is drawn far dimmer and thinner than anything in the game itself, with no glow, so it stays in
  * the distance and never looks like a target.
  */
+import { pick, rand } from './core';
+
 type V3 = readonly [number, number, number];
 interface Mesh { verts: V3[]; faces: number[][] }
 type BodyKind = 'planet' | 'moon' | 'rock';
@@ -50,8 +52,6 @@ const PLANET_SHADE = 0.085;
 const MOON_SHADE = 0.07;
 const ROCK_SHADE = 0.055;
 
-const rand = (min: number, max: number): number => min + Math.random() * (max - min);
-const pick = <T>(from: readonly T[]): T => from[Math.floor(Math.random() * from.length)]!;
 const unit = ([x, y, z]: V3): V3 => {
   const len = Math.hypot(x, y, z) || 1;
   return [x / len, y / len, z / len];

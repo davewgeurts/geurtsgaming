@@ -78,13 +78,19 @@ p { margin: 0 0 1em; text-wrap: pretty; }
 
 .section { padding-block: clamp(56px, 10vw, 120px); }
 
-/* Inner-page header shared by /games/, /about/, /contact/ */
+/* Inner-page header shared by /games/, /about/, /contact/, /404 */
 .page-hero {
+  --hero-glow: color-mix(in srgb, var(--plum) 50%, transparent);
   padding-block: clamp(112px, 24vw, 150px) clamp(32px, 6vw, 48px);
   text-align: center;
+  background:
+    radial-gradient(ellipse 60% 60% at 50% 0%, var(--hero-glow), transparent 70%),
+    linear-gradient(180deg, #050f33, var(--navy));
 }
 .page-hero .lede {
+  max-width: 620px;
   margin-inline: auto;
+  font-size: clamp(1.02rem, 1.6vw, 1.15rem);
 }
 
 .section-head {

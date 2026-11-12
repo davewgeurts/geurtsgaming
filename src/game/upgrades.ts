@@ -5,6 +5,7 @@
  * This file is the catalogue: names, the line that explains each one, and its icon.
  * What each upgrade actually does lives in game.ts, next to the thing it changes.
  */
+import { shuffle } from './core';
 import { closed, ngon, open, type Shape } from './shapes';
 
 export type UpgradeId =
@@ -69,11 +70,7 @@ export const UPGRADES: readonly Upgrade[] = [
 
 /** Up to `count` upgrades the pilot does not own yet, from different families where possible. */
 export function offerUpgrades(owned: ReadonlySet<UpgradeId>, count = 3): Upgrade[] {
-  const pool = UPGRADES.filter((u) => !owned.has(u.id));
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j]!, pool[i]!];
-  }
+  const pool = shuffle(UPGRADES.filter((u) => !owned.has(u.id)));
   const picked: Upgrade[] = [];
   // First pass takes one per family; a second pass fills any places still empty.
   for (const u of pool) if (picked.length < count && !picked.some((p) => p.family === u.family)) picked.push(u);

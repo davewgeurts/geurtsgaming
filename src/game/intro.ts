@@ -14,12 +14,13 @@
  * This file owns the timeline, the 3D ground scene and the cockpit. The stars and planets belong to
  * game.ts, which draws them the way `view()` says, so they are the very same ones before and after.
  */
-import { traceAvatar, type Mood } from './avatar';
-import { textWidth, traceText } from './font';
+import { renderAvatarFrame, type Mood } from './avatar';
+import { BASE_BG as BASE, BLUE, NEON, SAND, box3d, clamp, rand, smooth, type Ink } from './core';
+import { fitTo, traceText, wrapText } from './font';
 import { HANGAR_SCRIPT, Hangar, type HangarCue } from './hangar';
 import { BRIEFING } from './lines';
 
-export type Ink = (color: string, alpha: number, width: number, build: () => void, glow?: boolean) => void;
+export type { Ink };
 export type IntroCue = 'radio' | 'liftoff' | 'sonic' | HangarCue;
 
 /** How game.ts should draw the sky, and where the ship is, at this moment of the intro. */
@@ -85,40 +86,10 @@ const LINE_HOLD = 2.3;
 /** Seconds the cockpit takes to fade in after the hangar. */
 const FADE_IN = 0.45;
 
-const BASE = 'rgb(3, 7, 26)';
-const SAND = '#ecdfd2';
-const CYAN = '#42f5ff';
-const LIME = '#9bff4d';
-const YELLOW = '#ffe84a';
-const VIOLET = '#b98cff';
-const BLUE = '#6f8cff';
+const { cyan: CYAN, lime: LIME, yellow: YELLOW, violet: VIOLET } = NEON;
 
 type BlockKind = 'box' | 'tower' | 'dome' | 'mast';
 interface Block { kind: BlockKind; x: number; z: number; w: number; d: number; h: number; tint: string; dish: boolean }
-
-const rand = (min: number, max: number): number => min + Math.random() * (max - min);
-const clamp = (v: number, min: number, max: number): number => Math.min(max, Math.max(min, v));
-const smooth = (t: number): number => {
-  const c = clamp(t, 0, 1);
-  return c * c * (3 - 2 * c);
-};
-
-/** Break text into lines no wider than `width`. */
-function wrap(text: string, size: number, width: number): string[] {
-  const lines: string[] = [];
-  let line = '';
-  for (const word of text.split(' ')) {
-    const next = line ? `${line} ${word}` : word;
-    if (line && textWidth(next, size) > width) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = next;
-    }
-  }
-  if (line) lines.push(line);
-  return lines;
-}
 
 export class Intro {
   phase: 'hangar' | 'brief' | 'launch';
@@ -412,14 +383,8 @@ export class Intro {
     }
 
     // The base's buildings.
-    const box = (x: number, y: number, z: number, bw: number, bh: number, bd: number): void => {
-      const x0 = x - bw / 2, x1 = x + bw / 2, z0 = z, z1 = z + bd, y1 = y + bh;
-      for (const [px, pz, qx, qz] of [[x0, z0, x1, z0], [x1, z0, x1, z1], [x1, z1, x0, z1], [x0, z1, x0, z0]] as const) {
-        seg(px, y, pz, qx, y, qz);
-        seg(px, y1, pz, qx, y1, qz);
-        seg(px, y, pz, px, y1, pz);
-      }
-    };
+    const box = (x: number, y: number, z: number, bw: number, bh: number, bd: number): void =>
+      box3d(seg, x, y, z, bw, bh, bd, false);
     for (const tint of [CYAN, VIOLET]) {
       ink(tint, 0.6 * solid, 1.1, () => {
         for (const b of this.blocks) {
@@ -490,10 +455,10 @@ export class Intro {
     if (!launching) {
       const alpha = Math.min(1, this.t / 0.6);
       const ask = touch ? 'TAP TO LAUNCH' : 'PRESS SPACE TO LAUNCH';
-      const size = Math.min(20, (20 * (w - 40)) / textWidth(ask, 20));
+      const size = fitTo(ask, 20, w - 40);
       if (time % 1.1 < 0.75) ink(SAND, alpha, 1.8, () => traceText(ctx, ask, w / 2, eye * 0.42, size, 'center'));
     } else if (this.t > T_SONIC && hand < 0.4) {
-      const size = Math.min(26, (26 * (w - 40)) / textWidth('SUPERSONIC', 26));
+      const size = fitTo('SUPERSONIC', 26, w - 40);
       const flash = this.reduceMotion || Math.floor(time * 9) % 2 === 0;
       ink(flash ? CYAN : YELLOW, 1, 2, () => traceText(ctx, 'SUPERSONIC', w / 2, eye * 0.42, size, 'center'));
     }
@@ -567,7 +532,7 @@ export class Intro {
     const size = big ? 13 : wide ? 11 : 9;
     const textWidthMax = (wide ? Math.min(right - 250, textX + 560) : right) - textX;
     ink(CYAN, 0.8, 1.1, () => traceText(ctx, 'FLIGHT COMMAND', textX, panelTop + 1, big ? 9 : 7), false);
-    const lines = wrap(this.said, size, textWidthMax);
+    const lines = wrapText(this.said, size, textWidthMax);
     let budget = Math.floor(this.saidAge * TYPE_RATE);
     ink(SAND, 1, 1.4, () => {
       lines.forEach((line, i) => {
@@ -616,39 +581,25 @@ export class Intro {
   /** The comms screen, with the commander's head inside it. */
   private renderCommander(f: IntroFrame, x: number, y: number, box: number): void {
     const { ctx, ink, time } = f;
-    const cut = box * 0.16;
-    const frame = (): void => {
-      ctx.moveTo(x + cut, y);
-      ctx.lineTo(x + box - cut, y);
-      ctx.lineTo(x + box, y + cut);
-      ctx.lineTo(x + box, y + box - cut);
-      ctx.lineTo(x + box - cut, y + box);
-      ctx.lineTo(x + cut, y + box);
-      ctx.lineTo(x, y + box - cut);
-      ctx.lineTo(x, y + cut);
-      ctx.closePath();
-    };
     const mood = this.mood;
     // The commander looks about a little, and nods along while talking.
     const yaw = Math.sin(time * 0.7) * 0.22;
     const pitch = 0.04 + (mood === 'talk' && !this.reduceMotion ? Math.sin(time * 7) * 0.035 : 0);
-    const cx = x + box / 2;
-    const cy = y + box * 0.5;
-    const size = box * 0.3;
-    ctx.save();
-    ctx.beginPath();
-    frame();
-    ctx.clip();
-    ink(CYAN, 0.5, 1, () => traceAvatar(ctx, 'commander', 'head', cx, cy, size, yaw, pitch, mood, time), false);
-    ink(mood === 'happy' ? LIME : SAND, 1, 1.5, () => traceAvatar(ctx, 'commander', 'face', cx, cy, size, yaw, pitch, mood, time));
-    // Scan lines drifting down the screen: it is a picture sent over the radio.
-    ink(CYAN, 0.12, 1, () => {
-      for (let sy = y + ((time * 14) % 6); sy < y + box; sy += 6) {
-        ctx.moveTo(x, sy);
-        ctx.lineTo(x + box, sy);
-      }
-    }, false);
-    ctx.restore();
-    ink(CYAN, 0.9, 1.5, frame);
+    renderAvatarFrame({
+      ctx,
+      ink,
+      who: 'commander',
+      x,
+      y,
+      box,
+      yaw,
+      pitch,
+      mood,
+      time,
+      headColor: CYAN,
+      faceColor: mood === 'happy' ? LIME : SAND,
+      frameColor: CYAN,
+      scanlines: true,
+    });
   }
 }

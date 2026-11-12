@@ -24,11 +24,8 @@ import Base from '../layouts/Base.astro';
     display: grid;
     align-content: center;
     padding-bottom: clamp(56px, 10vw, 120px);
-    background:
-      radial-gradient(ellipse 60% 60% at 50% 0%, color-mix(in srgb, var(--plum) 50%, transparent), transparent 70%),
-      linear-gradient(180deg, #050f33, var(--navy));
   }
-  .lede { max-width: 520px; font-size: clamp(1.02rem, 1.6vw, 1.15rem); }
+  .lede { max-width: 520px; }
   .cta { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; margin-top: 18px; }
   @media (max-width: 420px) {
     .cta { flex-direction: column; }

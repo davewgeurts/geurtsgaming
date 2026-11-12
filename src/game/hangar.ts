@@ -9,11 +9,12 @@
  *
  * Everything is a handful of straight lines in 3D, flattened onto the screen the way a camera would see them.
  */
-import { textWidth, traceText } from './font';
+import { BLUE, MINT, NEON, PINK, SAND, box3d, clamp, lerp, smooth, type Ink } from './core';
+import { fitTo, traceText } from './font';
 import { WORDS } from './lines';
 import { makeProblem } from './maths';
 
-export type HangarInk = (color: string, alpha: number, width: number, build: () => void, glow?: boolean) => void;
+export type HangarInk = Ink;
 export type HangarCue = 'bell' | 'step' | 'canopy';
 
 export interface HangarFrame {
@@ -53,22 +54,7 @@ const SEAT_Y = 0.5;
 /** Nothing nearer the camera than this is drawn. */
 const NEAR = 0.6;
 
-const SAND = '#ecdfd2';
-const CYAN = '#42f5ff';
-const LIME = '#9bff4d';
-const YELLOW = '#ffe84a';
-const ORANGE = '#ff9b2f';
-const VIOLET = '#b98cff';
-const BLUE = '#6f8cff';
-const PINK = '#d98ac0';
-const MINT = '#7fe0b0';
-
-const clamp = (v: number, min: number, max: number): number => Math.min(max, Math.max(min, v));
-const smooth = (t: number): number => {
-  const c = clamp(t, 0, 1);
-  return c * c * (3 - 2 * c);
-};
-const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+const { cyan: CYAN, lime: LIME, yellow: YELLOW, orange: ORANGE, violet: VIOLET } = NEON;
 
 /** How a person is standing. Angles are in radians; phases run through a step (or a rung) every 2π. */
 interface Pose {
@@ -199,12 +185,7 @@ export class Hangar {
 
   /** A box standing on (x, y, z) as the middle of its base. */
   private box(x: number, y: number, z: number, wide: number, tall: number, deep: number): void {
-    const x0 = x - wide / 2, x1 = x + wide / 2, z0 = z - deep / 2, z1 = z + deep / 2, y1 = y + tall;
-    for (const [px, pz, qx, qz] of [[x0, z0, x1, z0], [x1, z0, x1, z1], [x1, z1, x0, z1], [x0, z1, x0, z0]] as const) {
-      this.seg(px, y, pz, qx, y, qz);
-      this.seg(px, y1, pz, qx, y1, qz);
-      this.seg(px, y, pz, px, y1, pz);
-    }
+    box3d((ax, ay, az, bx, by, bz) => this.seg(ax, ay, az, bx, by, bz), x, y, z, wide, tall, deep, true);
   }
 
   /** Words on something that faces the camera: `tall` is the height of the letters in metres. */
@@ -638,7 +619,7 @@ export class Hangar {
     // --- words on the screen: where this is, and how to skip it
     const title = smooth((t - 0.5) / 0.6) * (1 - smooth((t - 3.6) / 0.6));
     if (title > 0) {
-      const size = Math.min(16, (16 * (w - 40)) / textWidth('TIME FOR FLIGHT CLASS', 16));
+      const size = fitTo('TIME FOR FLIGHT CLASS', 16, w - 40);
       ink(CYAN, title, 1.6, () => traceText(ctx, 'TIME FOR FLIGHT CLASS', w / 2, h * 0.06, size, 'center'));
     }
     const hint = f.touch ? 'TAP TO SKIP' : 'PRESS SPACE TO SKIP';

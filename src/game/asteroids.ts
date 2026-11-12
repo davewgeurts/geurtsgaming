@@ -9,6 +9,7 @@
  *
  * This file lays the field out and moves it. game.ts draws it, and handles what hits what.
  */
+import { int, rand } from './core';
 import { closed, open, type Pt, type Shape } from './shapes';
 
 export interface FieldEnv {
@@ -59,8 +60,6 @@ export interface Field {
   done: boolean;
 }
 
-const rand = (min: number, max: number) => min + Math.random() * (max - min);
-
 /** Centre of a way through, `d` px back from the front of the field. The hard way mirrors the easy one. */
 function centre(f: Field, d: number, hard: boolean): number {
   const u = Math.max(0, d - f.mouth * 0.6) / f.period;
@@ -106,7 +105,7 @@ function rockShape(r: number): Shape {
   const shape = [closed(...pts)];
   if (r > 14) {
     const hub: Pt = [rand(-0.2, 0.2) * r, rand(-0.2, 0.2) * r];
-    const a = Math.floor(rand(0, n));
+    const a = int(0, n - 1);
     shape.push(open(pts[a]!, hub, pts[(a + Math.floor(n / 3) + 1) % n]!));
     if (r > 24) shape.push(open(hub, pts[(a + Math.floor((2 * n) / 3) + 1) % n]!));
   }

@@ -6,8 +6,10 @@
  * and flattened onto the screen. Turning the head is what makes plain line polygons read as solid.
  * The expression (eyes, brows, mouth) is redrawn from the mood, so a face can smile, frown or laugh.
  *
- * game.ts decides the mood and which way each head is turned; this file only knows how to draw them.
+ * game.ts decides each mood; hud.ts and intro.ts decide which way each head is turned; this file only knows how to draw them.
  */
+import { NEON, SAND, type Ink } from './core';
+
 export type Mood = 'calm' | 'worried' | 'happy' | 'hurt' | 'laugh' | 'talk' | 'out';
 export type Who = 'pilot' | 'boss' | 'commander';
 
@@ -216,4 +218,116 @@ export function traceAvatar(
     });
     if (line.closed) ctx.closePath();
   }
+}
+
+export interface AvatarFrameOpts {
+  ctx: CanvasRenderingContext2D;
+  ink: Ink;
+  who: Who;
+  x: number;
+  y: number;
+  box: number;
+  yaw: number;
+  pitch: number;
+  mood: Mood;
+  time: number;
+  cutRatio?: number;
+  cyRatio?: number;
+  sizeRatio?: number;
+  fade?: number;
+  fillStyle?: string;
+  headColor?: string;
+  headAlpha?: number;
+  headWidth?: number;
+  faceColor?: string;
+  faceWidth?: number;
+  frameColor?: string;
+  frameAlpha?: number;
+  frameWidth?: number;
+  frameGlow?: boolean;
+  scanlines?: boolean;
+  pilotConsole?: boolean;
+}
+
+/**
+ * Draw an octagonal cut-corner avatar/comms box, clipping the wireframe head & face inside it,
+ * with optional radio scanlines or cockpit console.
+ */
+export function renderAvatarFrame(opts: AvatarFrameOpts): void {
+  const {
+    ctx,
+    ink,
+    who,
+    x,
+    y,
+    box,
+    yaw,
+    pitch,
+    mood,
+    time,
+    cutRatio = 0.16,
+    cyRatio = 0.5,
+    sizeRatio = 0.3,
+    fade = 1,
+    fillStyle,
+    headColor = NEON.cyan,
+    headAlpha = 0.5,
+    headWidth = 1,
+    faceColor = SAND,
+    faceWidth = 1.5,
+    frameColor = headColor,
+    frameAlpha = 0.9,
+    frameWidth = 1.5,
+    frameGlow = true,
+    scanlines = false,
+    pilotConsole = false,
+  } = opts;
+
+  const cut = box * cutRatio;
+  const frame = (): void => {
+    ctx.moveTo(x + cut, y);
+    ctx.lineTo(x + box - cut, y);
+    ctx.lineTo(x + box, y + cut);
+    ctx.lineTo(x + box, y + box - cut);
+    ctx.lineTo(x + box - cut, y + box);
+    ctx.lineTo(x + cut, y + box);
+    ctx.lineTo(x, y + box - cut);
+    ctx.lineTo(x, y + cut);
+    ctx.closePath();
+  };
+
+  const cx = x + box / 2;
+  const cy = y + box * cyRatio;
+  const size = box * sizeRatio;
+
+  ctx.save();
+  ctx.beginPath();
+  frame();
+  if (fillStyle) {
+    ctx.fillStyle = fillStyle;
+    ctx.fill();
+  }
+  ctx.clip();
+  ink(headColor, headAlpha * fade, headWidth, () => traceAvatar(ctx, who, 'head', cx, cy, size, yaw, pitch, mood, time), false);
+  ink(faceColor, fade, faceWidth, () => traceAvatar(ctx, who, 'face', cx, cy, size, yaw, pitch, mood, time));
+  if (scanlines) {
+    ink(NEON.cyan, 0.12 * fade, 1, () => {
+      for (let sy = y + ((time * 14) % 6); sy < y + box; sy += 6) {
+        ctx.moveTo(x, sy);
+        ctx.lineTo(x + box, sy);
+      }
+    }, false);
+  }
+  if (pilotConsole) {
+    ink(SAND, 0.6 * fade, 1, () => {
+      ctx.moveTo(x, y + box * 0.86);
+      ctx.lineTo(x + box, y + box * 0.86);
+      for (let i = 1; i < 4; i++) {
+        ctx.moveTo(x + (box * i) / 4, y + box * 0.86);
+        ctx.lineTo(x + (box * i) / 4, y + box * 0.93);
+      }
+    }, false);
+  }
+  ctx.restore();
+  ink(frameColor, frameAlpha * fade, frameWidth, frame, frameGlow);
 }

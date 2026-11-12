@@ -2,6 +2,8 @@
  * Simple maths problems for the arcade demo. `level` rises with the wave:
  * 1 is sums within 20, 2 adds bigger sums and the small times tables, 3 adds the full tables and division.
  */
+import { int, shuffle } from './core';
+
 export interface Problem {
   /** What is asked, e.g. "7 + 5". The game draws it as "7 + 5 = ?". */
   question: string;
@@ -11,16 +13,6 @@ export interface Problem {
 }
 
 type Op = '+' | '-' | '×' | '÷';
-
-const int = (min: number, max: number) => min + Math.floor(Math.random() * (max - min + 1));
-
-function shuffle<T>(items: T[]): T[] {
-  for (let i = items.length - 1; i > 0; i--) {
-    const j = int(0, i);
-    [items[i], items[j]] = [items[j]!, items[i]!];
-  }
-  return items;
-}
 
 /** Two numbers and the result. Subtraction never goes below zero and division always comes out whole. */
 function operands(op: Op, level: number): [number, number, number] {

@@ -37,11 +37,9 @@ const email = 'hello@geurtsgaming.com';
 
 <style>
   .page-hero {
-    background:
-      radial-gradient(ellipse 60% 60% at 50% 0%, color-mix(in srgb, var(--magenta) 40%, transparent), transparent 70%),
-      linear-gradient(180deg, #050f33, var(--navy));
+    --hero-glow: color-mix(in srgb, var(--magenta) 40%, transparent);
   }
-  .lede { max-width: 560px; font-size: clamp(1.02rem, 1.6vw, 1.15rem); }
+  .lede { max-width: 560px; }
   .cards {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
