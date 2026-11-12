@@ -1,6 +1,7 @@
 ---
 import Logo from './Logo.astro';
 import { games } from '../data/games';
+import { trustPages } from '../data/trust';
 const year = new Date().getFullYear();
 ---
 
@@ -27,6 +28,12 @@ const year = new Date().getFullYear();
         <li><a href="https://github.com/davewgeurts" target="_blank" rel="noopener">GitHub</a></li>
       </ul>
     </div>
+    <div class="col">
+      <h2>Trust</h2>
+      <ul>
+        {trustPages.map((p) => <li><a href={p.href}>{p.label}</a></li>)}
+      </ul>
+    </div>
   </div>
   <div class="wrap legal muted">
     <span>© <span data-year>{year}</span> GeurtsGaming. All rights reserved.</span>
@@ -47,7 +54,7 @@ const year = new Date().getFullYear();
   }
   .grid {
     display: grid;
-    grid-template-columns: 1.6fr 1fr 1fr;
+    grid-template-columns: 1.6fr 1fr 1fr 1fr;
     gap: 32px;
   }
   .lockup { display: inline-flex; align-items: center; gap: 14px; margin-bottom: 12px; }

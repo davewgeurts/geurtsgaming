@@ -10,20 +10,21 @@ import { Voice, castVoices, spoken, type SpeechEngine, type UtteranceLike, type 
 const voice = (name: string, lang = 'en-GB', localService = true, isDefault = false): VoiceLike => ({ name, lang, localService, default: isDefault });
 const MAC = [voice('Daniel', 'en-GB', true, true), voice('Samantha', 'en-US'), voice('Karen', 'en-AU'), voice('Fred', 'en-US'), voice('Zarvox', 'en-US'), voice('Thomas', 'fr-FR'), voice('Google UK English Female', 'en-GB', false)];
 
-interface Rig { v: Voice; said: UtteranceLike[]; cancels: number; clock: { t: number }; engine: SpeechEngine }
+interface Rig { v: Voice; said: UtteranceLike[]; cancels: number; clock: { t: number }; engine: SpeechEngine; mute: boolean }
 
 function rig(voices: VoiceLike[] = MAC, language = 'en-GB'): Rig {
   const said: UtteranceLike[] = [];
   const clock = { t: 0 };
-  const r = { said, cancels: 0, clock } as Rig;
+  const r = { said, cancels: 0, clock, mute: false } as Rig;
   r.engine = {
     speaking: false,
     pending: false,
     getVoices: () => voices,
-    speak: (u) => { said.push(u); r.engine.speaking = true; },
+    // (Like a browser that is willing to speak, it reports the start of each line. `mute` makes it one that is not.)
+    speak: (u) => { said.push(u); r.engine.speaking = true; if (!r.mute) u.onstart?.(); },
     cancel: () => { r.cancels++; r.engine.speaking = false; },
   };
-  const make = (text: string): UtteranceLike => ({ text, lang: '', voice: null, pitch: 1, rate: 1, volume: 1, onend: null, onerror: null });
+  const make = (text: string): UtteranceLike => ({ text, lang: '', voice: null, pitch: 1, rate: 1, volume: 1, onstart: null, onend: null, onerror: null });
   r.v = new Voice(r.engine, make, () => clock.t, language);
   return r;
 }
@@ -160,7 +161,45 @@ test('the first key press or tap says nothing, silently, so that a phone will le
   const r = rig();
   r.v.unlock();
   r.v.unlock();
-  assert.equal(r.said.length, 1);
+  assert.equal(r.said.length, 1, 'once the browser has spoken there is nothing more to unlock');
   assert.equal(r.said[0]!.volume, 0);
   assert.ok(!r.v.busy);
+});
+
+test('a browser that will not speak until a key press or tap is asked again at each one, and a waiting line is said then', () => {
+  const r = rig();
+  r.mute = true;
+  // Before any key press: the browser swallows this without a sound.
+  r.v.unlock();
+  assert.ok(r.v.say('commander', 'COMMAND TO PILOT. WELCOME ABOARD!'));
+  assert.equal(r.said.length, 2);
+  // The pilot presses a key: now it is allowed, and the line that was waiting is said again from the top.
+  r.mute = false;
+  r.v.unlock();
+  assert.equal(r.said.length, 3);
+  assert.equal(r.said[2]!.text, 'command to pilot. welcome aboard!');
+  assert.equal(r.said[2]!.volume > 0, true);
+  assert.ok(r.v.busy);
+  // And that is the end of it: later key presses do not restart lines.
+  r.v.unlock();
+  r.v.unlock();
+  assert.equal(r.said.length, 3);
+
+  // With nothing waiting, each key press tries the silent line until one is heard to start.
+  const quiet = rig();
+  quiet.mute = true;
+  quiet.v.unlock();
+  quiet.v.unlock();
+  assert.deepEqual(quiet.said.map((u) => u.volume), [0, 0]);
+  quiet.mute = false;
+  quiet.v.unlock();
+  quiet.v.unlock();
+  assert.equal(quiet.said.length, 3);
+
+  // A browser that never says a line has started is not asked for ever (or every key would restart the boss).
+  const deaf = rig();
+  deaf.mute = true;
+  deaf.v.say('boss', 'TICK TOCK!');
+  for (let i = 0; i < 20; i++) deaf.v.unlock();
+  assert.ok(deaf.said.length <= 5, `${deaf.said.length} attempts`);
 });

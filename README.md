@@ -27,7 +27,8 @@ docker compose up --build
 
 ## Where things live
 
-- `src/pages/` — one `.astro` file per route (`/`, `/games/`, `/about/`, `/contact/`)
+- `src/pages/` — one `.astro` file per route (`/`, `/games/`, `/about/`, `/contact/`, and the trust pages `/privacy/`, `/security/`, `/ai/`)
+- `src/data/trust.ts` — the facts the three trust pages are written from (the SOC 2 details go here, and the site says nothing about SOC 2 until they are filled in); `src/components/TrustPage.astro` is the frame they share. What `/privacy/` says about analytics has to match the Google tag's settings in `src/layouts/Base.astro`
 - `src/layouts/Base.astro` — HTML shell, meta/OG tags, fonts, nav + footer
 - `src/components/` — `Logo` (GG monogram), `Nav`, `Footer`, `GameCard`, `Starfield`, `HeroGame` (the "Play the demo" launcher and the full-screen overlay the game plays in)
 - `src/game/` — the hero arcade game. Nearly all of it is downloaded only when someone presses "Play the demo"; the home page itself loads `core.ts`, `shapes.ts`, `font.ts` and `multiplayer.ts` (for the pilot badge under the button):

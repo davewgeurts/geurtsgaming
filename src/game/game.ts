@@ -44,7 +44,7 @@ import { Intro, type IntroCue, type IntroView } from './intro';
 import { TAUNTS, type Taunt } from './lines';
 import { makeProblem } from './maths';
 import { MultiplayerClient, renderWingmen } from './multiplayer';
-import { Questions, STAKES, sumLevel, type QuestionEnv, type Reward } from './questions';
+import { GRADE_BANDS, Questions, STAKES, sumLevel, type GradeBand, type QuestionEnv, type Reward } from './questions';
 import { SetPieces, type SetPieceEnv } from './setpieces';
 import { CAPSULE, FRIEND, MINE, SHIP, trace, type Shape } from './shapes';
 import { Sound, type Sfx } from './sound';
@@ -67,6 +67,12 @@ const ENERGY_SECONDS = 18;
 const SLOW_MOTION = 0.06;
 
 type State = 'ready' | 'playing' | 'over';
+
+/**
+ * The school years the player picked, so they are asked once a visit and not before every game. It lives
+ * here in memory and nowhere else: it is not written to storage and is not sent to any server.
+ */
+let pickedGrade: GradeBand | null = null;
 
 interface Star { x: number; y: number; speed: number; streak: boolean; tier: number }
 /** A boost capsule drifting down the screen. Flying into it asks a question. */
@@ -176,6 +182,10 @@ export class Game {
   private bossFreed = 0;
   /** The fuel ship, the commander's warning and the asteroid field (see setpieces.ts). */
   private readonly sets = new SetPieces();
+  /** The player's school years (see GradeBand), or null until they have said. While `picking`, the game is asking. */
+  private grade: GradeBand | null = pickedGrade;
+  private picking = false;
+  private pickAge = 0;
   /** The fireworks that say how a challenge went. */
   private readonly fireworks = new Fireworks();
   private readonly backdrop = new Backdrop();
@@ -219,8 +229,8 @@ export class Game {
         this.voice.unlock();
       },
       exit: () => this.opts.onExit(),
-      wants: (key) => !this.paused && this.questions.wants(key),
-      type: (key) => this.questions.type(key, this.quizEnv()),
+      wants: (key) => !this.paused && (this.picking ? key >= '1' && key <= String(GRADE_BANDS.length) : this.questions.wants(key)),
+      type: (key) => (this.picking ? this.chooseGrade(Number(key) - 1) : this.questions.type(key, this.quizEnv())),
       command: (code) => this.command(code),
       pick: (x, y) => this.pick(x, y),
       touched: () => this.questions.byTouch(this.quizEnv()),
@@ -297,10 +307,9 @@ export class Game {
     if (!this.showLeaderboard && this.state === 'playing' && !this.paused) {
       this.setPaused(true);
     }
-    if (this.state === 'ready' && !this.paused) {
-      return false;
-    }
     this.showLeaderboard = !this.showLeaderboard;
+    // In the opening there is nothing to pause: the hangar and the briefing simply wait while the board is up.
+    if (this.showLeaderboard && this.state === 'ready') this.voice.hush();
     this.opts.onLeaderboard?.(this.showLeaderboard);
     this.opts.onStatus?.(this.showLeaderboard ? 'Top 10 Pilots leaderboard open.' : 'Leaderboard closed.');
     return this.showLeaderboard;
@@ -464,7 +473,7 @@ export class Game {
   /** One of the game's keys has gone down (see input.ts). True if it was a command, and so not a control to hold. */
   private command(code: string): boolean {
     const confirm = code === 'Space' || code === 'Enter';
-    if (code === 'KeyL' && (this.paused || this.state === 'over')) {
+    if (code === 'KeyL' && (this.paused || this.state !== 'playing')) {
       this.sound.play('key');
       this.toggleLeaderboard();
       return true;
@@ -483,22 +492,21 @@ export class Game {
       this.setPaused(true);
       return true;
     }
-    if (this.state === 'ready') {
+    if (confirm && this.showLeaderboard) this.closeLeaderboard();
+    else if (this.state === 'ready') {
       if (confirm) this.go();
-    } else if (this.state === 'over' && this.stateTime > 0.9 && confirm) {
-      if (this.showLeaderboard) {
-        this.showLeaderboard = false;
-        this.opts.onLeaderboard?.(false);
-      } else {
-        this.begin();
-      }
-    }
+    } else if (this.state === 'over' && this.stateTime > 0.9 && confirm) this.begin();
     return false;
   }
 
   /** A click or tap at (x, y): on an upgrade on offer, an answer to a sum, or one of a sum boss's little ships. */
   private pick(x: number, y: number): boolean {
     if (this.paused) return false;
+    if (this.picking) {
+      const band = boxAt(x, y, offerBoxes(this.w, this.h, this.room, challengeTopY(this.h, this.inset.top, this.homeY, true), GRADE_BANDS.length));
+      if (band !== null) this.chooseGrade(band);
+      return band !== null;
+    }
     const { brk, prompt, challenge } = this.questions;
     const top = challengeTopY(this.h, this.inset.top, this.homeY, Boolean(brk));
     const offer = prompt?.offer;
@@ -520,8 +528,17 @@ export class Game {
   /** A click or tap that picked nothing: resume, launch, or try again. */
   private press(): void {
     if (this.paused) this.setPaused(false);
+    // With the leaderboard up, a click or tap puts it away; it does not launch or start a new game underneath it.
+    else if (this.showLeaderboard) this.closeLeaderboard();
     else if (this.state === 'ready') this.go();
     else if (this.state === 'over' && this.stateTime > 0.9) this.begin();
+  }
+
+  private closeLeaderboard(): void {
+    if (!this.showLeaderboard) return;
+    this.showLeaderboard = false;
+    this.opts.onLeaderboard?.(false);
+    this.opts.onStatus?.('Leaderboard closed.');
   }
 
   private onVisibility = (): void => {
@@ -605,7 +622,36 @@ export class Game {
     this.opts.onLeaderboard?.(false);
     this.setState('playing');
     this.sound.play('start');
+    this.picking = false;
+    if (this.grade === null) this.askGrade();
+    else this.questions.startBreak(1, this.quizEnv());
+  }
+
+  /** Before the first challenge of a visit: ask which school years the player is in, so the questions fit. */
+  private askGrade(): void {
+    this.picking = true;
+    this.pickAge = 0;
+    this.input.letGo();
+    this.voice.say('commander', 'WHAT GRADE ARE YOU IN, PILOT?');
+    const how = this.input.mode === 'touch' ? 'Tap' : 'Press';
+    this.opts.onStatus?.(
+      `What grade are you in? ${GRADE_BANDS.map((band, i) => `${how}${this.input.mode === 'touch' ? '' : ` ${i + 1} for`} ${band.spoken}`).join('. ')}. ` +
+      'This only sets how hard the questions are. It is not saved or sent anywhere.',
+    );
+  }
+
+  private chooseGrade(index: number): void {
+    // (A moment's grace, so a key or finger still down from the take-off picks nothing.)
+    if (!this.picking || this.pickAge < 0.4 || !GRADE_BANDS[index]) return;
+    this.grade = pickedGrade = index as GradeBand;
+    this.picking = false;
+    this.sound.play('power');
     this.questions.startBreak(1, this.quizEnv());
+  }
+
+  /** The ship is parked and nothing is flying: a break is on, or the player is being asked their grade. */
+  private get parked(): boolean {
+    return this.picking || this.questions.brk !== null;
   }
 
   private startWave(n: number): void {
@@ -661,7 +707,7 @@ export class Game {
       this.burst(shape, x, y, scale, rot, color);
       this.sound.play('boom');
     },
-    problem: () => makeProblem(sumLevel(this.wave)),
+    problem: () => makeProblem(sumLevel(this.wave, this.grade ?? 1)),
   };
 
   private bossEnv(): BossEnv {
@@ -729,7 +775,7 @@ export class Game {
 
   /** What the questions know of the game: made once, and brought up to date each time it is asked for. */
   private readonly quizzing: QuestionEnv = {
-    touch: false, wave: 1, hull: 0, maxHull: 0, energy: 0, boss: false, owned: new Set(),
+    touch: false, wave: 1, grade: 1, hull: 0, maxHull: 0, energy: 0, boss: false, owned: new Set(),
     play: (sound) => this.sound.play(sound),
     say: (message) => this.opts.onStatus?.(message),
     call: (text) => void this.voice.say('pilot', `${text}!`),
@@ -780,6 +826,7 @@ export class Game {
     const env = this.quizzing;
     env.touch = this.input.mode === 'touch';
     env.wave = this.wave;
+    env.grade = this.grade ?? 1;
     env.hull = this.hull;
     env.maxHull = this.maxHull;
     env.energy = this.energy;
@@ -1004,7 +1051,7 @@ export class Game {
     const sim = dt * this.timeScale;
     this.banner = Math.max(0, this.banner - sim);
 
-    if (this.intro) {
+    if (this.intro && !this.showLeaderboard) {
       this.intro.update(dt, this.input.mode === 'touch');
       if (this.intro.done) {
         this.intro = null;
@@ -1017,7 +1064,7 @@ export class Game {
       this.flyStars(view, dt);
       this.backdrop.update(dt, 3.2 * view.settle);
     } else {
-      const flying = this.state === 'playing' && !this.questions.brk;
+      const flying = this.state === 'playing' && !this.parked;
       const targetWarp = flying ? 3.2 : this.state === 'over' ? 0.6 : 1;
       this.warp += (targetWarp - this.warp) * (1 - Math.exp(-dt * 1.8));
       for (const star of this.stars) {
@@ -1049,7 +1096,9 @@ export class Game {
     this.lastShipX = this.ship.x;
     this.lean += (clamp(drift / 380, -1, 1) - this.lean) * (1 - Math.exp(-dt * 8));
     if (this.state === 'playing') {
-      if (this.questions.brk) {
+      if (this.picking) {
+        this.pickAge += dt;
+      } else if (this.questions.brk) {
         this.questions.updateBreak(dt, this.quizEnv());
       } else {
         if (this.intermission > 0) {
@@ -1085,7 +1134,7 @@ export class Game {
     this.updateShots(sim);
     if (this.state === 'playing') this.collide();
     this.mp.updateFlight(sim, {
-      active: this.state === 'playing' && !this.questions.brk && !this.intro,
+      active: this.state === 'playing' && !this.parked && !this.intro,
       w: this.w,
       h: this.h,
       scale: this.scale,
@@ -1121,7 +1170,7 @@ export class Game {
       ship.y = this.homeY + (1 - risen) * (this.h - this.homeY + 80);
       return;
     }
-    if (this.questions.brk) {
+    if (this.parked) {
       ship.x += (this.homeX - ship.x) * k;
       ship.y += (this.homeY - ship.y) * k;
       return;
@@ -1523,6 +1572,7 @@ export class Game {
       totalLiberated: squad.totalLiberated,
       topPilots: squad.topPilots,
       showLeaderboard: this.showLeaderboard,
+      grading: this.picking ? this.pickAge : null,
     };
   }
 
@@ -1692,7 +1742,7 @@ export class Game {
       ctx.fillRect(-20, -20, w + 40, h + 40);
     }
 
-    if (this.state === 'playing' && !brk && !view) {
+    if (this.state === 'playing' && !this.parked && !view) {
       renderWingmen(ctx, this.ink, this.mp.wingmen, this.mp.lasers, sc, this.shipScale, this.time);
     }
 

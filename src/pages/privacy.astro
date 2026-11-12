@@ -1,0 +1,117 @@
+---
+import TrustPage from '../components/TrustPage.astro';
+import { trust } from '../data/trust';
+---
+
+<TrustPage
+  title="Privacy"
+  description="What geurtsgaming.com and its arcade demo collect, what they do not, and how we keep children's information private."
+  heading="Privacy"
+  lede="You can play here without telling us who you are. This page says exactly what the site and its arcade demo do with information, in plain words."
+>
+  <div class="summary">
+    <h2>The short version</h2>
+    <ul>
+      <li><strong>No accounts.</strong> We never ask for a name, an email address, a birthday or a photo.</li>
+      <li><strong>The grade question stays in the game.</strong> The demo asks what grade you are in so the questions fit. The answer is used for that visit only. It is not saved and it is not sent anywhere.</li>
+      <li><strong>No ads, and nothing sold.</strong> We do not show advertising here, and we do not sell or share information about the people who play.</li>
+      <li><strong>Visits are counted.</strong> We use Google Analytics to see how many people visit, with its advertising features switched off.</li>
+    </ul>
+  </div>
+
+  <h2>Who this page covers</h2>
+  <p>
+    This page is about geurtsgaming.com and the arcade demo that plays on its home page. Our other games,
+    Cool Typing Games and Earl vs. The Mutants, run on their own sites and stores and have their own terms.
+  </p>
+
+  <h2>What we do not collect</h2>
+  <p>
+    There is nowhere on this site to type your name, email address, age, school or address, and no way to upload
+    a photo, a recording or a message to other players. The demo has no chat. We do not use the camera, the
+    microphone or your location.
+  </p>
+
+  <h2>The arcade demo</h2>
+
+  <h3>Your grade</h3>
+  <p>
+    Before the first challenge the demo asks which grades you are in (kindergarten to 2, 3 to 5, or 6 and up).
+    That choice sets how hard the sums and typing lines are and how long you get. It is held in the game while
+    the page is open and is gone when you close it. It is never written to your device and never leaves it.
+  </p>
+
+  <h3>What the demo keeps on your device</h3>
+  <p>So that the game remembers you next time, your browser stores four things on your own device:</p>
+  <ul>
+    <li>whether sound is on or off;</li>
+    <li>your best score;</li>
+    <li>a made-up pilot callsign the game picks for you, such as NOVA-7;</li>
+    <li>the Top 10 scores this browser has seen.</li>
+  </ul>
+  <p>Clearing this site's data in your browser removes all of them.</p>
+
+  <h3>What the demo sends to our game server</h3>
+  <p>While the page is open, the game tells our game server that a pilot is there, so it can show how many pilots are online and draw other pilots' ships. It sends:</p>
+  <ul>
+    <li>a random pilot number, made new for each browser tab;</li>
+    <li>the made-up callsign;</li>
+    <li>while you are flying a wave: which wave it is, your score, how many people you have freed and where your ship is on the screen.</li>
+  </ul>
+  <p>
+    Other players can see the callsign and the ship. None of it says who you are, and the server forgets a pilot
+    about two minutes after they leave. A finished game's score, wave and callsign may also be sent for the Top 10 board.
+  </p>
+
+  <h3>Voices</h3>
+  <p>
+    The commander, the boss and the pilot speak using the voices built in to your own device. The words are
+    turned into speech on the device. Nothing is sent to us or to anyone else to do it.
+  </p>
+
+  <h2>Counting visits</h2>
+  <p>
+    We use Google Analytics to understand how the site is used: how many people visit a page, roughly where in
+    the world they are (worked out from the internet address, which Google says Analytics does not store), and
+    what kind of device and browser they use. We have set it up so that:
+  </p>
+  <ul>
+    <li>its advertising features and Google signals are off;</li>
+    <li>nothing it collects is used to personalise advertising;</li>
+    <li>the only cookies it sets belong to this site, and they are deleted when you close your browser.</li>
+  </ul>
+  <p>We use these numbers to improve the site. We do not use them to build a profile of anyone.</p>
+
+  <h2>The companies that help us run the site</h2>
+  <p>
+    GitHub hosts the pages and Amazon Web Services runs the game server. Like any website, both receive your
+    internet address in order to send you the page. We do not record it or connect it to anything else.
+  </p>
+
+  <h2>Children's privacy</h2>
+  <p>
+    Our games are made for children, so we built this site to follow the Children's Online Privacy Protection
+    Act (COPPA): it does not ask children for personal information, and it does not need any to work.
+  </p>
+  <p>
+    If you are a parent or guardian and you have a question, or you believe a child has given us personal
+    information, write to <a href={`mailto:${trust.email}`}>{trust.email}</a>. We will tell you what we have, if
+    anything, and delete it if you ask.
+  </p>
+
+  <h2>Your choices</h2>
+  <ul>
+    <li>Clear this site's data in your browser to remove the callsign and scores it has saved.</li>
+    <li>Block cookies for this site if you would rather not be counted. Everything still works.</li>
+    <li>Use the Sound button in the demo to turn off the sound effects and the voices.</li>
+  </ul>
+
+  <h2>Links to other places</h2>
+  <p>
+    This site links to our games and to stores such as Steam. Those sites have their own privacy policies, and
+    this page does not cover them.
+  </p>
+
+  <h2>Changes</h2>
+  <p>If what the site does changes, this page changes first, and the date below changes with it.</p>
+</TrustPage>

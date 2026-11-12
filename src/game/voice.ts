@@ -46,6 +46,7 @@ export interface UtteranceLike {
   pitch: number;
   rate: number;
   volume: number;
+  onstart: (() => void) | null;
   onend: (() => void) | null;
   onerror: (() => void) | null;
 }
@@ -101,9 +102,12 @@ export function castVoices(voices: readonly VoiceLike[], language = 'en-GB'): Re
 export class Voice {
   private on = true;
   private cast: Record<Speaker, VoiceLike | null> | null | undefined;
-  /** The line being spoken, who is speaking it, and when to stop waiting for it to finish. */
-  private current: { utterance: UtteranceLike; rank: number; until: number } | null = null;
-  private primed = false;
+  /** The line being spoken, who is speaking it, whether the browser has begun it, and when to stop waiting for it to finish. */
+  private current: { utterance: UtteranceLike; who: Speaker; line: string; rank: number; until: number; started: boolean } | null = null;
+  /** The browser has spoken for this page at least once, which is the proof that it will. */
+  private heard = false;
+  /** How many times `unlock` has tried, so a browser that never reports a line starting is not asked for ever. */
+  private tries = 0;
   private readonly engine: SpeechEngine | null;
   private readonly make: (text: string) => UtteranceLike;
   private readonly now: () => number;
@@ -143,16 +147,30 @@ export class Voice {
   }
 
   /**
-   * Some browsers (Safari on a phone above all) only let a page speak once it has spoken during a key press
-   * or a tap. The game calls this from each of those; the first time, it says nothing, silently.
+   * Some browsers (Safari, and every browser on an iPhone) only let a page speak once it has started speaking
+   * from inside a key press or a tap. The game calls this from each of those until the browser has spoken:
+   * a line that was asked for too early and never began is said again, now that it can be, and otherwise
+   * it says nothing, silently, which is enough to be allowed to speak later.
    */
   unlock(): void {
-    if (this.primed || !this.on || !this.engine) return;
-    this.primed = true;
+    const engine = this.engine;
+    if (this.heard || !this.on || !engine || this.tries >= 4) return;
+    this.tries += 1;
     try {
+      const waiting = this.current;
+      if (waiting && !waiting.started && this.now() < waiting.until) {
+        engine.cancel();
+        this.current = null;
+        this.say(waiting.who, waiting.line);
+        return;
+      }
+      if (waiting) return;
       const silent = this.make(' ');
       silent.volume = 0;
-      this.engine.speak(silent);
+      silent.onstart = () => {
+        this.heard = true;
+      };
+      engine.speak(silent);
     } catch {
       /* a browser that refuses is a browser that stays silent */
     }
@@ -174,6 +192,7 @@ export class Voice {
   say(who: Speaker, text: string): boolean {
     const engine = this.engine;
     if (!this.on || !engine) return false;
+    // (A line being said again by `unlock` is already in its spoken form; doing it twice changes nothing.)
     const line = spoken(text);
     if (!line) return false;
     const part = CAST[who];
@@ -199,9 +218,13 @@ export class Voice {
       const done = (): void => {
         if (this.current?.utterance === utterance) this.current = null;
       };
+      utterance.onstart = () => {
+        this.heard = true;
+        if (this.current?.utterance === utterance) this.current.started = true;
+      };
       utterance.onend = done;
       utterance.onerror = done;
-      this.current = { utterance, rank: part.rank, until: this.now() + longest(line, part.rate) };
+      this.current = { utterance, who, line, rank: part.rank, until: this.now() + longest(line, part.rate), started: false };
       engine.speak(utterance);
       return true;
     } catch {

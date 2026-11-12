@@ -1,0 +1,59 @@
+---
+import TrustPage from '../components/TrustPage.astro';
+---
+
+<TrustPage
+  title="How we use AI"
+  description="Which AI tools GeurtsGaming uses, what we use them for, and what they never do."
+  heading="How we use AI"
+  lede="We use AI tools to help us make things. This page says which ones, what for, and where a person stays in charge."
+>
+  <div class="summary">
+    <h2>The short version</h2>
+    <ul>
+      <li><strong>AI helps us build.</strong> We use it to help write code, make some artwork and draft some of the words on this site.</li>
+      <li><strong>People decide.</strong> A person reads, tests and approves what goes live.</li>
+      <li><strong>No AI in the arcade demo.</strong> The demo on this site does not use AI while you play.</li>
+      <li><strong>One of our games does.</strong> In Cool Typing Games, the computer players' chat is written by AI.</li>
+    </ul>
+  </div>
+
+  <h2>What we use AI for</h2>
+
+  <h3>Writing code</h3>
+  <p>
+    We write and test code with the help of AI coding assistants: Claude, made by Anthropic, and Antigravity,
+    made by Google. They suggest and write code and run tests. We review what they produce and decide what ships.
+  </p>
+
+  <h3>Artwork and logos</h3>
+  <p>Some of our artwork and logos are made with the help of AI tools. A person chooses them and finishes them.</p>
+
+  <h3>The words on this site</h3>
+  <p>Some of the text on this site, including these pages, was drafted with AI and then checked and edited by us.</p>
+
+  <h2>AI inside our games</h2>
+
+  <h3>The arcade demo on this site</h3>
+  <p>The demo does not use AI while you play:</p>
+  <ul>
+    <li>The sums and typing lines are made by ordinary code following fixed rules.</li>
+    <li>The voices are the ones built in to your own device. Nothing is sent to an AI service to make them.</li>
+    <li>The wingman that flies beside you when nobody else is online is a simple scripted ship.</li>
+  </ul>
+
+  <h3>Cool Typing Games</h3>
+  <p>
+    Cool Typing Games has computer-controlled players, and they can chat. Their messages are written by an AI
+    model from OpenAI. So that a computer player can answer sensibly, the game sends the model the recent chat
+    from that match, which includes players' usernames and what they typed. The model is told to stay in
+    character and not to use offensive language.
+  </p>
+
+  <h2>What AI does not do here</h2>
+  <ul>
+    <li>It does not decide anything about a child: not their score, their grade or what they are allowed to do.</li>
+    <li>It does not talk to anyone in the arcade demo on this site.</li>
+    <li>It is not given personal information by this site, because this site does not collect any. See the <a href="/privacy/">privacy page</a>.</li>
+  </ul>
+</TrustPage>

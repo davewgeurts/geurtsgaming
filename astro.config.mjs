@@ -12,7 +12,8 @@ export default defineConfig({
       allowedHosts: ['geurtsgaming.localdev', 'localhost'],
     },
   },
-  // Fonts are downloaded at build time and served from this site, so pages make no third-party requests.
+  // Fonts are downloaded at build time and served from this site. (The pages' one outside request is the
+  // Google tag in src/layouts/Base.astro; /privacy/ describes how it is set up.)
   fonts: [
     {
       provider: fontProviders.fontsource(),

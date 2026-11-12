@@ -110,9 +110,45 @@ export interface Prompt {
   offerAge: number;
 }
 
-/** How hard the sums are: 1 for the first two waves, 2 for the next two, 3 from wave five. */
-export function sumLevel(wave: number): number {
-  return Math.min(3, 1 + Math.floor((Math.max(1, wave) - 1) / 2));
+/**
+ * Which school years the player says they are in: 0 for kindergarten to grade 2, 1 for grades 3 to 5,
+ * 2 for grade 6 and up. It sets how hard the questions are and how long there is to answer them, and
+ * nothing else: it is kept only while the page is open, and is never saved or sent anywhere.
+ */
+export type GradeBand = 0 | 1 | 2;
+
+export const GRADE_BANDS: readonly { label: string; ages: string; spoken: string }[] = [
+  { label: 'GRADES K-2', ages: 'AGES 5-7', spoken: 'kindergarten to grade 2' },
+  { label: 'GRADES 3-5', ages: 'AGES 8-10', spoken: 'grades 3 to 5' },
+  { label: 'GRADE 6 AND UP', ages: 'AGES 11+', spoken: 'grade 6 and up' },
+];
+
+/** How much longer than the usual clock the youngest players get. */
+const CLOCK: readonly number[] = [1.6, 1, 1];
+
+/** The seconds allowed for a question that would usually get `seconds`. */
+export function clockFor(seconds: number, grade: GradeBand): number {
+  return seconds * CLOCK[grade]!;
+}
+
+/**
+ * How hard the sums are, 1 to 3 (see maths.ts). For grades 3 to 5 it rises with the waves: 1 for the first
+ * two, 2 for the next two, 3 from wave five. The youngest stay on sums within 20 throughout. The oldest
+ * start a level up: times tables from the first wave, the full tables and division from the third.
+ */
+export function sumLevel(wave: number, grade: GradeBand = 1): number {
+  const byWave = Math.min(3, 1 + Math.floor((Math.max(1, wave) - 1) / 2));
+  return grade === 0 ? 1 : grade === 2 ? Math.min(3, byWave + 1) : byWave;
+}
+
+/**
+ * Which group of lines to type from (see LINES in lines.ts: short, medium, long). Lines get longer every two
+ * waves; the youngest keep the short ones for three waves and never get the longest, the oldest start on medium.
+ */
+export function lineTier(wave: number, grade: GradeBand = 1): number {
+  const w = Math.max(1, wave) - 1;
+  const tier = grade === 0 ? Math.min(1, Math.floor(w / 3)) : Math.floor(w / 2) + (grade === 2 ? 1 : 0);
+  return Math.min(LINES.length - 1, tier);
 }
 
 /** What the questions know of the game, and what they can ask of it. */
@@ -120,8 +156,9 @@ export interface QuestionEnv {
   // Brought up to date by the game each time it is asked for:
   /** Answers are tapped, not typed. */
   touch: boolean;
-  /** The wave being flown, which sets how hard the sums are. */
+  /** The wave being flown and the player's school years, which together set how hard the questions are. */
   wave: number;
+  grade: GradeBand;
   hull: number;
   maxHull: number;
   /** The energy gauge, 0 to 1. */
@@ -219,14 +256,14 @@ export class Questions {
     if (this.brk && !this.brk.result && this.brk.challenge.kind === 'line') {
       this.startBreak(this.brk.wave, env);
     } else if (this.prompt && !this.prompt.challenge.outcome && this.prompt.challenge.kind !== 'choice') {
-      this.prompt.challenge = this.sum(env.wave, PROMPT_SECONDS, PROMPT_GRACE);
+      this.prompt.challenge = this.sum(env.wave, PROMPT_SECONDS, PROMPT_GRACE, env);
       this.announce(this.prompt.challenge, '', env);
     }
   }
 
   /** A sum with answers to pick from. */
-  private sum(wave: number, seconds: number, grace: number): ChoiceChallenge {
-    return choiceChallenge(makeProblem(sumLevel(wave)), seconds, grace);
+  private sum(wave: number, seconds: number, grace: number, env: QuestionEnv): ChoiceChallenge {
+    return choiceChallenge(makeProblem(sumLevel(wave, env.grade)), clockFor(seconds, env.grade), grace);
   }
 
   /** A piece of text to type, never the same one twice running. */
@@ -266,10 +303,10 @@ export class Questions {
     if (typing) {
       // Lines get longer every two waves. The time allowed is generous enough for a beginner
       // (about 15 words a minute); a fast typist simply finishes early.
-      const text = this.text(LINES[Math.min(LINES.length - 1, Math.floor((wave - 1) / 2))]!);
-      challenge = lineChallenge(text, 5 + text.length * 0.6, BREAK_GRACE);
+      const text = this.text(LINES[lineTier(wave, env.grade)]!);
+      challenge = lineChallenge(text, clockFor(5 + text.length * 0.6, env.grade), BREAK_GRACE);
     } else {
-      challenge = this.sum(wave, ROUND_SECONDS, BREAK_GRACE);
+      challenge = this.sum(wave, ROUND_SECONDS, BREAK_GRACE, env);
     }
     this.brk = {
       wave, challenge,
@@ -313,7 +350,7 @@ export class Questions {
     if (b.left > 0) {
       b.left -= 1;
       b.counted = false;
-      b.challenge = this.sum(b.wave, ROUND_SECONDS, 0.25);
+      b.challenge = this.sum(b.wave, ROUND_SECONDS, 0.25, env);
       this.announce(b.challenge, c.outcome.success ? 'Correct.' : 'Not quite.', env);
     } else {
       this.scoreBreak(b, env);
@@ -375,15 +412,15 @@ export class Questions {
     const roll = Math.random();
     const challenge =
       env.touch || roll < 0.4
-        ? this.sum(env.wave, PROMPT_SECONDS, PROMPT_GRACE)
+        ? this.sum(env.wave, PROMPT_SECONDS, PROMPT_GRACE, env)
         : roll < 0.7
           ? // A bomb is do or die, so one slip of the finger on a typed answer is forgiven.
-            entryChallenge(makeProblem(sumLevel(env.wave)), PROMPT_SECONDS, PROMPT_GRACE, stake === 'defuse' ? 1 : 0)
-          : lineChallenge(this.text(WORDS), PROMPT_SECONDS, PROMPT_GRACE);
+            entryChallenge(makeProblem(sumLevel(env.wave, env.grade)), clockFor(PROMPT_SECONDS, env.grade), PROMPT_GRACE, stake === 'defuse' ? 1 : 0)
+          : lineChallenge(this.text(WORDS), clockFor(PROMPT_SECONDS, env.grade), PROMPT_GRACE);
     this.prompt = { stake, challenge, settled: false, fatal: false, note: '', hold: 0, offer: null, offerAge: 0 };
     env.play(stake === 'defuse' ? 'bomb' : 'capsule');
     const what = stake === 'defuse' ? 'You hit a bomb' : stake === 'upgrade' ? 'Upgrade capsule' : 'Boost capsule';
-    this.announce(challenge, `${what}. Answer in ${PROMPT_SECONDS} seconds ${STAKES[stake].goal.toLowerCase()}.`, env);
+    this.announce(challenge, `${what}. Answer in ${Math.round(challenge.limit)} seconds ${STAKES[stake].goal.toLowerCase()}.`, env);
   }
 
   /** Run a capsule's or a bomb's question, and settle up once it is answered. `dt` is real time. */

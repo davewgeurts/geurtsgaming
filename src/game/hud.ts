@@ -9,7 +9,7 @@ import { GRADE_COLOR, type Grade } from './fireworks';
 import { advance, fitTo, textWidth, traceText } from './font';
 import { BRIEFING } from './lines';
 import { renderLeaderboardPanel, type PilotScore } from './multiplayer';
-import { STAKES, gradeOf, type Break, type Prompt } from './questions';
+import { GRADE_BANDS, STAKES, gradeOf, type Break, type Prompt } from './questions';
 import { ALERT_SECONDS, ALERT_TURN } from './setpieces';
 import { DROGUE, PERSON_OUT, PERSON_UP, SHIP, TANKER, trace } from './shapes';
 import { FUEL_SECONDS, PATIENCE, TANKER_SIZE, tankerTail, type Tanker, type TankerEnv } from './tanker';
@@ -165,6 +165,8 @@ export interface HudViewContext {
   totalLiberated?: number;
   topPilots?: readonly PilotScore[];
   showLeaderboard?: boolean;
+  /** Seconds the question "what grade are you in?" has been up, or null when it is not being asked. */
+  grading?: number | null;
 }
 
 function drawCentred(
@@ -473,7 +475,7 @@ export function renderMessages(v: HudViewContext): void {
   const mid = h * 0.42;
   const blink = time % 1.1 < 0.75;
 
-  if (v.showLeaderboard && (paused || state === 'over')) {
+  if (v.showLeaderboard && (paused || state !== 'playing')) {
     renderLeaderboardPanel(
       v.ctx,
       v.ink,
@@ -501,6 +503,11 @@ export function renderMessages(v: HudViewContext): void {
 
   // In the cockpit, the words on the glass and the commander's briefing are intro.ts's.
   if (state === 'ready') return;
+
+  if (v.grading != null) {
+    renderGradePicker(v, v.grading);
+    return;
+  }
 
   if (brk) {
     renderBreak(v, brk);
@@ -600,6 +607,27 @@ function renderOffer(v: HudViewContext, offer: Upgrade[], age: number, top: numb
   });
   const last = boxes[boxes.length - 1];
   if (last) drawCentred(v, input === 'keys' ? 'CLICK ONE OR PRESS ITS NUMBER' : 'TAP ONE', last.y + last.h + 12, printSize(8, w, h), alpha * 0.6);
+}
+
+/**
+ * Before the first challenge: which school years the player is in, so the questions fit. Three rows to click,
+ * tap or pick by number, laid out by `offerBoxes` (which is also how a click is matched to one).
+ */
+function renderGradePicker(v: HudViewContext, age: number): void {
+  const { ctx, ink, w, h, room, input, inset, homeY } = v;
+  const alpha = Math.min(1, age / 0.35);
+  const top = challengeTopY(h, inset.top, homeY, true);
+  drawCentred(v, 'WHAT GRADE ARE YOU IN, PILOT?', top - 26, printSize(13, w, h), alpha, NEON.cyan);
+  drawCentred(v, 'IT SETS HOW HARD THE QUESTIONS ARE. IT IS NOT SAVED.', top, printSize(8, w, h), alpha * 0.7);
+  offerBoxes(w, h, room, top, GRADE_BANDS.length).forEach((b, i) => {
+    const band = GRADE_BANDS[i]!;
+    const big = fitTo(band.label, b.h > 50 ? 16 : 13, b.w * 0.6);
+    const small = printSize(8, w, h);
+    ink(SAND, alpha, 1.6, () => ctx.rect(b.x, b.y, b.w, b.h));
+    ink(SAND, alpha, 1.8, () => traceText(ctx, band.label, b.x + (input === 'keys' ? 34 : 16), b.y + (b.h - big) / 2, big));
+    ink(NEON.cyan, alpha * 0.9, 1.2, () => traceText(ctx, band.ages, b.x + b.w - 14, b.y + (b.h - small) / 2, small, 'right'), false);
+    if (input === 'keys') ink(SAND, alpha * 0.6, 1.2, () => traceText(ctx, String(i + 1), b.x + 12, b.y + (b.h - small) / 2, small), false);
+  });
 }
 
 function renderBreak(v: HudViewContext, b: Break): void {

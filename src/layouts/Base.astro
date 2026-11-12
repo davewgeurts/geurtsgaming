@@ -62,11 +62,28 @@ const ogImage = new URL(image, Astro.site ?? 'https://geurtsgaming.com');
       logo: 'https://geurtsgaming.com/logo.svg',
       description,
     })} />
-    <!-- Google tag (gtag.js) -->
+    <!--
+      Google tag (gtag.js), set up for a site made for children. Keep these settings in step with what
+      /privacy/ says: no advertising storage or signals, no ad personalisation, and an analytics cookie that
+      is deleted when the browser is closed (cookie_expires: 0). These are set with gtag('set', ...) before
+      the tag is configured: passed to gtag('config', ...) instead, the cookie setting is ignored (checked
+      in a browser: the cookies then last 400 days).
+    -->
     <script is:inline async src="https://www.googletagmanager.com/gtag/js?id=G-R00Y85816Z"></script>
     <script is:inline>
       window.dataLayer = window.dataLayer || [];
       function gtag(){dataLayer.push(arguments);}
+      gtag('consent', 'default', {
+        ad_storage: 'denied',
+        ad_user_data: 'denied',
+        ad_personalization: 'denied',
+        analytics_storage: 'granted',
+      });
+      gtag('set', {
+        allow_google_signals: false,
+        allow_ad_personalization_signals: false,
+        cookie_expires: 0,
+      });
       gtag('js', new Date());
       gtag('config', 'G-R00Y85816Z');
     </script>

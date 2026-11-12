@@ -1,0 +1,110 @@
+---
+/**
+ * The frame the privacy, security and AI pages share: a heading, tabs to move between the three,
+ * the page's own words, and when they were last revised.
+ */
+import Base from '../layouts/Base.astro';
+import { trust, trustPages } from '../data/trust';
+
+interface Props {
+  title: string;
+  description: string;
+  heading: string;
+  lede: string;
+}
+const { title, description, heading, lede } = Astro.props;
+const path = Astro.url.pathname;
+---
+
+<Base title={title} description={description}>
+  <section class="page-hero">
+    <div class="wrap">
+      <p class="eyebrow">Trust and safety</p>
+      <h1>{heading}</h1>
+      <p class="lede muted">{lede}</p>
+    </div>
+  </section>
+
+  <section class="section body">
+    <div class="wrap narrow">
+      <nav class="tabs" aria-label="Trust and safety pages">
+        {trustPages.map((p) => (
+          <a href={p.href} aria-current={path.startsWith(p.href) ? 'page' : undefined}>{p.label}</a>
+        ))}
+      </nav>
+      <div class="prose">
+        <slot />
+      </div>
+      <p class="updated muted">Last updated {trust.updated}. Questions? <a href={`mailto:${trust.email}`}>{trust.email}</a></p>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .page-hero { --hero-glow: color-mix(in srgb, var(--lapis) 70%, transparent); }
+  .body { padding-top: 0; }
+  .narrow { max-width: 780px; }
+
+  .tabs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 28px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--surface-border);
+  }
+  .tabs a {
+    padding: 10px 20px;
+    border-radius: 999px;
+    border: 1px solid var(--surface-border);
+    font-family: var(--font-display);
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .tabs a[aria-current='page'] {
+    color: var(--sand);
+    border-color: var(--accent-bright);
+    background: color-mix(in srgb, var(--accent-bright) 14%, transparent);
+  }
+  @media (hover: hover) { .tabs a:hover { color: var(--sand); } }
+
+  .prose :global(h2) {
+    font-size: clamp(1.15rem, 2.6vw, 1.4rem);
+    margin: 44px 0 12px;
+  }
+  .prose :global(h2:first-child) { margin-top: 0; }
+  .prose :global(h3) {
+    font-size: 0.95rem;
+    letter-spacing: 0.08em;
+    margin: 26px 0 8px;
+    color: var(--sand);
+  }
+  .prose :global(p),
+  .prose :global(li) { color: var(--text-muted); font-size: 1.04rem; line-height: 1.7; }
+  .prose :global(p) { margin: 0 0 14px; }
+  .prose :global(ul) { margin: 0 0 16px; padding-left: 1.2em; display: grid; gap: 8px; }
+  .prose :global(strong) { color: var(--sand); }
+  .prose :global(a) { color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; }
+
+  /* The short version at the top of each page, and call-outs inside it. */
+  .prose :global(.summary) {
+    padding: 22px 24px;
+    margin-bottom: 8px;
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    border: 1px solid var(--surface-border);
+  }
+  .prose :global(.summary h2) { margin-top: 0; }
+  .prose :global(.summary ul) { margin-bottom: 0; }
+
+  .updated { margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--surface-border); font-size: 0.92rem; }
+  .updated a { color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; }
+
+  @media (max-width: 480px) {
+    .tabs a { padding: 9px 16px; }
+    .prose :global(.summary) { padding: 18px; }
+  }
+</style>

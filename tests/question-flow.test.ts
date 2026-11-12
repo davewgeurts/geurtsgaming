@@ -9,7 +9,7 @@ import { choiceChallenge, choose, entryChallenge, lineChallenge, press, tick, ty
 import { LINES, WORDS } from '../src/game/lines';
 import {
   ALL_OWNED_POINTS, DEFUSE_POINTS, FULL_HULL_BONUS, JAM_SECONDS, OFFER_GRACE, POWER_GAIN, Questions, ROUND_PROBLEMS,
-  gradeOf, sumLevel, type QuestionEnv,
+  PROMPT_SECONDS, ROUND_SECONDS, clockFor, gradeOf, lineTier, sumLevel, type QuestionEnv,
 } from '../src/game/questions';
 import { UPGRADES, type UpgradeId } from '../src/game/upgrades';
 
@@ -33,7 +33,7 @@ interface World extends QuestionEnv {
 function world(over: Partial<QuestionEnv> = {}): World {
   const fitted: UpgradeId[] = [];
   const w: World = {
-    touch: false, wave: 1, hull: 3, maxHull: 3, energy: 0, boss: false, owned: new Set<UpgradeId>(),
+    touch: false, wave: 1, grade: 1, hull: 3, maxHull: 3, energy: 0, boss: false, owned: new Set<UpgradeId>(),
     score: 0, jammed: 0, sheltered: 0, log: [], said: [], calls: [], cheers: [], sounds: [], fitted,
     play: (sound) => w.sounds.push(sound),
     say: (message) => w.said.push(message),
@@ -104,7 +104,48 @@ test('a challenge is graded failed, good or perfect', () => {
 });
 
 test('sums get harder every two waves, and stop at the hardest', () => {
-  assert.deepEqual([1, 2, 3, 4, 5, 6, 9, 30].map(sumLevel), [1, 1, 2, 2, 3, 3, 3, 3]);
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 9, 30].map((wave) => sumLevel(wave)), [1, 1, 2, 2, 3, 3, 3, 3]);
+});
+
+test('the grade a player picks sets how hard the questions are and how long there is to answer', () => {
+  const waves = [1, 2, 3, 4, 5, 9];
+  // Kindergarten to grade 2: sums within 20 all the way, short lines for three waves, never the longest.
+  assert.deepEqual(waves.map((wave) => sumLevel(wave, 0)), [1, 1, 1, 1, 1, 1]);
+  assert.deepEqual(waves.map((wave) => lineTier(wave, 0)), [0, 0, 0, 1, 1, 1]);
+  // Grades 3 to 5: as the game has always been.
+  assert.deepEqual(waves.map((wave) => sumLevel(wave, 1)), [1, 1, 2, 2, 3, 3]);
+  assert.deepEqual(waves.map((wave) => lineTier(wave, 1)), [0, 0, 1, 1, 2, 2]);
+  // Grade 6 and up: a level ahead from the start.
+  assert.deepEqual(waves.map((wave) => sumLevel(wave, 2)), [2, 2, 3, 3, 3, 3]);
+  assert.deepEqual(waves.map((wave) => lineTier(wave, 2)), [1, 1, 2, 2, 2, 2]);
+
+  assert.ok(clockFor(10, 0) > clockFor(10, 1), 'the youngest get longer');
+  assert.equal(clockFor(10, 1), 10);
+  assert.equal(clockFor(10, 2), 10);
+
+  // And it reaches the questions themselves.
+  const young = world({ touch: true, grade: 0, wave: 6 });
+  const old = world({ touch: true, grade: 2, wave: 6 });
+  const q = new Questions();
+  q.startBreak(6, young);
+  assert.equal(q.challenge!.limit, clockFor(ROUND_SECONDS, 0));
+  q.reset();
+  q.startPrompt('energy', young);
+  assert.equal(q.challenge!.limit, clockFor(PROMPT_SECONDS, 0));
+  assert.match(young.said.at(-1)!, /Answer in 16 seconds/);
+  q.startBreak(6, old);
+  assert.equal(q.challenge!.limit, ROUND_SECONDS);
+  q.reset();
+  // On wave 6 the youngest still only add and take away; the oldest are on the full tables.
+  const ops = (w: World) => { const seen = new Set<string>(); for (let i = 0; i < 300; i++) { q.startPrompt('energy', w); const c = q.challenge!; if (c.kind !== 'line') seen.add(c.question.split(' ')[1]!); } return [...seen].sort().join(''); };
+  assert.equal(ops(young), '+-');
+  assert.equal(ops(old), '+-×÷');
+
+  const typist = world({ grade: 0 });
+  q.reset();
+  q.startBreak(1, typist);
+  const line = q.challenge!;
+  assert.ok(line.kind === 'line' && line.limit === clockFor(5 + line.text.length * 0.6, 0));
 });
 
 test('at a keyboard the break is one line to type; good clean typing charges the cannons and mends the hull', () => {
