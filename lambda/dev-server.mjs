@@ -11,7 +11,7 @@ import { createServer } from 'node:http';
 import { handler } from './index.mjs';
 
 const PORT = Number(process.env.PORT || 4322);
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = process.env.HOST || '::';
 
 const CORS_HEADERS = {
   'access-control-allow-origin': '*',

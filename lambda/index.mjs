@@ -9,16 +9,22 @@ let PutCommand = null;
 let UpdateCommand = null;
 let QueryCommand = null;
 
-try {
-  const clientMod = await import('@aws-sdk/client-dynamodb');
-  const libMod = await import('@aws-sdk/lib-dynamodb');
-  GetCommand = libMod.GetCommand;
-  PutCommand = libMod.PutCommand;
-  UpdateCommand = libMod.UpdateCommand;
-  QueryCommand = libMod.QueryCommand;
-  ddb = libMod.DynamoDBDocumentClient.from(new clientMod.DynamoDBClient({}));
-} catch {
-  // Running in local/offline mode without @aws-sdk installed
+const SHOULD_USE_DDB =
+  (Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) || process.env.USE_DYNAMODB === 'true') &&
+  process.env.DYNAMODB_TABLE !== '';
+
+if (SHOULD_USE_DDB) {
+  try {
+    const clientMod = await import('@aws-sdk/client-dynamodb');
+    const libMod = await import('@aws-sdk/lib-dynamodb');
+    GetCommand = libMod.GetCommand;
+    PutCommand = libMod.PutCommand;
+    UpdateCommand = libMod.UpdateCommand;
+    QueryCommand = libMod.QueryCommand;
+    ddb = libMod.DynamoDBDocumentClient.from(new clientMod.DynamoDBClient({}));
+  } catch {
+    // Running in local/offline mode without @aws-sdk installed
+  }
 }
 
 const TABLE = process.env.TABLE_NAME || 'exponentialbliss-pledges';
@@ -208,15 +214,15 @@ function sanitizeFlightTelemetry(flight) {
 }
 
 function mergeTopPilots(existingPilots, incomingPilots) {
-  const byId = new Map();
+  const byCallsign = new Map();
   for (const p of [...existingPilots, ...(Array.isArray(incomingPilots) ? incomingPilots : [])]) {
     if (!p || typeof p.callsign !== 'string' || typeof p.score !== 'number') continue;
-    const key = p.id || `${p.callsign.toUpperCase()}-${p.score}-${p.wave || 1}`;
-    const prev = byId.get(key);
-    if (!prev || p.score > prev.score) {
-      byId.set(key, {
-        id: sanitize(key, 64),
-        callsign: sanitize(p.callsign, 18).toUpperCase() || 'PILOT',
+    const callsign = sanitize(p.callsign, 18).toUpperCase() || 'PILOT';
+    const prev = byCallsign.get(callsign);
+    if (!prev || p.score >= prev.score) {
+      byCallsign.set(callsign, {
+        id: sanitize(p.id || `${callsign}-${p.score}-${p.wave || 1}`, 64),
+        callsign,
         score: Math.round(clampCoordinate(p.score, 0, 9_999_999, 0)),
         wave: Math.round(clampCoordinate(p.wave, 1, 99, 1)),
         freed: Math.round(clampCoordinate(p.freed, 0, 99_999, 0)),
@@ -225,8 +231,8 @@ function mergeTopPilots(existingPilots, incomingPilots) {
       });
     }
   }
-  return Array.from(byId.values())
-    .sort((a, b) => b.score - a.score || a.ts - b.ts)
+  return Array.from(byCallsign.values())
+    .sort((a, b) => b.score - a.score || b.wave - a.wave || a.ts - b.ts)
     .slice(0, MAX_LEADERBOARD_PILOTS);
 }
 
@@ -381,15 +387,22 @@ export async function handler(event) {
       }
 
       const hasHug = Boolean(body.hug && typeof body.hug === 'object');
+      const incomingSid =
+        method === 'POST'
+          ? sanitize(body.sid, 64) ||
+            `anon-${Math.random().toString(36).slice(2, 8)}`
+          : '';
+      const isNewSoul = method === 'POST' && !room.activeSouls.has(incomingSid);
       const shouldSyncDdb =
         Boolean(ddb) &&
         (body.isInitialView === true ||
+          isNewSoul ||
           body.gong === true ||
           hasHug ||
           nowMs - room.lastDdbSyncMs > DDB_SYNC_COALESCE_MS);
 
       if (shouldSyncDdb) {
-        room.lastDdbSyncMs = nowMs;
+        if (method === 'POST') room.lastDdbSyncMs = nowMs;
         try {
           const metaRes = await ddb.send(
             new GetCommand({
@@ -404,9 +417,7 @@ export async function handler(event) {
       }
 
       if (method === 'POST') {
-        const sid =
-          sanitize(body.sid, 64) ||
-          `anon-${Math.random().toString(36).slice(2, 8)}`;
+        const sid = incomingSid;
         const region = sanitize(body.region, 64) || 'Earth';
         const lat = clampCoordinate(body.lat, -90, 90);
         const lon = clampCoordinate(body.lon, -180, 180);

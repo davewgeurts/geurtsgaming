@@ -117,39 +117,75 @@ test('the server\'s board replaces this browser\'s, so a board cleared on the se
   }
 });
 
-test('nothing is sent to a server from before this game; one that knows the game gets heartbeats', async () => {
+test('counts only pilots of this game on a shared server, and tracks 3 browsers online at once', async () => {
   const routed = globalThis.fetch;
-  const calls: string[] = [];
-  const server = (reply: unknown) => {
-    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
-      calls.push(init?.method ?? 'GET');
-      return new Response(JSON.stringify(reply), { status: 200 });
-    }) as typeof fetch;
-  };
+  const paths: string[] = [];
+  const sharedSouls = new Map<string, Record<string, unknown>>([
+    ['soul-manifesto-1', { sid: 'soul-manifesto-1', region: 'Pacific Coast', lastSeen: Date.now() }],
+    ['soul-manifesto-2', { sid: 'soul-manifesto-2', region: 'London', lastSeen: Date.now() }],
+  ]);
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = new URL(String(url));
+    paths.push(`${init?.method ?? 'GET'} ${u.pathname}`);
+    if (init?.method === 'POST' && typeof init.body === 'string') {
+      const b = JSON.parse(init.body) as Record<string, unknown>;
+      if (typeof b.sid === 'string') {
+        sharedSouls.set(b.sid, {
+          sid: b.sid,
+          persona: b.persona,
+          chapter: b.chapter,
+          lastSeen: Date.now(),
+        });
+      }
+    }
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        activeCount: 37 + sharedSouls.size,
+        activeSouls: Array.from(sharedSouls.values()),
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+
   const settle = () => new Promise((done) => setTimeout(done, 10));
   try {
-    // The older server answers for another site's room, and has no leaderboard.
-    server({ ok: true, activeCount: 37, activeSouls: [] });
-    const quiet = new MultiplayerClient('http://test.local');
-    quiet.start();
-    await settle();
-    quiet.updateFlight(0.016, flying(300));
-    quiet.recordScore(5_000, 2, 10);
-    await quiet.pollPresence();
-    await settle();
-    quiet.stop();
-    assert.deepEqual(calls, ['GET'], 'one question that only reads, and then silence');
-    assert.equal(quiet.snapshot().onlineCount, 1, 'and its count of another site\'s visitors is not shown');
-    assert.equal(quiet.snapshot().topPilots.length, 1, 'the run is still on this browser\'s own board');
+    const browser1 = new MultiplayerClient('http://test.local');
+    const browser2 = new MultiplayerClient('http://test.local');
+    const browser3 = new MultiplayerClient('http://test.local');
 
-    calls.length = 0;
-    server({ ok: true, activeCount: 2, topPilots: [], totalLiberated: 0 });
-    const live = new MultiplayerClient('http://test.local');
-    live.start();
+    browser1.start();
     await settle();
-    live.stop();
-    assert.deepEqual(calls, ['GET', 'POST'], 'an empty board is still a board: the heartbeats start');
-    assert.equal(live.snapshot().onlineCount, 2);
+    assert.equal(browser1.snapshot().onlineCount, 1, 'another site\'s 37 visitors and soul-* entries are ignored');
+
+    browser2.start();
+    browser3.start();
+    await settle();
+    await browser1.pollPresence();
+    await browser2.pollPresence();
+
+    assert.equal(browser1.snapshot().onlineCount, 3, 'browser 1 sees all 3 pilots online');
+    assert.equal(browser2.snapshot().onlineCount, 3, 'browser 2 sees all 3 pilots online');
+    assert.equal(browser3.snapshot().onlineCount, 3, 'browser 3 sees all 3 pilots online');
+
+    // A pilot flying a wave on the shared server is also seen as a live wingman by the other browsers.
+    browser1.updateFlight(0.016, flying(400));
+    await browser1.pollPresence();
+    await browser2.pollPresence();
+    browser2.updateFlight(0.016, flying(500));
+    assert.equal(liveShips(browser2, browser1).length, 1, 'live wingman works on the shared server too');
+    assert.equal(liveShips(browser2, browser1)[0]!.targetX, 400);
+
+    // Scores stay local and do not POST /score when the server has no topPilots board.
+    paths.length = 0;
+    browser1.recordScore(5_000, 2, 10);
+    await settle();
+    assert.ok(!paths.some((p) => p.includes('/score')), 'does not call /score on a server without topPilots');
+    assert.equal(browser1.snapshot().topPilots.length, 1, 'the run is kept on this browser\'s own board');
+
+    browser1.stop();
+    browser2.stop();
+    browser3.stop();
   } finally {
     globalThis.fetch = routed;
   }
