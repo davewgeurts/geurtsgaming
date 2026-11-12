@@ -6,8 +6,9 @@
  * outline, so a body reads as a solid, faceted thing rather than a tangle of lines.
  *
  * Depth is what makes it parallax: far bodies (planets) crawl down the screen and barely move when the
- * ship flies sideways; near ones (rocks) pass quickly and slide a long way. Everything here is drawn
- * dimmer and thinner than anything in the game itself, with no glow, so it never looks like a target.
+ * ship flies sideways; nearer ones (rocks) pass a little quicker and slide a little further. Everything
+ * here is drawn far dimmer and thinner than anything in the game itself, with no glow, so it stays in
+ * the distance and never looks like a target.
  */
 type V3 = readonly [number, number, number];
 interface Mesh { verts: V3[]; faces: number[][] }
@@ -41,6 +42,13 @@ const PLANET_COLORS = ['#b98cff', '#42f5ff', '#ff9b2f', '#7fe0b0', '#ffe84a'];
 const MOON_COLORS = ['#42f5ff', '#7fe0b0', '#6f8cff'];
 const ROCK_COLOR = '#8f9bc4';
 const RING_STEPS = 28;
+/**
+ * How far a fully lit face is lifted from the background towards the body's colour (0 to 1).
+ * Kept low on purpose: the scenery is meant to sit a long way off, behind the game.
+ */
+const PLANET_SHADE = 0.085;
+const MOON_SHADE = 0.07;
+const ROCK_SHADE = 0.055;
 
 const rand = (min: number, max: number): number => min + Math.random() * (max - min);
 const pick = <T>(from: readonly T[]): T => from[Math.floor(Math.random() * from.length)]!;
@@ -117,7 +125,7 @@ const GLOBE_FINE = globe(10, [-1.1, -0.55, 0, 0.55, 1.1]);
 function shadesOf(color: string, strength: number): string[] {
   const rgb = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
   return Array.from({ length: LEVELS }, (_, level) => {
-    const t = 0.035 + strength * (level / (LEVELS - 1));
+    const t = 0.012 + strength * (level / (LEVELS - 1));
     return `rgb(${rgb.map((c, i) => Math.round(BASE[i]! + (c - BASE[i]!) * t)).join(',')})`;
   });
 }
@@ -171,7 +179,7 @@ export class Backdrop {
     const { w, h, span } = this;
     let body: Body;
     if (kind === 'planet') {
-      const r = span * rand(0.1, 0.25);
+      const r = span * rand(0.08, 0.19);
       const banded = Math.random() < 0.45;
       const color = pick(PLANET_COLORS.filter((c) => c !== this.lastColor));
       this.lastColor = color;
@@ -181,39 +189,39 @@ export class Backdrop {
       const x = this.side < 0 ? rand(-r * 0.3, w * 0.22) : rand(w * 0.78, w + r * 0.3);
       body = {
         kind, r, x, y: 0, color,
-        mesh: banded ? (r > 90 ? GLOBE_FINE : GLOBE) : ICOSAHEDRON,
-        depth: rand(0.05, 0.11),
-        shades: shadesOf(color, 0.2),
-        alpha: 0.5,
+        mesh: banded ? (r > 80 ? GLOBE_FINE : GLOBE) : ICOSAHEDRON,
+        depth: rand(0.03, 0.07),
+        shades: shadesOf(color, PLANET_SHADE),
+        alpha: 0.24,
         a: rand(0, 6), b: rand(0.25, 0.6), c: rand(-0.45, 0.45),
         da: rand(0.05, 0.11) * (Math.random() < 0.5 ? -1 : 1), db: 0,
         ring: Math.random() < (banded ? 0.6 : 0.2) ? rand(1.55, 1.9) : 0,
       };
       body.y = onScreen ? rand(h * 0.2, h * 0.5) : -this.reach(body) - rand(h * 0.1, h * 0.8);
     } else if (kind === 'moon') {
-      const r = Math.max(7, span * rand(0.018, 0.042));
+      const r = Math.max(6, span * rand(0.014, 0.032));
       const color = pick(MOON_COLORS);
       body = {
         kind, r, color,
         x: rand(w * 0.04, w * 0.96), y: 0,
         mesh: Math.random() < 0.5 ? OCTAHEDRON : ICOSAHEDRON,
-        depth: rand(0.17, 0.3),
-        shades: shadesOf(color, 0.16),
-        alpha: 0.36,
+        depth: rand(0.1, 0.18),
+        shades: shadesOf(color, MOON_SHADE),
+        alpha: 0.2,
         a: rand(0, 6), b: rand(-0.5, 0.5), c: rand(-0.5, 0.5),
         da: rand(0.15, 0.4) * (Math.random() < 0.5 ? -1 : 1), db: 0,
         ring: 0,
       };
       body.y = onScreen ? rand(0, h) : -body.r - rand(0, h * 0.7);
     } else {
-      const r = Math.max(4, span * rand(0.008, 0.02));
+      const r = Math.max(3, span * rand(0.006, 0.014));
       body = {
         kind, r, color: ROCK_COLOR,
         x: rand(0, w), y: 0,
         mesh: rock(),
-        depth: rand(0.42, 0.85),
-        shades: shadesOf(ROCK_COLOR, 0.13),
-        alpha: 0.34,
+        depth: rand(0.25, 0.5),
+        shades: shadesOf(ROCK_COLOR, ROCK_SHADE),
+        alpha: 0.17,
         a: rand(0, 6), b: rand(0, 6), c: rand(0, 6),
         da: rand(0.3, 1.1) * (Math.random() < 0.5 ? -1 : 1), db: rand(0.2, 0.8) * (Math.random() < 0.5 ? -1 : 1),
         ring: 0,
@@ -236,15 +244,17 @@ export class Backdrop {
 
   /**
    * Draw every body. `shift` is how far, in px, something right behind the ship would have slid sideways;
-   * each body slides by its depth's share of that.
+   * each body slides by its depth's share of that. `lift` moves the whole sky up or down, which is what
+   * the view from the cockpit does as the ship's nose rises.
    */
-  render(ctx: CanvasRenderingContext2D, shift: number): void {
+  render(ctx: CanvasRenderingContext2D, shift: number, lift = 0): void {
     ctx.lineJoin = 'round';
     for (const b of this.bodies) {
       const reach = this.reach(b);
       const x = b.x + shift * b.depth;
-      if (b.y + reach < 0 || b.y - reach > this.h || x + reach < 0 || x - reach > this.w) continue;
-      this.draw(ctx, b, x, b.y);
+      const y = b.y + lift;
+      if (y + reach < 0 || y - reach > this.h || x + reach < 0 || x - reach > this.w) continue;
+      this.draw(ctx, b, x, y);
     }
     ctx.globalAlpha = 1;
     ctx.lineJoin = 'miter';
@@ -267,7 +277,7 @@ export class Backdrop {
     });
 
     ctx.strokeStyle = b.color;
-    ctx.lineWidth = b.kind === 'planet' ? 1.3 : 1;
+    ctx.lineWidth = 1;
     if (b.ring) this.ring(ctx, b, cx, cy, cb, sb, cc, sc, false);
 
     // Sort the faces that point at the viewer by how much light falls on them.

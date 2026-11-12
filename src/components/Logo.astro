@@ -1,8 +1,10 @@
 ---
 /**
- * GeurtsGaming "GG" monogram.
- * Two interlocking G rings — sand in back, magenta in front — on a lapis→plum badge.
+ * GeurtsGaming "gg" monogram.
+ * Two lowercase g's standing back to back, like team-mates: sand on the left, and its mirror image
+ * in magenta on the right, on a lapis→plum badge.
  * variant="badge" draws the rounded-square background; variant="mark" is just the letters.
+ * The same drawing is kept as files in public/ (favicon.svg, logo.svg, apple-touch-icon.png, og.png).
  */
 interface Props {
   size?: number | string;
@@ -13,11 +15,10 @@ interface Props {
 const { size = 64, variant = 'badge', class: className = '', title = 'GeurtsGaming' } = Astro.props;
 const id = `gg-${Math.random().toString(36).slice(2, 8)}`;
 
-// G geometry: ring radius 19, open mouth at upper-right, bar from centre to the right edge.
-const G = (cx: number, cy: number) =>
-  `M ${cx + 14.56} ${cy - 12.21} A 19 19 0 1 0 ${cx + 19} ${cy} M ${cx + 1.5} ${cy} L ${cx + 19} ${cy}`;
-const leftG = G(34, 50);
-const rightG = G(66, 50);
+// The left g: a round bowl (radius 14), then a straight back down its right side that hooks into a tail.
+// The right g is the same path flipped left to right, so the two straight backs stand side by side.
+const g = 'M 44.5 39 A 14 14 0 1 0 16.5 39 A 14 14 0 1 0 44.5 39 M 44.5 25 L 44.5 61 A 14 14 0 0 1 18.38 68';
+const flip = 'translate(100 0) scale(-1 1)';
 ---
 
 <svg
@@ -45,12 +46,12 @@ const rightG = G(66, 50);
   )}
 
   <g fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <!-- back G (magenta) -->
-    <path d={rightG} stroke="#081849" stroke-width="14" />
-    <path d={rightG} stroke="#893172" stroke-width="8" />
-    <!-- front G (sand) with navy knockout so the rings read as interlocked -->
-    <path d={leftG} stroke="#081849" stroke-width="14" />
-    <path d={leftG} stroke="#ECDFD2" stroke-width="8" />
+    <!-- a navy outline under both letters, which leaves a dark seam where their backs meet -->
+    <path d={g} stroke="#081849" stroke-width="14" />
+    <path d={g} stroke="#081849" stroke-width="14" transform={flip} />
+    <!-- the mirrored g (magenta), then the g (sand) -->
+    <path d={g} stroke="#893172" stroke-width="8" transform={flip} />
+    <path d={g} stroke="#ECDFD2" stroke-width="8" />
   </g>
 </svg>
 

@@ -62,3 +62,29 @@ export const TAUNTS = {
   win: ['HA HA HA HA HA!', 'BYE BYE, PILOT!', 'TOO EASY!'],
 } as const;
 export type Taunt = keyof typeof TAUNTS;
+
+/**
+ * What the flight commander says over the cockpit radio before take-off: how to play, in a few short
+ * lines, and a send-off. `keys` is for a keyboard, `touch` for a touch screen (where nothing is typed).
+ */
+export const BRIEFING = {
+  keys: [
+    'COMMAND TO PILOT. WELCOME ABOARD!',
+    'FLY WITH WASD OR THE ARROW KEYS. HOLD SPACE TO FIRE.',
+    'BEFORE EACH WAVE, TYPE THE WORDS. GOOD TYPING CHARGES YOUR CANNONS.',
+    'FLY INTO CAPSULES AND ANSWER TO WIN BOOSTS AND UPGRADES.',
+    'HIT A RED BOMB AND YOU MUST SOLVE IT, FAST. P PAUSES THE GAME.',
+    'READY WHEN YOU ARE. PRESS SPACE TO LAUNCH!',
+  ],
+  touch: [
+    'COMMAND TO PILOT. WELCOME ABOARD!',
+    'DRAG YOUR FINGER TO FLY. THE SHIP FIRES WHILE YOU TOUCH.',
+    'BEFORE EACH WAVE, SOLVE THREE SUMS. RIGHT ANSWERS CHARGE YOUR CANNONS.',
+    'FLY INTO CAPSULES AND ANSWER TO WIN BOOSTS AND UPGRADES.',
+    'HIT A RED BOMB AND YOU MUST SOLVE IT, FAST.',
+    'READY WHEN YOU ARE. TAP TO LAUNCH!',
+  ],
+  engines: 'ENGINES TO FULL. HERE WE GO!',
+  luck: 'GOOD LUCK, PILOT!',
+  sonic: 'GOING SUPERSONIC!',
+} as const;

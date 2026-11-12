@@ -287,16 +287,12 @@
       opening = true;
       try {
         const { Game } = await import('../game/game');
-        // The ship's origin sits 16 of 32 units across and 19 of 42 units down the icon's viewBox.
-        const icon = (launch.querySelector('svg') ?? launch).getBoundingClientRect();
-        const from = { x: icon.left + icon.width / 2, y: icon.top + (icon.height * 19) / 42, scale: icon.width / 32 };
         overlay.hidden = false;
         document.documentElement.classList.add('game-active');
         rest().forEach((el) => (el.inert = true));
         announce(true);
         try {
           game = new Game(canvas, {
-            from,
             onExit: () => close(),
             onStatus: (message) => {
               if (status) status.textContent = message;

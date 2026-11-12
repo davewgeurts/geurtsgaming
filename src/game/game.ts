@@ -11,6 +11,8 @@
  * - Two wireframe faces watch from the top corners: the pilot's, and the boss's (see avatar.ts).
  * - Sound effects are synthesised (see sound.ts); the overlay's Sound button switches them off.
  * - Behind it all, low-poly planets, moons and rocks drift by at different depths (see backdrop.ts).
+ * - It opens in the cockpit: a briefing from the flight commander, then a take-off that hands over to
+ *   the top-down view (see intro.ts).
  *
  * The questions live in challenge.ts (the rules), maths.ts and lines.ts (the content).
  */
@@ -22,6 +24,7 @@ import {
   type Challenge, type ChoiceChallenge, type LineChallenge,
 } from './challenge';
 import { advance, textWidth, traceText } from './font';
+import { Intro, type Ink, type IntroCue, type IntroView } from './intro';
 import { LINES, TAUNTS, WORDS, type Taunt } from './lines';
 import { makeProblem } from './maths';
 import {
@@ -184,8 +187,6 @@ interface Prompt {
 }
 
 export interface GameOptions {
-  /** Where the ship flies in from, e.g. the launch button: viewport position, and how large it is drawn there. */
-  from?: { x: number; y: number; scale?: number };
   /** Called when the player asks to leave (Esc). */
   onExit: () => void;
   /** Short status messages for a screen-reader live region. */
@@ -271,6 +272,9 @@ export class Game {
   private rings: Ring[] = [];
   private stars: Star[] = [];
   private readonly backdrop = new Backdrop();
+  /** The view from the cockpit that opens the game. null once the ship has taken off. */
+  private intro: Intro | null = null;
+  private readonly inkFn: Ink = (color, alpha, width, build, glow) => this.ink(color, alpha, width, build, glow);
   /** Where the ship is across the screen, -0.5 to 0.5, smoothed: the scenery slides the other way. */
   private drift = 0;
   private warp = 1;
@@ -307,10 +311,12 @@ export class Game {
     }
 
     this.resize();
-    const rect = canvas.getBoundingClientRect();
-    this.ship.x = opts.from ? opts.from.x - rect.left : this.homeX;
-    this.ship.y = opts.from ? opts.from.y - rect.top : this.homeY;
-    this.shipScale = opts.from?.scale ?? 1.15 * this.scale;
+    this.shipScale = 1.15 * this.scale;
+    // The game opens in the cockpit; the ship itself is out of sight below the screen until it has taken off.
+    this.intro = new Intro(this.reduceMotion, this.onIntroCue);
+    this.ship.x = this.homeX;
+    this.ship.y = this.h + 80;
+    opts.onStatus?.(Intro.script(this.input === 'touch'));
 
     addEventListener('keydown', this.onKeyDown);
     addEventListener('keyup', this.onKeyUp);
@@ -324,7 +330,7 @@ export class Game {
 
     // The click that opened the game is what allows it to make sound.
     this.sound.unlock();
-    // Draw once straight away so the ship never blinks out between the button and the first frame.
+    // Draw once straight away, so the overlay never fades in on an empty canvas.
     this.render();
     this.last = performance.now();
     this.raf = requestAnimationFrame(this.frame);
@@ -538,8 +544,9 @@ export class Game {
       return;
     }
     this.keys.add(code);
-    if (this.state === 'ready' && this.stateTime > 0.5) this.begin();
-    else if (this.state === 'over' && this.stateTime > 0.9 && (code === 'Space' || code === 'Enter')) this.begin();
+    if (this.state === 'ready') {
+      if (code === 'Space' || code === 'Enter') this.go();
+    } else if (this.state === 'over' && this.stateTime > 0.9 && (code === 'Space' || code === 'Enter')) this.begin();
   };
 
   /** Pass a key to the open question, with a click for a key that counted and a buzz for a wrong letter. */
@@ -619,7 +626,7 @@ export class Game {
       }
     }
     if (this.paused) this.paused = false;
-    else if (this.state === 'ready' && this.stateTime > 0.5) this.begin();
+    else if (this.state === 'ready') this.go();
     else if (this.state === 'over' && this.stateTime > 0.9) this.begin();
   };
 
@@ -666,6 +673,32 @@ export class Game {
   }
 
   // ------------------------------------------------------------ game state
+
+  /** Space, Enter or a tap in the cockpit: launch, or cut a take-off short. */
+  private go(): void {
+    const intro = this.intro;
+    if (!intro || this.stateTime < 0.5) return;
+    if (intro.phase === 'brief') {
+      intro.launch();
+      this.opts.onStatus?.('Taking off.');
+    } else {
+      intro.skip();
+    }
+  }
+
+  private onIntroCue = (cue: IntroCue): void => {
+    this.sound.play(cue);
+    if (cue === 'sonic') {
+      // The boom: a ring bursts out from dead ahead as the view changes.
+      this.rings.push({ x: this.w / 2, y: this.h * 0.38, age: 0, color: NEON.cyan });
+      if (!this.reduceMotion) this.shake = 0.45;
+    }
+  };
+
+  /** How the sky is to be drawn while the game is still in the cockpit, or null once it is not. */
+  private get view(): IntroView | null {
+    return this.intro ? this.intro.view(this.w, this.h) : null;
+  }
 
   private setState(state: State): void {
     this.state = state;
@@ -1324,15 +1357,30 @@ export class Game {
     const sim = dt * this.timeScale;
     this.banner = Math.max(0, this.banner - sim);
 
-    // Stars speed up once the ship launches, which is what sells the feeling of flying.
-    const flying = this.state === 'playing' && !this.brk;
-    const targetWarp = flying ? 3.2 : this.state === 'over' ? 0.6 : 1;
-    this.warp += (targetWarp - this.warp) * (1 - Math.exp(-dt * 1.8));
-    for (const star of this.stars) {
-      star.y += star.speed * this.warp * sim;
-      if (star.y > this.h + 80) Object.assign(star, this.makeStar(-rand(10, 80)));
+    if (this.intro) {
+      this.intro.update(dt, this.input === 'touch');
+      if (this.intro.done) {
+        // The take-off is over: the ship is in its place and the stars are already falling as the game has them.
+        this.intro = null;
+        this.warp = 3.2;
+        this.begin();
+      }
     }
-    this.backdrop.update(sim, this.warp);
+    const view = this.view;
+    if (view) {
+      this.flyStars(view, dt);
+      this.backdrop.update(dt, 3.2 * view.settle);
+    } else {
+      // Stars speed up once the ship launches, which is what sells the feeling of flying.
+      const flying = this.state === 'playing' && !this.brk;
+      const targetWarp = flying ? 3.2 : this.state === 'over' ? 0.6 : 1;
+      this.warp += (targetWarp - this.warp) * (1 - Math.exp(-dt * 1.8));
+      for (const star of this.stars) {
+        star.y += star.speed * this.warp * sim;
+        if (star.y > this.h + 80) Object.assign(star, this.makeStar(-rand(10, 80)));
+      }
+      this.backdrop.update(sim, this.warp);
+    }
     // The scenery slides against the ship: a little for what is far away, a lot for what is near.
     const across = this.reduceMotion ? 0 : clamp(this.ship.x / (this.w || 1) - 0.5, -0.5, 0.5);
     this.drift += (across - this.drift) * (1 - Math.exp(-dt * 3));
@@ -1391,8 +1439,15 @@ export class Game {
     const ship = this.ship;
     const k = 1 - Math.exp(-dt * 4);
     this.shipScale += (1.15 * this.scale - this.shipScale) * k;
-    if (this.state === 'ready' || this.brk) {
-      // Glide in from wherever the launch button was, or back to base for a break.
+    if (this.state === 'ready') {
+      // Out of sight below the screen while the game is in the cockpit; it rises into place as the view hands over.
+      const risen = this.view?.ship ?? 1;
+      ship.x = this.homeX;
+      ship.y = this.homeY + (1 - risen) * (this.h - this.homeY + 80);
+      return;
+    }
+    if (this.brk) {
+      // Back to base for a break.
       ship.x += (this.homeX - ship.x) * k;
       ship.y += (this.homeY - ship.y) * k;
       return;
@@ -1461,6 +1516,43 @@ export class Game {
     }
     // Energy only runs down while there is something to fight, so none is wasted waiting for a wave to arrive.
     if (this.enemies.length || this.boss?.state === 'fight') this.energy = Math.max(0, this.energy - dt / ENERGY_SECONDS);
+  }
+
+  /**
+   * Move the stars as seen from the cockpit: away from the point the ship is heading for, faster the
+   * further from it they are. As the view hands over to the game that turns into falling straight down.
+   */
+  private flyStars(view: IntroView, dt: number): void {
+    if (view.speed <= 0) return;
+    const { w, h } = this;
+    const reach = 0.5 * Math.min(w, h);
+    for (const star of this.stars) {
+      let ux = 0;
+      let uy = 1;
+      let pace = 1;
+      if (view.vanish) {
+        const dx = star.x - view.vanish.x;
+        const dy = star.y - view.vanish.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        ux = dx / dist;
+        uy = dy / dist;
+        pace = Math.min(3, 0.35 + dist / reach) * (1 - view.settle) + view.settle;
+      }
+      const step = star.speed * view.speed * pace * dt;
+      star.x += ux * step;
+      star.y += uy * step;
+      if (star.y > h + 80 || star.y < -80 || star.x < -20 || star.x > w + 20) {
+        if (!view.vanish || view.settle > 0.5) {
+          Object.assign(star, this.makeStar(-rand(10, 80)));
+        } else {
+          // A new star appears ahead, near the point everything is flying out from.
+          const angle = rand(0, Math.PI * 2);
+          const far = rand(0.03, 0.3) * Math.min(w, h);
+          star.x = view.vanish.x + Math.cos(angle) * far;
+          star.y = view.vanish.y + Math.sin(angle) * far * 0.8;
+        }
+      }
+    }
   }
 
   private updateWave(dt: number): void {
@@ -1889,7 +1981,17 @@ export class Game {
     const sc = this.scale;
     ctx.clearRect(0, 0, w, h);
     ctx.save();
-    if (this.shake > 0) ctx.translate(rand(-1, 1) * this.shake * 14, rand(-1, 1) * this.shake * 14);
+    const view = this.view;
+    const shake = Math.max(this.shake, view?.shake ?? 0);
+    if (shake > 0) ctx.translate(rand(-1, 1) * shake * 14, rand(-1, 1) * shake * 14);
+    const frame = { ctx, ink: this.inkFn, w, h, inset: this.inset, time: this.time, touch: this.input === 'touch' };
+    // From the cockpit, the sky stops at the horizon.
+    if (view && view.horizon !== null) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(-20, -20, w + 40, view.horizon + 20);
+      ctx.clip();
+    }
 
     // A star's speed is its depth: the faster it falls, the nearer it is, and the further it slides
     // against the ship. Stars that slide off one side come back on the other.
@@ -1898,31 +2000,51 @@ export class Game {
       const x = (star.x + (shift * star.speed) / 420) % w;
       return x < 0 ? x + w : x;
     };
+    // From the cockpit the whole sky is slid up or down (stars that slide off one edge come back on the
+    // other), and a star's streak points away from where the ship is heading instead of straight down.
+    const lift = view?.lift ?? 0;
+    const tall = h + 160;
+    const starY = (star: Star): number => (lift ? ((((star.y + lift + 80) % tall) + tall) % tall) - 80 : star.y);
+    const vanish = view?.vanish ?? null;
+    const streak = (x: number, y: number, length: number): void => {
+      ctx.moveTo(x, y);
+      if (vanish) {
+        const dx = x - vanish.x;
+        const dy = y - vanish.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        ctx.lineTo(x + (dx / dist) * length, y + (dy / dist) * length);
+      } else {
+        ctx.lineTo(x, y + length);
+      }
+    };
+    const pace = view ? view.speed : this.warp;
+    const stretch = view ? view.stretch : 1;
     // Stars, batched by brightness so each tier is a single stroke.
     for (let tier = 0; tier < 3; tier++) {
       this.ink(SAND, [0.22, 0.45, 0.8][tier]!, 1.2, () => {
         for (const star of this.stars) {
           if (star.streak || star.tier !== tier) continue;
-          const x = starX(star);
-          ctx.moveTo(x, star.y);
-          ctx.lineTo(x, star.y + Math.max(0.6, star.speed * this.warp * 0.02));
+          streak(starX(star), starY(star), Math.max(0.6, star.speed * pace * 0.02 * stretch));
         }
       }, false);
     }
     // Planets, moons and rocks go over the stars (they hide them) and under everything else.
-    this.backdrop.render(ctx, shift);
+    this.backdrop.render(ctx, shift, lift);
     // Streaks are quiet sand in a wave and turn neon while a boss is on screen.
     const streakColors = this.boss ? [NEON.cyan, NEON.violet, NEON.lime] : [SAND];
+    // (Parked on the runway nothing is moving, so there are no streaks at all.)
+    const streakAlpha = (this.boss ? 0.4 : 0.16) * (view ? clamp(view.speed, 0, 1) : 1);
     streakColors.forEach((color, band) => {
-      this.ink(color, this.boss ? 0.4 : 0.16, 1, () => {
+      if (streakAlpha <= 0) return;
+      this.ink(color, streakAlpha, 1, () => {
         this.stars.forEach((star, i) => {
           if (!star.streak || i % streakColors.length !== band) return;
-          const x = starX(star);
-          ctx.moveTo(x, star.y);
-          ctx.lineTo(x, star.y + star.speed * (0.08 + this.warp * 0.035));
+          streak(starX(star), starY(star), star.speed * (0.08 + pace * 0.035) * Math.sqrt(stretch));
         });
       }, false);
     });
+    if (view && view.horizon !== null) ctx.restore();
+    this.intro?.renderGround(frame);
 
     // Debris fades in two steps rather than per piece, and is grouped by colour, to keep strokes batched.
     for (const color of new Set(this.debris.map((d) => d.color))) {
@@ -2054,9 +2176,12 @@ export class Game {
       });
     }
 
-    // The ship blinks while it cannot be hit, but never disappears on the ready or paused screens.
+    // The cockpit goes over the view out of it, and under the ship that rises as the cockpit drops away.
+    this.intro?.renderCockpit(frame);
+
+    // The ship blinks while it cannot be hit, but never disappears on the paused screen.
     const blinking = this.state === 'playing' && !this.paused && !this.prompt && !this.brk && this.ship.invulnerable > 0;
-    const shipVisible = this.state !== 'over' && (!blinking || Math.floor(this.time * 14) % 2 === 0);
+    const shipVisible = this.state !== 'over' && (!view || view.ship > 0) && (!blinking || Math.floor(this.time * 14) % 2 === 0);
     if (shipVisible) {
       const s = this.shipScale;
       this.ink(SAND, 1, 1.7, () => trace(ctx, SHIP, this.ship.x, this.ship.y, s, 0));
@@ -2269,22 +2394,8 @@ export class Game {
       return;
     }
 
-    if (this.state === 'ready') {
-      const alpha = Math.min(1, this.stateTime / 0.6);
-      if (this.coarse) {
-        if (blink) this.centred('TAP TO START', mid, 20, alpha);
-        this.centred('HOLD AND DRAG TO FLY AND FIRE', mid + 46, 11, alpha * 0.8);
-        this.centred('SOLVE SUMS TO POWER UP', mid + 70, 11, alpha * 0.8, PINK);
-        this.centred('FLY INTO CAPSULES FOR BOOSTS AND UPGRADES', mid + 94, 11, alpha * 0.8, PINK);
-      } else {
-        if (blink) this.centred('PRESS SPACE TO START', mid, 20, alpha);
-        this.centred('WASD OR ARROWS TO FLY - SPACE TO FIRE', mid + 46, 11, alpha * 0.8);
-        this.centred('P TO PAUSE - ESC TO EXIT', mid + 70, 11, alpha * 0.8);
-        this.centred('TYPE WELL BEFORE EACH WAVE TO POWER UP', mid + 94, 11, alpha * 0.8, PINK);
-        this.centred('FLY INTO CAPSULES FOR BOOSTS AND UPGRADES', mid + 118, 11, alpha * 0.8, PINK);
-      }
-      return;
-    }
+    // In the cockpit, the words on the glass and the commander's briefing are intro.ts's.
+    if (this.state === 'ready') return;
 
     if (this.brk) {
       this.renderBreak(this.brk);

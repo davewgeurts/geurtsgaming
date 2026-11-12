@@ -1,5 +1,9 @@
 ---
-/** Ambient drifting particles behind the hero. Pauses for reduced-motion users, hidden tabs, the arcade game, and once the hero has scrolled out of view. */
+/**
+ * Ambient backdrop behind the hero: drifting particles on three depth layers that slide a little against the pointer
+ * and the scroll, and tiny far-off skirmishes where a ship answers a sum or types a word (see hero-scene.ts).
+ * Pauses for reduced-motion users, hidden tabs, the arcade game, and once the hero has scrolled out of view.
+ */
 ---
 <canvas class="starfield" aria-hidden="true"></canvas>
 
@@ -14,26 +18,60 @@
 </style>
 
 <script>
+  import { heroScene, type Rect } from './hero-scene';
+
   const canvas = document.querySelector<HTMLCanvasElement>('.starfield');
   if (canvas) {
     const ctx = canvas.getContext('2d')!;
     const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
     const colors = ['236,223,210', '137,49,114', '204,202,204', '95,52,117'];
-    type P = { x: number; y: number; r: number; vy: number; a: number; c: string; streak: boolean };
+    /** How far each depth layer can slide, in px: far, middle, near. */
+    const depths = [4, 12, 25];
+    /** Spare particles past each edge, so a layer that has slid sideways leaves no bare strip. */
+    const spill = 30;
+    type P = { x: number; y: number; r: number; vy: number; a: number; c: string; streak: boolean; d: number };
     let w = 0, h = 0, dpr = 0, ps: P[] = [], raf = 0;
+    // No skirmishes for reduced-motion users: they get the still stars only.
+    const scene = reduce ? null : heroScene(ctx);
 
     const rand = (a: number, b: number) => a + Math.random() * (b - a);
     const make = (y?: number): P => {
       const streak = Math.random() < 0.12;
+      const r = streak ? rand(0.6, 1.2) : rand(0.6, 2.2);
       return {
-        x: rand(0, w),
-        y: y ?? rand(0, h),
-        r: streak ? rand(0.6, 1.2) : rand(0.6, 2.2),
+        x: rand(-spill, w + spill),
+        y: y ?? rand(-spill, h + spill),
+        r,
         vy: streak ? rand(0.6, 1.6) : rand(0.08, 0.4),
         a: rand(0.15, 0.75),
         c: colors[Math.floor(Math.random() * colors.length)],
         streak,
+        // Bigger dots and the streaks are the near ones.
+        d: depths[streak ? 2 : Math.min(2, Math.floor((r - 0.6) / 0.54))],
       };
+    };
+
+    /** Tell the skirmishes what to keep clear of: the nav bar and the copy laid over this canvas. */
+    const place = () => {
+      if (!scene || !w) return;
+      const box = canvas.getBoundingClientRect();
+      const rect = (el: Element): Rect => {
+        const r = el.getBoundingClientRect();
+        return [r.left - box.left, r.top - box.top, r.right - box.left, r.bottom - box.top];
+      };
+      // The copy is every heading, paragraph, link, button and picture laid over the canvas, bar pure decoration.
+      // Boxes with no width are hidden things (the game's overlay starts out inside the hero), so they are left out.
+      const copy = [...canvas.parentElement!.querySelectorAll(':scope > :not(canvas, [aria-hidden]) :is(h1, p, a, button, svg, img)')]
+        .map(rect)
+        .filter((r) => r[2] > r[0]);
+      // A phone, upright or held sideways.
+      const compact = w <= 640 || h <= 480;
+      // Phones go round each block of copy. Wider screens keep the whole centre column clear, top to bottom.
+      const keepClear = compact || !copy.length
+        ? copy
+        : [[Math.min(...copy.map((r) => r[0])), 0, Math.max(...copy.map((r) => r[2])), h] as const];
+      const nav = document.querySelector('header');
+      scene.layout(w, h, nav ? [...keepClear, rect(nav)] : keepClear, compact);
     };
 
     const resize = () => {
@@ -44,24 +82,45 @@
       w = canvas.clientWidth; h = canvas.clientHeight;
       canvas.width = w * dpr; canvas.height = h * dpr;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      const n = Math.min(220, Math.floor((w * h) / 9000));
+      const n = Math.min(220, Math.floor(((w + 2 * spill) * h) / 9000));
       ps = Array.from({ length: n }, () => make());
+      place();
     };
 
-    const draw = () => {
+    // Parallax. The pointer and the scroll say where the layers should sit (as a share of each layer's reach);
+    // `slide` eases towards that a little every frame, so nothing jumps.
+    let pointerX = 0, pointerY = 0, scrolled = 0, slideX = 0, slideY = 0, last = 0;
+    if (!reduce) {
+      addEventListener('pointermove', (e) => {
+        if (e.pointerType !== 'mouse') return;
+        pointerX = e.clientX / w - 0.5;
+        pointerY = Math.min(1, e.clientY / h) - 0.5;
+      }, { passive: true });
+      addEventListener('scroll', () => { scrolled = Math.min(1, scrollY / h) / 2; }, { passive: true });
+    }
+
+    const draw = (now = 0) => {
+      // Seconds since the last frame, capped so a pause (hidden tab, open game) does not turn into a leap.
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      slideX += (-pointerX - slideX) * dt * 4;
+      slideY += (-pointerY - scrolled - slideY) * dt * 4;
       ctx.clearRect(0, 0, w, h);
       for (const p of ps) {
+        const x = p.x + slideX * p.d, y = p.y + slideY * p.d;
         ctx.fillStyle = `rgba(${p.c},${p.a})`;
         if (p.streak) {
-          ctx.fillRect(p.x, p.y, p.r, 40 + p.vy * 30);
+          ctx.fillRect(x, y, p.r, 40 + p.vy * 30);
         } else {
-          ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+          ctx.beginPath(); ctx.arc(x, y, p.r, 0, Math.PI * 2); ctx.fill();
         }
         if (!reduce) {
           p.y += p.vy;
           if (p.y > h + 60) Object.assign(p, make(-60));
         }
       }
+      // The skirmishes sit with the far layer.
+      scene?.frame(dt, slideX * depths[0], slideY * depths[0]);
       if (!reduce) raf = requestAnimationFrame(draw);
     };
 
@@ -79,6 +138,8 @@
     });
     resize(); start();
     addEventListener('resize', () => { resize(); if (reduce) draw(); }, { passive: true });
+    // The web fonts change how wide the copy is, so look again once they are in.
+    document.fonts.ready.then(place);
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) cancelAnimationFrame(raf); else start();
     });

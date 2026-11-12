@@ -8,7 +8,8 @@ export type Sfx =
   | 'key' | 'slip' | 'tick' | 'right' | 'wrong' | 'power' | 'repair' | 'jam'
   | 'capsule' | 'bomb' | 'blast'
   | 'warning' | 'lock' | 'core' | 'armOff' | 'bossDown' | 'fanfare' | 'escape' | 'laugh' | 'taunt'
-  | 'beam' | 'rocket' | 'nova' | 'shield' | 'shieldUp';
+  | 'beam' | 'rocket' | 'nova' | 'shield' | 'shieldUp'
+  | 'radio' | 'liftoff' | 'sonic';
 
 const STORE_KEY = 'gg-arcade-sound';
 /** Overall loudness. Each sound's own level below is a fraction of this. */
@@ -221,6 +222,22 @@ export class Sound {
         break;
       case 'shieldUp':
         tone('sine', 440, 880, 0.18, 0.035);
+        break;
+      case 'radio':
+        tone('square', 1250, 1250, 0.04, 0.016);
+        tone('square', 940, 940, 0.05, 0.016, 0.05);
+        break;
+      case 'liftoff':
+        // Three surges, each higher and louder than the last: engines winding up, then the climb.
+        [[55, 120, 300, 900, 0.05], [75, 180, 500, 1600, 0.065], [95, 260, 800, 3000, 0.08]].forEach(([from, to, low, high, level], i) => {
+          tone('sawtooth', from!, to!, 1.5, level! * 0.7, i * 1.15);
+          noise(1.5, level!, low!, high!, i * 1.15);
+        });
+        break;
+      case 'sonic':
+        noise(1.1, 0.22, 3000, 60);
+        tone('sine', 160, 30, 1, 0.16);
+        tone('triangle', 880, 220, 0.5, 0.045);
         break;
       case 'escape':
         tone('triangle', 392, 392, 0.14, 0.05);

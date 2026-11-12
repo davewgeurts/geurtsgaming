@@ -1,5 +1,6 @@
 /**
- * The two faces in the corners of the arcade demo: the pilot (top left) and the boss (top right).
+ * The faces of the arcade demo: the pilot (top left), the boss (top right), and the flight commander
+ * who briefs the pilot from the cockpit's comms screen before take-off.
  *
  * Each is a small wireframe head: a handful of points in 3D, joined by straight lines, turned a little
  * and flattened onto the screen. Turning the head is what makes plain line polygons read as solid.
@@ -8,7 +9,7 @@
  * game.ts decides the mood and which way each head is turned; this file only knows how to draw them.
  */
 export type Mood = 'calm' | 'worried' | 'happy' | 'hurt' | 'laugh' | 'talk' | 'out';
-export type Who = 'pilot' | 'boss';
+export type Who = 'pilot' | 'boss' | 'commander';
 
 type P3 = readonly [number, number, number];
 interface Line { pts: readonly P3[]; closed?: boolean }
@@ -55,6 +56,50 @@ const BOSS_HEAD: Line[] = [
   { pts: [[0, -0.82, FRONT], [0, -0.34, 0.68], [-0.1, -0.2, FRONT]] },
   { pts: [[0, -0.34, 0.68], [0.1, -0.2, FRONT]] },
 ];
+
+const COMMANDER_OUTLINE = [[-0.62, -0.6], [0.62, -0.6], [0.76, -0.08], [0.68, 0.5], [0.36, 0.92], [-0.36, 0.92], [-0.68, 0.5], [-0.76, -0.08]] as const;
+const CAP = [[-0.7, -0.6], [0.7, -0.6], [0.6, -1.06], [-0.6, -1.06]] as const;
+const COMMANDER_HEAD: Line[] = [
+  ...prism(COMMANDER_OUTLINE, 0.84),
+  // A peaked cap: the crown, its peak sticking out over the eyes, and a badge.
+  ...prism(CAP, 0.86),
+  { pts: [[-0.7, -0.6, FRONT], [-0.5, -0.47, 0.98], [0.5, -0.47, 0.98], [0.7, -0.6, FRONT]] },
+  { pts: [[0, -0.95, FRONT + 0.02], [0.1, -0.82, FRONT + 0.02], [0, -0.69, FRONT + 0.02], [-0.1, -0.82, FRONT + 0.02]], closed: true },
+  // A headset: an ear cup on each side and a microphone on a stalk.
+  ...both({ pts: [[0.78, -0.2, 0.2], [0.9, -0.2, 0], [0.9, 0.22, 0], [0.78, 0.22, 0.2]], closed: true }),
+  { pts: [[-0.8, 0.2, 0.15], [-0.62, 0.62, 0.66], [-0.34, 0.66, 0.74]] },
+  // Neck, shoulders, and a stripe on each shoulder.
+  { pts: [[-0.22, 0.92, 0.2], [-0.22, 1.2, 0]] },
+  { pts: [[0.22, 0.92, 0.2], [0.22, 1.2, 0]] },
+  { pts: [[-1.3, 1.62, 0], [-0.66, 1.2, 0], [0.66, 1.2, 0], [1.3, 1.62, 0]] },
+  ...both({ pts: [[0.74, 1.3, 0.02], [1.06, 1.5, 0.02]] }),
+];
+
+/** The commander: level brows, a moustache, and a mouth that moves when talking. */
+function commanderFace(mood: Mood, time: number): Line[] {
+  const ex = 0.33;
+  const ey = -0.14;
+  const my = 0.62;
+  const lines: Line[] = [...PILOT_NOSE];
+  if (mood === 'happy') {
+    lines.push(...both(flat([[ex - 0.13, ey + 0.04], [ex, ey - 0.08], [ex + 0.13, ey + 0.04]])));
+  } else if (time % 4.3 < 0.12) {
+    lines.push(...both(flat([[ex - 0.12, ey], [ex + 0.12, ey]])));
+  } else {
+    lines.push(...both(flat([[ex - 0.12, ey - 0.05], [ex + 0.12, ey - 0.05], [ex + 0.1, ey + 0.06], [ex - 0.1, ey + 0.06]], true)));
+  }
+  lines.push(...both(flat([[ex - 0.17, ey - 0.2], [ex + 0.17, ey - 0.2]])));
+  lines.push(flat([[-0.3, 0.44], [-0.12, 0.34], [0, 0.4], [0.12, 0.34], [0.3, 0.44]]));
+  if (mood === 'talk') {
+    const gape = 0.03 + 0.13 * Math.abs(Math.sin(time * 11));
+    lines.push(flat([[-0.16, my - 0.04], [0.16, my - 0.04], [0.11, my - 0.04 + gape], [-0.11, my - 0.04 + gape]], true));
+  } else if (mood === 'happy') {
+    lines.push(flat([[-0.24, my - 0.06], [-0.1, my + 0.05], [0.1, my + 0.05], [0.24, my - 0.06]]));
+  } else {
+    lines.push(flat([[-0.15, my], [0.15, my]]));
+  }
+  return lines;
+}
 
 const cross = (x: number, y: number, r: number): Line[] => [
   flat([[x - r, y - r], [x + r, y + r]]),
@@ -141,7 +186,10 @@ export function traceAvatar(
   mood: Mood,
   time: number,
 ): void {
-  const lines = layer === 'head' ? (who === 'pilot' ? PILOT_HEAD : BOSS_HEAD) : who === 'pilot' ? pilotFace(mood, time) : bossFace(mood, time);
+  const lines =
+    layer === 'head'
+      ? who === 'pilot' ? PILOT_HEAD : who === 'boss' ? BOSS_HEAD : COMMANDER_HEAD
+      : who === 'pilot' ? pilotFace(mood, time) : who === 'boss' ? bossFace(mood, time) : commanderFace(mood, time);
   const cy = Math.cos(yaw);
   const sy = Math.sin(yaw);
   const cp = Math.cos(pitch);
