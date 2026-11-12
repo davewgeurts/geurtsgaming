@@ -41,6 +41,16 @@ const DDB_SYNC_COALESCE_MS = 1_500;
 const VALID_CALLSIGN_RE = /^(NOVA|FALCON|VIPER|STAR|ORION|LYRA|VEGA|COMET|APEX|DRIFT|PULSE|SOLAR)-[1-9]$/;
 const SCORE_RATE_WINDOW_MS = 60_000;
 const SCORE_RATE_MAX = 10;
+const MAX_BODY_BYTES = 8_192;
+const RUN_LEDGER_TTL_MS = 2 * 60 * 60 * 1_000;
+const SHADOW_SCORE_TTL_MS = 24 * 60 * 60 * 1_000;
+const MAX_TRACKED_SESSIONS = 256;
+const MAX_SHADOW_SCORES = 64;
+const MIN_SECONDS_PER_CLEARED_WAVE = 16;
+const MAX_SCORE_BURST = 4_500;
+const MAX_SCORE_PER_SEC = 900;
+const ALLOWED_ORIGIN_RE =
+  /^https:\/\/(?:www\.)?(?:geurtsgaming\.com|exponentialblissmanifesto\.com|theloneliestday\.com)$|^http:\/\/(?:localhost|127\.0\.0\.1|[a-z0-9-]+\.localdev)(?::\d+)?$/i;
 const scoreRateByIp = new Map();
 
 
@@ -101,6 +111,9 @@ function createPresenceRoom(pkName, initialVisits = 108, initialHugs = 42, initi
   return {
     pk: pkName,
     activeSouls: new Map(),
+    knownSessions: new Map(),
+    runLedgers: new Map(),
+    shadowScores: new Map(),
     recentRipples: [],
     recentHugs: [],
     hugPins: createInitialPins(),
@@ -206,8 +219,9 @@ function clampCoordinate(value, min, max, fallback = 0) {
 function sanitizeFlightTelemetry(flight) {
   if (!flight || typeof flight !== 'object') return undefined;
   return {
+    runId: sanitize(flight.runId, 48) || undefined,
     wave: Math.round(clampCoordinate(flight.wave, 1, 99, 1)),
-    score: Math.round(clampCoordinate(flight.score, 0, 9_999_999, 0)),
+    score: Math.round(clampCoordinate(flight.score, 0, 99_999_999, 0)),
     freed: Math.round(clampCoordinate(flight.freed, 0, 99_999, 0)),
     x: Number(clampCoordinate(flight.x, 0, 1, 0.5).toFixed(4)),
     y: Number(clampCoordinate(flight.y, 0, 1, 0.8).toFixed(4)),
@@ -217,6 +231,142 @@ function sanitizeFlightTelemetry(flight) {
     weapon: sanitize(flight.weapon, 24) || 'blaster',
     firing: Boolean(flight.firing),
   };
+}
+
+/** Upper bound on cumulative points physically obtainable through `wave` across enemies, set pieces, capsules, and bosses. */
+function maxPlausibleScore(wave) {
+  const w = Math.max(1, Math.min(99, Math.floor(wave)));
+  return 12_000 * w + 300 * w * (w + 1);
+}
+
+/** Upper bound on people freed through `wave`. */
+function maxPlausibleFreed(wave) {
+  const w = Math.max(1, Math.min(99, Math.floor(wave)));
+  return w * 85;
+}
+
+function pruneBoundedMap(map, nowMs, ttlMs, maxEntries, getTs) {
+  for (const [k, v] of map.entries()) {
+    if (nowMs - getTs(v) > ttlMs) map.delete(k);
+  }
+  while (map.size > maxEntries) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey === undefined) break;
+    map.delete(oldestKey);
+  }
+}
+
+/**
+ * Advance the server-side flight ledger for a pilot on each `/presence` heartbeat.
+ * Flags `bad: true` if a run starts mid-game with a large score, jumps waves faster than waves can run,
+ * or spikes points faster than any boss + power-up burst in the game can award.
+ */
+function updateRunLedger(prevRun, flight, nowMs) {
+  const runId = flight.runId || 'default';
+  const wave = flight.wave;
+  const score = flight.score;
+  const freed = flight.freed;
+
+  if (!prevRun || prevRun.id !== runId) {
+    const badStart =
+      wave > 2 ||
+      score > (wave === 1 ? 6_000 : maxPlausibleScore(wave)) ||
+      freed > maxPlausibleFreed(wave);
+    return {
+      id: runId,
+      t0: nowMs,
+      w: wave,
+      s: score,
+      f: freed,
+      t: nowMs,
+      bad: badStart,
+    };
+  }
+
+  const dtSec = Math.max(0.5, (nowMs - prevRun.t) / 1_000);
+  const totalSec = Math.max(0.5, (nowMs - prevRun.t0) / 1_000);
+  const waveJumpLimit = Math.floor(dtSec / MIN_SECONDS_PER_CLEARED_WAVE) + 1;
+  const bad =
+    Boolean(prevRun.bad) ||
+    wave < prevRun.w ||
+    score < prevRun.s ||
+    wave - prevRun.w > waveJumpLimit ||
+    (wave >= 2 && totalSec < (wave - 1) * MIN_SECONDS_PER_CLEARED_WAVE) ||
+    score - prevRun.s > MAX_SCORE_BURST + dtSec * MAX_SCORE_PER_SEC ||
+    score > maxPlausibleScore(wave) ||
+    freed > maxPlausibleFreed(wave);
+
+  return {
+    id: runId,
+    t0: prevRun.t0,
+    w: wave,
+    s: score,
+    f: freed,
+    t: nowMs,
+    bad,
+  };
+}
+
+/**
+ * Decide whether a `/score` submission should be shadowbanned ("Mirage #1"): shown at Rank #1
+ * to the submitter alone while never touching the shared Top 10 leaderboard.
+ */
+function isSuspectScoreSubmission(room, sid, rawScore, rawWave, rawFreed, runId, nowMs) {
+  if (
+    !Number.isFinite(rawWave) ||
+    rawWave < 1 ||
+    rawWave > 99 ||
+    rawScore > maxPlausibleScore(rawWave) ||
+    !Number.isFinite(rawFreed) ||
+    rawFreed < 0 ||
+    rawFreed > maxPlausibleFreed(rawWave)
+  ) {
+    return true;
+  }
+
+  const ledger = sid ? room.runLedgers.get(sid) : undefined;
+  const hasSession = Boolean(sid && (room.knownSessions.has(sid) || room.activeSouls.has(sid)));
+  if (!hasSession && !ledger) {
+    // Cold API call with no active browser presence session.
+    return true;
+  }
+
+  if (ledger) {
+    if (ledger.bad) return true;
+    if (runId && ledger.id && runId !== ledger.id) return true;
+    const dtSec = Math.max(0.5, (nowMs - ledger.t) / 1_000);
+    const totalSec = Math.max(0.5, (nowMs - ledger.t0) / 1_000);
+    if (rawWave > ledger.w + 1) return true;
+    if (rawWave >= 2 && totalSec < (rawWave - 1) * MIN_SECONDS_PER_CLEARED_WAVE) return true;
+    if (rawScore - ledger.s > MAX_SCORE_BURST + dtSec * MAX_SCORE_PER_SEC) return true;
+    return false;
+  }
+
+  // No flight heartbeat arrived yet: only plausible if the pilot died right at the start of Wave 1.
+  return rawWave !== 1 || rawScore > 3_500;
+}
+
+function isAllowedOrigin(event) {
+  const origin = event.headers?.origin || event.headers?.Origin || '';
+  if (!origin) return true;
+  return ALLOWED_ORIGIN_RE.test(String(origin).trim());
+}
+
+function parseJsonBody(rawBody) {
+  if (rawBody === undefined || rawBody === null || rawBody === '') return { ok: true, value: {} };
+  if (typeof rawBody !== 'string') return { ok: false, statusCode: 400, error: 'Invalid request body' };
+  if (Buffer.byteLength(rawBody, 'utf8') > MAX_BODY_BYTES) {
+    return { ok: false, statusCode: 413, error: 'Payload too large' };
+  }
+  try {
+    const parsed = JSON.parse(rawBody);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, statusCode: 400, error: 'JSON body must be an object' };
+    }
+    return { ok: true, value: parsed };
+  } catch {
+    return { ok: false, statusCode: 400, error: 'Invalid JSON' };
+  }
 }
 
 function mergeTopPilots(existingPilots, incomingPilots) {
@@ -229,7 +379,7 @@ function mergeTopPilots(existingPilots, incomingPilots) {
       byCallsign.set(callsign, {
         id: sanitize(p.id || `${callsign}-${p.score}-${p.wave || 1}`, 64),
         callsign,
-        score: Math.round(clampCoordinate(p.score, 0, 9_999_999, 0)),
+        score: Math.round(clampCoordinate(p.score, 0, 99_999_999, 0)),
         wave: Math.round(clampCoordinate(p.wave, 1, 99, 1)),
         freed: Math.round(clampCoordinate(p.freed, 0, 99_999, 0)),
         color: sanitize(p.color, 32) || '#5ce1e6',
@@ -303,6 +453,16 @@ function mergeRemoteState(room, item, nowMs) {
         if (!existing || s.lastSeen > existing.lastSeen) {
           room.activeSouls.set(s.sid, s);
         }
+        room.knownSessions.set(s.sid, s.lastSeen || nowMs);
+        if (s.run && typeof s.run === 'object') {
+          const prevLedger = room.runLedgers.get(s.sid);
+          if (!prevLedger || (s.run.t || 0) >= (prevLedger.t || 0)) {
+            room.runLedgers.set(s.sid, {
+              ...s.run,
+              bad: Boolean(prevLedger?.bad || s.run.bad),
+            });
+          }
+        }
       }
     }
   }
@@ -356,6 +516,10 @@ export async function handler(event) {
     return { statusCode: 204, headers: {}, body: '' };
   }
 
+  if (method === 'POST' && !isAllowedOrigin(event)) {
+    return respond(403, { ok: false, error: 'Origin not allowed' });
+  }
+
   try {
     if (method === 'GET' && path === '/health') {
       const room = getRoom(querySite || DEFAULT_SITE);
@@ -372,7 +536,14 @@ export async function handler(event) {
       (method === 'GET' || method === 'POST') &&
       (path === '/presence' || path === '/loneliest-presence')
     ) {
-      const body = method === 'POST' ? JSON.parse(event.body || '{}') : {};
+      let body = {};
+      if (method === 'POST') {
+        const parsedBody = parseJsonBody(event.body);
+        if (!parsedBody.ok) {
+          return respond(parsedBody.statusCode, { ok: false, error: parsedBody.error });
+        }
+        body = parsedBody.value;
+      }
       const siteKey =
         path === '/loneliest-presence'
           ? 'theloneliestday'
@@ -437,9 +608,33 @@ export async function handler(event) {
         const persona = sanitize(body.persona, 64) || undefined;
         const flight = sanitizeFlightTelemetry(body.flight);
 
+        pruneBoundedMap(room.knownSessions, nowMs, RUN_LEDGER_TTL_MS, MAX_TRACKED_SESSIONS, (ts) => ts);
+        pruneBoundedMap(room.runLedgers, nowMs, RUN_LEDGER_TTL_MS, MAX_TRACKED_SESSIONS, (r) => r.t || 0);
+        pruneBoundedMap(room.shadowScores, nowMs, SHADOW_SCORE_TTL_MS, MAX_SHADOW_SCORES, (s) => s.ts || 0);
+
         if (isLeaving) {
           room.activeSouls.delete(sid);
         } else {
+          room.knownSessions.set(sid, nowMs);
+          let nextRun = room.runLedgers.get(sid);
+          if (flight) {
+            nextRun = updateRunLedger(nextRun, flight, nowMs);
+            room.runLedgers.set(sid, nextRun);
+          }
+          const publicFlight = flight
+            ? {
+                wave: flight.wave,
+                score: flight.score,
+                freed: flight.freed,
+                x: flight.x,
+                y: flight.y,
+                vx: flight.vx,
+                vy: flight.vy,
+                hull: flight.hull,
+                weapon: flight.weapon,
+                firing: flight.firing,
+              }
+            : undefined;
           room.activeSouls.set(sid, {
             sid,
             region,
@@ -448,7 +643,8 @@ export async function handler(event) {
             color,
             chapter,
             persona,
-            flight,
+            flight: publicFlight,
+            run: nextRun,
             lastSeen: nowMs,
           });
         }
@@ -600,16 +796,26 @@ export async function handler(event) {
         .slice(-MAX_RECENT_EVENTS);
       const hugPins = getSortedHugPins(room);
 
+      const callerShadow = incomingSid ? room.shadowScores.get(incomingSid) : undefined;
+      const visibleTopPilots =
+        callerShadow && nowMs - callerShadow.ts <= SHADOW_SCORE_TTL_MS
+          ? mergeTopPilots(room.topPilots, [callerShadow.entry])
+          : room.topPilots;
+      const visibleTotalLiberated =
+        callerShadow && nowMs - callerShadow.ts <= SHADOW_SCORE_TTL_MS
+          ? room.cachedTotalLiberated + (callerShadow.entry.freed || 0)
+          : room.cachedTotalLiberated;
+
       return respond(200, {
         ok: true,
         activeCount: room.activeSouls.size,
         activeSouls,
         wingmen,
-        topPilots: room.topPilots,
+        topPilots: visibleTopPilots,
         totalVisits: room.cachedTotalVisits,
         dayVisits: room.cachedDayVisits,
         totalHugs: room.cachedTotalHugs,
-        totalLiberated: room.cachedTotalLiberated,
+        totalLiberated: visibleTotalLiberated,
         recentRipples,
         recentHugs,
         hugPins,
@@ -626,7 +832,11 @@ export async function handler(event) {
     }
 
     if (method === 'POST' && (path === '/score' || path === '/leaderboard')) {
-      const body = JSON.parse(event.body || '{}');
+      const parsedBody = parseJsonBody(event.body);
+      if (!parsedBody.ok) {
+        return respond(parsedBody.statusCode, { ok: false, error: parsedBody.error });
+      }
+      const body = parsedBody.value;
       const room = getRoom(querySite || body.siteId || body.site || 'geurtsgaming');
       const nowMs = Date.now();
 
@@ -652,33 +862,83 @@ export async function handler(event) {
           error: 'Invalid callsign format',
         });
       }
-      const wave = Math.round(clampCoordinate(body.wave, 1, 99, 1));
-      const maxPlausibleScore = wave * 25_000 + 15_000;
-      const score = Math.round(
-        clampCoordinate(body.score, 0, maxPlausibleScore, 0)
-      );
-      const freed = Math.round(clampCoordinate(body.freed, 0, wave * 60, 0));
-      const color = sanitize(body.color, 32) || '#5ce1e6';
 
-      if (score <= 0) {
+      const rawScore = Number(body.score);
+      const rawWave = body.wave === undefined ? 1 : Number(body.wave);
+      const rawFreed = body.freed === undefined ? 0 : Number(body.freed);
+      if (!Number.isFinite(rawScore) || Math.floor(rawScore) <= 0) {
         return respond(400, {
           ok: false,
           error: 'Score must be greater than 0',
         });
       }
 
+      const sid = sanitize(body.sid || body.userId, 64);
+      const runId = sanitize(body.runId, 48);
+      const color = sanitize(body.color, 32) || '#5ce1e6';
+
+      if (ddb) {
+        try {
+          const metaRes = await ddb.send(
+            new GetCommand({
+              TableName: TABLE,
+              Key: { pk: room.pk, sk: 'COUNTS' },
+            })
+          );
+          mergeRemoteState(room, metaRes.Item, nowMs);
+        } catch {
+          // Offline / local Docker fallback
+        }
+      }
+
+      const suspect = isSuspectScoreSubmission(
+        room,
+        sid,
+        rawScore,
+        rawWave,
+        rawFreed,
+        runId,
+        nowMs
+      );
+
+      // Clear the finished run ledger so the same run cannot be submitted repeatedly.
+      if (sid) {
+        room.runLedgers.delete(sid);
+        const activeSoul = room.activeSouls.get(sid);
+        if (activeSoul) activeSoul.run = undefined;
+      }
+
       const entryId = `${nowMs}-${Math.random().toString(36).slice(2, 7)}`;
       const candidate = {
         id: entryId,
         callsign,
-        score,
-        wave,
-        freed,
+        score: Math.round(clampCoordinate(rawScore, 1, 99_999_999, 1)),
+        wave: Math.round(clampCoordinate(rawWave, 1, 99, 1)),
+        freed: Math.round(clampCoordinate(rawFreed, 0, 99_999, 0)),
         color,
         ts: nowMs,
       };
 
-      room.cachedTotalLiberated += freed;
+      if (suspect) {
+        // Mirage #1 shadowban: show the submitter at #1 on their own screen without touching the real board.
+        pruneBoundedMap(room.shadowScores, nowMs, SHADOW_SCORE_TTL_MS, MAX_SHADOW_SCORES, (s) => s.ts || 0);
+        if (sid) {
+          room.shadowScores.set(sid, { entry: candidate, ts: nowMs });
+        }
+        const miragePilots = mergeTopPilots(room.topPilots, [candidate]);
+        const mirageIdx = miragePilots.findIndex((p) => p.id === entryId || (p.callsign === callsign && p.score === candidate.score));
+        return respond(200, {
+          ok: true,
+          qualified: mirageIdx !== -1,
+          rank: mirageIdx !== -1 ? mirageIdx + 1 : null,
+          entry: candidate,
+          topPilots: miragePilots,
+          totalLiberated: room.cachedTotalLiberated + candidate.freed,
+        });
+      }
+
+      if (sid) room.shadowScores.delete(sid);
+      room.cachedTotalLiberated += candidate.freed;
       room.topPilots = mergeTopPilots(room.topPilots, [candidate]);
 
       if (ddb) {
@@ -799,7 +1059,11 @@ export async function handler(event) {
     }
 
     if (method === 'POST' && path === '/pledge') {
-      const body = JSON.parse(event.body || '{}');
+      const parsedBody = parseJsonBody(event.body);
+      if (!parsedBody.ok) {
+        return respond(parsedBody.statusCode, { error: parsedBody.error });
+      }
+      const body = parsedBody.value;
       const type = body.type;
       if (!['signature', 'wealth_pledge', 'beneficiary'].includes(type)) {
         return respond(400, { error: 'Invalid pledge type' });

@@ -23,6 +23,7 @@ export interface PilotScore {
 
 export interface WingmanTelemetry {
   id?: string;
+  runId?: string;
   callsign: string;
   wave: number;
   score: number;
@@ -183,6 +184,10 @@ export class MultiplayerClient {
   private serverBoard: 'unknown' | 'ready' | 'shared' = 'unknown';
   private fastPolling = false;
   private lastPollMs = 0;
+  private pendingPresence: Promise<void> | null = null;
+  private runId: string | null = null;
+  private runWave = 0;
+  private runScore = 0;
   /**
    * Where this pilot is flying now. It goes out with every heartbeat while a wave is on, so that the server
    * never hears from a pilot in flight without hearing where they are (it forgets a position it is not sent).
@@ -504,11 +509,22 @@ export class MultiplayerClient {
 
   async pollPresence(flight: Omit<WingmanTelemetry, 'callsign'> | null = this.flight): Promise<void> {
     if (typeof fetch === 'undefined' || !this.apiBase) return;
+    const task = this.doPollPresence(flight);
+    this.pendingPresence = task;
+    try {
+      await task;
+    } finally {
+      if (this.pendingPresence === task) this.pendingPresence = null;
+    }
+  }
+
+  private async doPollPresence(flight: Omit<WingmanTelemetry, 'callsign'> | null): Promise<void> {
     this.lastPollMs = Date.now();
     this.hasPolled = true;
     const chapter = flight
       ? `gg:${flight.wave}:${flight.x.toFixed(3)}:${flight.y.toFixed(3)}:${flight.firing ? 1 : 0}:${Math.round(flight.score)}:${Math.round(flight.freed)}`
       : 'geurtsgaming';
+    const activeRunId = flight?.runId ?? this.runId ?? undefined;
     // `site: 'theloneliestday'` keeps the v1 shared Lambda from putting game pilots into
     // exponentialblissmanifesto.com's default `META` room, while `siteId` + `?site=geurtsgaming`
     // route the v2 Lambda to `SITE#geurtsgaming`.
@@ -520,7 +536,15 @@ export class MultiplayerClient {
       persona: this.callsign,
       callsign: this.callsign,
       chapter,
-      ...(flight ? { flight: { ...flight, callsign: this.callsign } } : {}),
+      ...(flight
+        ? {
+            flight: {
+              ...flight,
+              ...(activeRunId ? { runId: activeRunId } : {}),
+              callsign: this.callsign,
+            },
+          }
+        : {}),
     });
 
     try {
@@ -671,6 +695,10 @@ export class MultiplayerClient {
 
   /** Record a finished run's score locally and submit it to the global Top 10 leaderboard. */
   recordScore(score: number, wave: number, freed: number): number | null {
+    const finishedRunId = this.runId;
+    this.runId = null;
+    this.runWave = 0;
+    this.runScore = 0;
     this.totalLiberated += Math.max(0, Math.floor(freed));
     if (score <= 0) return null;
     const entry: PilotScore = {
@@ -687,20 +715,28 @@ export class MultiplayerClient {
     this.notify();
 
     if (typeof fetch !== 'undefined' && this.apiBase && this.serverBoard !== 'shared') {
-      void fetch(this.endpoint('/score'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          site: this.siteId,
-          siteId: this.siteId,
-          sid: this.userId,
-          userId: this.userId,
-          callsign: entry.callsign,
-          score: entry.score,
-          wave: entry.wave,
-          freed: entry.freed,
-        }),
-      })
+      const waitPresence = this.pendingPresence ?? Promise.resolve();
+      void waitPresence
+        .catch(() => {
+          /* ignore */
+        })
+        .then(() =>
+          fetch(this.endpoint('/score'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              site: this.siteId,
+              siteId: this.siteId,
+              sid: this.userId,
+              userId: this.userId,
+              ...(finishedRunId ? { runId: finishedRunId } : {}),
+              callsign: entry.callsign,
+              score: entry.score,
+              wave: entry.wave,
+              freed: entry.freed,
+            }),
+          }),
+        )
         .then(async (res) => {
           if (!res.ok) return;
           const data = (await res.json()) as {
@@ -744,7 +780,13 @@ export class MultiplayerClient {
 
     // Keep the position that goes out with each heartbeat up to date while flying in a wave.
     if (opts.active && opts.w > 0 && opts.h > 0) {
+      if (!this.runId || opts.wave < this.runWave || opts.score < this.runScore) {
+        this.runId = `run-${Math.random().toString(36).slice(2, 10)}`;
+      }
+      this.runWave = opts.wave;
+      this.runScore = opts.score;
       const f = (this.flight ??= { wave: 1, score: 0, freed: 0, x: 0.5, y: 0.8, vx: 0, vy: 0, hull: 0, weapon: 'cannon', firing: false });
+      f.runId = this.runId;
       f.wave = opts.wave;
       f.score = opts.score;
       f.freed = opts.freed;

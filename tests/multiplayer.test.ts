@@ -168,4 +168,79 @@ describe('Multiplayer, Top 10 Pilots Leaderboard, and Wingmen', () => {
       globalThis.fetch = origFetch;
     }
   });
+
+  it('tracks live runId across heartbeats and shadowbans forged scores to Mirage #1 only for the cheater', async () => {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      const query: Record<string, string> = {};
+      url.searchParams.forEach((v, k) => {
+        query[k] = v;
+      });
+      const res = await handler({
+        requestContext: { http: { method: init?.method || 'GET', path: url.pathname } },
+        rawPath: url.pathname,
+        queryStringParameters: query,
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      return new Response(res.body, {
+        status: res.statusCode,
+        headers: res.headers,
+      });
+    }) as typeof fetch;
+
+    const settle = () => new Promise((done) => setTimeout(done, 20));
+    try {
+      const honest = new MultiplayerClient('http://localhost:84/api');
+      const cheater = new MultiplayerClient('http://localhost:84/api');
+      // Ensure distinct callsigns between the two clients
+      while (cheater.getCallsign() === honest.getCallsign()) {
+        cheater.cycleCallsign();
+      }
+
+      // Honest pilot flies Wave 1, sends heartbeat, and records a real score
+      honest.updateFlight(0.05, {
+        active: true,
+        w: 800,
+        h: 600,
+        scale: 1,
+        pace: 1,
+        shipX: 400,
+        shipY: 500,
+        wave: 1,
+        score: 2800,
+        freed: 14,
+        hull: 3,
+        firing: true,
+        enemies: [],
+      });
+      await honest.pollPresence();
+      honest.recordScore(4200, 1, 19);
+      await settle();
+
+      // Cheater opens site and submits 500,000 points on Wave 1
+      await cheater.pollPresence();
+      cheater.recordScore(500_000, 1, 500);
+      await settle();
+
+      // Cheater sees themselves at #1 on their own board, even after subsequent /presence polls
+      await cheater.pollPresence();
+      assert.equal(cheater.snapshot().topPilots[0]?.callsign, cheater.getCallsign());
+      assert.equal(cheater.snapshot().topPilots[0]?.score, 500_000);
+      assert.equal(cheater.snapshot().lastRank, 1);
+
+      // Honest pilot polling /presence sees ONLY real scores (never the 500,000 mirage)
+      await honest.pollPresence();
+      assert.ok(
+        honest.snapshot().topPilots.some((p) => p.callsign === honest.getCallsign() && p.score === 4200),
+        'honest pilot appears on the real shared leaderboard',
+      );
+      assert.ok(
+        !honest.snapshot().topPilots.some((p) => p.callsign === cheater.getCallsign()),
+        'shadowbanned cheater never appears on another player\'s leaderboard',
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });

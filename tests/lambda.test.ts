@@ -3,9 +3,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { handler } from '../lambda/index.mjs';
 
-function makeEvent(method: string, path: string, body?: unknown, query?: Record<string, string>) {
+function makeEvent(
+  method: string,
+  path: string,
+  body?: unknown,
+  query?: Record<string, string>,
+  headers?: Record<string, string>,
+) {
   return {
     rawPath: path,
+    headers: headers ?? {},
     queryStringParameters: query ?? {},
     requestContext: {
       http: {
@@ -13,7 +20,7 @@ function makeEvent(method: string, path: string, body?: unknown, query?: Record<
         path,
       },
     },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: typeof body === 'string' ? body : body !== undefined ? JSON.stringify(body) : undefined,
   };
 }
 
@@ -89,46 +96,136 @@ test('presence heartbeat tracks active pilots, wingman flight telemetry, hugs, a
   assert.equal(wingman.flight.weapon, 'laser');
 });
 
-test('score submission updates Top 10 leaderboard, sorts descending, validates callsigns, and clamps implausible scores', async () => {
+test('verified flight runs update the real Top 10 leaderboard, while cheaters only see a Mirage #1 board', async () => {
   const invalidRes = await handler(
     makeEvent('POST', '/score', {
       callsign: 'maverick',
-      score: 21500,
-      wave: 8,
-      freed: 72,
+      score: 6500,
+      wave: 1,
+      freed: 24,
     }),
   );
   assert.equal(invalidRes.statusCode, 400, 'rejects arbitrary free-text callsigns');
 
-  const scoreRes = await handler(
+  // 1. A real pilot flies Wave 1 via /presence heartbeats and finishes with a plausible score.
+  await handler(
+    makeEvent('POST', '/presence', {
+      sid: 'pilot-honest-1',
+      persona: 'NOVA-7',
+      flight: { runId: 'run-honest-1', wave: 1, score: 3200, freed: 18, x: 0.5, y: 0.8, firing: true },
+    }),
+  );
+
+  const honestScoreRes = await handler(
     makeEvent('POST', '/score', {
+      sid: 'pilot-honest-1',
+      runId: 'run-honest-1',
       callsign: 'NOVA-7',
-      score: 21500,
-      wave: 8,
-      freed: 72,
+      score: 6400,
+      wave: 1,
+      freed: 28,
       color: '#ffe066',
     }),
   );
 
-  assert.equal(scoreRes.statusCode, 200);
-  const data = JSON.parse(scoreRes.body);
-  assert.equal(data.ok, true);
-  assert.equal(data.qualified, true);
-  assert.equal(data.rank, 1);
-  assert.equal(data.topPilots.length, 1, 'the board starts empty, so this is the only score on it');
-  assert.equal(data.topPilots[0].callsign, 'NOVA-7');
-  assert.equal(data.topPilots[0].score, 21500);
+  assert.equal(honestScoreRes.statusCode, 200);
+  const honestData = JSON.parse(honestScoreRes.body);
+  assert.equal(honestData.ok, true);
+  assert.equal(honestData.qualified, true);
+  assert.equal(honestData.rank, 1);
+  assert.equal(honestData.topPilots.length, 1, 'the board starts empty, so this honest run is the only score on it');
+  assert.equal(honestData.topPilots[0].callsign, 'NOVA-7');
+  assert.equal(honestData.topPilots[0].score, 6400);
 
-  // Verify wave-based anti-cheat score clamp (wave 1 max is 40,000)
-  const clampedRes = await handler(
+  // 2. Cold API submission (no /presence flight history) gets Mirage #1 in their own response,
+  //    but is absent from GET /leaderboard and other players' /presence responses.
+  const coldCurlRes = await handler(
     makeEvent('POST', '/score', {
+      sid: 'pilot-curl-bot',
+      callsign: 'VIPER-9',
+      score: 9500,
+      wave: 1,
+      freed: 30,
+    }),
+  );
+  assert.equal(coldCurlRes.statusCode, 200);
+  const coldData = JSON.parse(coldCurlRes.body);
+  assert.equal(coldData.rank, 1, 'cheater is told they ranked #1');
+  assert.equal(coldData.topPilots[0].callsign, 'VIPER-9');
+
+  // 3. DevTools point spike (+9,999,999 on Wave 1) also gets Mirage #1 only for that cheater's sid.
+  await handler(
+    makeEvent('POST', '/presence', {
+      sid: 'pilot-cheater-2',
+      persona: 'FALCON-3',
+      flight: { runId: 'run-cheat-2', wave: 1, score: 400, freed: 2, x: 0.5, y: 0.8, firing: false },
+    }),
+  );
+  const spikeRes = await handler(
+    makeEvent('POST', '/score', {
+      sid: 'pilot-cheater-2',
+      runId: 'run-cheat-2',
       callsign: 'FALCON-3',
       score: 9999999,
       wave: 1,
       freed: 9999,
     }),
   );
-  const clampedData = JSON.parse(clampedRes.body);
-  assert.equal(clampedData.entry.score, 40000);
-  assert.equal(clampedData.entry.freed, 60);
+  assert.equal(spikeRes.statusCode, 200);
+  const spikeData = JSON.parse(spikeRes.body);
+  assert.equal(spikeData.rank, 1, 'cheater sees their huge fake score at #1');
+  assert.equal(spikeData.topPilots[0].callsign, 'FALCON-3');
+  assert.equal(spikeData.topPilots[0].score, 9999999);
+
+  // When the cheater polls /presence, they STILL see themselves at #1 so the illusion holds.
+  const cheaterPresence = JSON.parse(
+    (await handler(makeEvent('POST', '/presence', { sid: 'pilot-cheater-2', persona: 'FALCON-3' }))).body,
+  );
+  assert.equal(cheaterPresence.topPilots[0].callsign, 'FALCON-3');
+
+  // Meanwhile, the real public leaderboard and honest pilots ONLY ever see NOVA-7!
+  const realBoard = JSON.parse((await handler(makeEvent('GET', '/leaderboard'))).body);
+  assert.deepEqual(
+    realBoard.topPilots.map((p: { callsign: string; score: number }) => [p.callsign, p.score]),
+    [['NOVA-7', 6400]],
+    'neither cold-curl nor score-spike cheaters appear on the real leaderboard',
+  );
+  assert.equal(realBoard.totalLiberated, 28);
+
+  const honestPresence = JSON.parse(
+    (await handler(makeEvent('POST', '/presence', { sid: 'pilot-honest-1', persona: 'NOVA-7' }))).body,
+  );
+  assert.deepEqual(
+    honestPresence.topPilots.map((p: { callsign: string }) => p.callsign),
+    ['NOVA-7'],
+    'other players polling /presence never see shadowbanned scores',
+  );
+});
+
+test('origin allowlist and request body size cap block untrusted cross-site and oversized POSTs', async () => {
+  const evilOriginRes = await handler(
+    makeEvent(
+      'POST',
+      '/score',
+      { callsign: 'NOVA-7', score: 1200, wave: 1, freed: 5 },
+      {},
+      { origin: 'https://evil-cheats.example.com' },
+    ),
+  );
+  assert.equal(evilOriginRes.statusCode, 403);
+
+  const goodOriginRes = await handler(
+    makeEvent(
+      'POST',
+      '/presence',
+      { sid: 'pilot-origin-ok', persona: 'LYRA-2' },
+      { site: 'geurtsgaming' },
+      { origin: 'https://geurtsgaming.com' },
+    ),
+  );
+  assert.equal(goodOriginRes.statusCode, 200);
+
+  const hugeBody = JSON.stringify({ sid: 'pilot-big', pad: 'x'.repeat(10_000) });
+  const oversizedRes = await handler(makeEvent('POST', '/presence', hugeBody));
+  assert.equal(oversizedRes.statusCode, 413);
 });
