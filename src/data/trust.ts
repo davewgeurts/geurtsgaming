@@ -4,7 +4,7 @@
  */
 export const trust = {
   /** When the three pages were last revised. */
-  updated: '12 November 2026',
+  updated: '13 November 2026',
   email: 'hello@geurtsgaming.com',
   /**
    * The SOC 2 examination. Fill these in from the report itself: 'Type 1' or 'Type 2', the firm that

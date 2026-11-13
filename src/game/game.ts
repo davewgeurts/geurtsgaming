@@ -30,7 +30,7 @@ import { Backdrop } from './backdrop';
 import { bossParts, createBoss, shootBoss, tapBoss, touchesBoss, updateBoss, type Boss, type BossEnv, type Hit } from './boss';
 import { choose } from './challenge';
 import type { CoopFlightDirector, CoopWorldAdapter } from './coop-flight';
-import { NEON, PEBBLE, PINK, ROCK, SAND, clamp, pick, rand, strokeInk, type Ink } from './core';
+import { NEON, PEBBLE, ROCK, SAND, clamp, pick, rand, strokeInk, type Ink } from './core';
 import { KINDS, buildWavePlan, renderEnemies, spawnEnemy, spawnX, splitShards, updateEnemies, type Enemy, type Spawn } from './enemies';
 import { Fireworks, renderFireworks, type Grade } from './fireworks';
 import { textWidth, traceText } from './font';
@@ -43,11 +43,12 @@ import {
 import { Input, boxAt } from './input';
 import { Intro, type IntroCue, type IntroView } from './intro';
 import { TAUNTS, type Taunt } from './lines';
+import { DEFAULT_LOADOUT, SHIP_BY_ID, THEME_BY_ID, loadSavedLoadout, type PilotLoadout } from './loadout';
 import { makeProblem } from './maths';
 import { MultiplayerClient, renderWingmen } from './multiplayer';
 import { GRADE_BANDS, Questions, STAKES, sumLevel, type GradeBand, type QuestionEnv, type Reward } from './questions';
 import { SetPieces, type SetPieceEnv } from './setpieces';
-import { CAPSULE, FRIEND, MINE, SHIP, trace, type Shape } from './shapes';
+import { CAPSULE, FRIEND, MINE, shipShape, trace, traceShipThrusters, type Shape } from './shapes';
 import { Sound, type Sfx } from './sound';
 import { UPGRADES, type UpgradeId } from './upgrades';
 import { Voice } from './voice';
@@ -102,6 +103,8 @@ export interface GameOptions {
   multiplayer?: MultiplayerClient;
   /** Called when the Top 10 Pilots leaderboard overlay is shown or hidden. */
   onLeaderboard?: (open: boolean) => void;
+  /** Called when the Solo Hangar customiser button should be shown/hidden or highlighted. */
+  onHangar?: (available: boolean, active: boolean) => void;
   /** Optional Co-op Squad session (`Phase 2`: shared `768 x 1024` 4-ship flight, lazy-loaded by HeroGame). */
   coop?: {
     director: CoopFlightDirector;
@@ -236,6 +239,9 @@ export class Game {
   private readonly coopAdapter: CoopWorldAdapter;
   private coopHiddenSec = 0;
   private showLeaderboard = false;
+  private loadout: PilotLoadout = { ...DEFAULT_LOADOUT };
+  private lastHangarAvail: boolean | null = null;
+  private lastHangarActive: boolean | null = null;
 
   constructor(canvas: HTMLCanvasElement, opts: GameOptions) {
     this.canvas = canvas;
@@ -357,12 +363,19 @@ export class Game {
         !this.paused &&
         (this.coop
           ? this.coop.wantsKey(key)
-          : this.picking
-            ? key >= '1' && key <= String(GRADE_BANDS.length)
-            : this.questions.wants(key)),
+          : this.state === 'ready' && !this.showLeaderboard && Boolean(this.intro?.wantsKey(key))
+            ? true
+            : this.picking
+              ? key >= '1' && key <= String(GRADE_BANDS.length)
+              : this.questions.wants(key)),
       type: (key) => {
         if (this.coop) {
           this.coop.typeKey(key, this.coopAdapter);
+          return;
+        }
+        if (this.state === 'ready' && !this.showLeaderboard && this.intro?.wantsKey(key)) {
+          this.intro.typeKey(key);
+          this.syncHangarButton();
           return;
         }
         if (this.picking) this.chooseGrade(Number(key) - 1);
@@ -397,6 +410,9 @@ export class Game {
     } catch {
       /* storage can be blocked; the game works without a saved best */
     }
+    const savedLoadout = loadSavedLoadout();
+    if (savedLoadout) this.loadout = savedLoadout;
+    this.hull = this.maxHull;
 
     this.resize();
     this.shipScale = 1.15 * this.scale;
@@ -406,17 +422,39 @@ export class Game {
       this.intro = null;
       this.warp = 3.2;
       this.beginCoop();
+      this.syncHangarButton();
     } else {
-      // The game opens in the cockpit; the ship itself is out of sight below the screen until it has taken off.
-      this.intro = new Intro(this.reduceMotion, this.onIntroCue, {
-        say: (text) => this.voice.say('commander', text),
-        busy: () => this.voice.busy,
-      });
+      // The game opens in the hangar and cockpit; the ship itself is out of sight below the screen until it has taken off.
+      let announcedByPicker = false;
+      this.intro = new Intro(
+        this.reduceMotion,
+        this.onIntroCue,
+        {
+          say: (text) => this.voice.say('commander', text),
+          busy: () => this.voice.busy,
+        },
+        {
+          onLoadoutChange: (next) => {
+            this.loadout = { ...next };
+            this.hull = this.maxHull;
+          },
+          onAnnounce: (msg) => {
+            announcedByPicker = true;
+            opts.onStatus?.(msg);
+          },
+        },
+      );
+      this.loadout = { ...this.intro.loadout };
+      this.hull = this.maxHull;
       this.ship.x = this.homeX;
       this.ship.y = this.h + 80;
-      opts.onStatus?.(Intro.script(this.input.mode === 'touch', !this.reduceMotion));
+      if (!announcedByPicker) {
+        opts.onStatus?.(Intro.script(this.input.mode === 'touch', !this.reduceMotion, this.intro.isPickingLoadout));
+      }
+      this.syncHangarButton();
     }
 
+    canvas.addEventListener('pointermove', this.onCanvasHover);
     addEventListener('resize', this.resize);
     document.addEventListener('visibilitychange', this.onVisibility);
 
@@ -463,6 +501,7 @@ export class Game {
     this.sound.dispose();
     this.voice.dispose();
     this.input.detach();
+    this.canvas.removeEventListener('pointermove', this.onCanvasHover);
     removeEventListener('resize', this.resize);
     document.removeEventListener('visibilitychange', this.onVisibility);
   }
@@ -473,6 +512,86 @@ export class Game {
 
   get isLeaderboardOpen(): boolean {
     return this.showLeaderboard;
+  }
+
+  private syncHangarButton(): void {
+    const available =
+      !this.coop &&
+      ((this.state === 'ready' && this.intro?.phase !== 'launch') || this.paused || this.state === 'over');
+    const active = Boolean(!this.coop && this.state === 'ready' && this.intro?.isPickingLoadout);
+    if (available === this.lastHangarAvail && active === this.lastHangarActive) return;
+    this.lastHangarAvail = available;
+    this.lastHangarActive = active;
+    this.opts.onHangar?.(available, active);
+  }
+
+  /**
+   * Open the Solo 3-step Hangar customiser (from Hangar boarding, Cockpit briefing, Pause or Game Over).
+   * If the customiser is already open, pressing the Hangar button again commits the current selection (`quickFly`).
+   */
+  openHangarCustomizer(): boolean {
+    if (this.coop || (this.state === 'ready' && this.intro?.phase === 'launch')) return false;
+    if (this.state === 'ready' && this.intro?.isPickingLoadout) {
+      this.intro.quickFly();
+      this.loadout = { ...this.intro.loadout };
+      this.hull = this.maxHull;
+      this.syncHangarButton();
+      return true;
+    }
+    if (this.state === 'playing') {
+      this.saveBest();
+      this.mp.rest();
+    }
+    if (this.paused) {
+      this.paused = false;
+      this.opts.onPause?.(false);
+    }
+    if (this.showLeaderboard) {
+      this.showLeaderboard = false;
+      this.opts.onLeaderboard?.(false);
+    }
+    this.voice.hush();
+    this.input.drop();
+    this.enemies = [];
+    this.shots = [];
+    this.pickups = [];
+    this.mines = [];
+    this.rockets = [];
+    this.beams = [];
+    this.rings = [];
+    this.souls = [];
+    this.boss = null;
+    this.sets.reset();
+    this.questions.prompt = null;
+    this.questions.brk = null;
+    this.picking = false;
+
+    if (!this.intro) {
+      this.intro = new Intro(
+        this.reduceMotion,
+        this.onIntroCue,
+        {
+          say: (text) => this.voice.say('commander', text),
+          busy: () => this.voice.busy,
+        },
+        {
+          onLoadoutChange: (next) => {
+            this.loadout = { ...next };
+            this.hull = this.maxHull;
+          },
+          onAnnounce: (msg) => this.opts.onStatus?.(msg),
+        },
+      );
+    }
+    this.intro.openCustomizer();
+    this.loadout = { ...this.intro.loadout };
+    this.hull = this.maxHull;
+    this.ship.x = this.homeX;
+    this.ship.y = this.h + 80;
+    this.warp = 1;
+    this.setState('ready');
+    this.syncHangarButton();
+    return true;
   }
 
   /** Toggle the Top 10 Pilots leaderboard overlay (pausing first if currently flying). */
@@ -514,6 +633,7 @@ export class Game {
     }
     this.opts.onPause?.(on);
     this.opts.onStatus?.(on ? 'Paused.' : 'Resumed.');
+    this.syncHangarButton();
   }
 
   get soundOn(): boolean {
@@ -532,8 +652,9 @@ export class Game {
       if (seat !== -1) {
         return this.coop.pilots[seat].maxHull;
       }
+      return MAX_HULL + (this.upgrades.has('armour') ? 1 : 0);
     }
-    return MAX_HULL + (this.upgrades.has('armour') ? 1 : 0);
+    return SHIP_BY_ID[this.loadout.ship].baseHull + (this.upgrades.has('armour') ? 1 : 0);
   }
 
   // ----------------------------------------------------------------- faces
@@ -694,6 +815,20 @@ export class Game {
       this.toggleLeaderboard();
       return true;
     }
+    if (code === 'KeyH' && !this.showLeaderboard && (this.paused || this.state === 'over' || this.state === 'ready')) {
+      if (this.state === 'ready' && this.intro) {
+        const handled = this.intro.command('KeyH');
+        this.loadout = { ...this.intro.loadout };
+        this.hull = this.maxHull;
+        this.syncHangarButton();
+        return handled;
+      }
+      return this.openHangarCustomizer();
+    }
+    if (!this.showLeaderboard && !this.paused && this.state === 'ready' && this.intro?.command(code)) {
+      this.syncHangarButton();
+      return true;
+    }
     if (code === 'KeyC' && (this.showLeaderboard || this.state === 'over' || this.paused)) {
       this.sound.play('key');
       const next = this.mp.cycleCallsign();
@@ -736,6 +871,11 @@ export class Game {
       }
       return this.coop.queueArenaTap(x, y, this.coopAdapter);
     }
+    if (this.showLeaderboard) return false;
+    if (this.state === 'ready' && this.intro?.pick(x, y)) {
+      this.syncHangarButton();
+      return true;
+    }
     if (this.picking) {
       const band = boxAt(x, y, offerBoxes(this.w, this.h, this.room, challengeTopY(this.h, this.inset.top, this.homeY, true), GRADE_BANDS.length));
       if (band !== null) this.chooseGrade(band);
@@ -773,6 +913,14 @@ export class Game {
     else if (this.state === 'ready') this.go();
     else if (this.state === 'over' && this.stateTime > 0.9) this.begin();
   }
+
+  private onCanvasHover = (event: Event): void => {
+    if (this.coop || !this.intro || this.paused || this.showLeaderboard) return;
+    const e = event as PointerEvent;
+    if (e.pointerType === 'touch') return;
+    const rect = this.canvas.getBoundingClientRect();
+    this.intro.hover(e.clientX - rect.left, e.clientY - rect.top);
+  };
 
   private closeLeaderboard(): void {
     if (!this.showLeaderboard) return;
@@ -850,6 +998,7 @@ export class Game {
     if (!intro || this.stateTime < 0.5) return;
     const briefing = intro.phase === 'brief';
     intro.advance();
+    this.syncHangarButton();
     if (briefing) this.opts.onStatus?.('Taking off.');
   }
 
@@ -859,7 +1008,7 @@ export class Game {
     if (cue === 'bell') this.voice.say('commander', 'TIME FOR FLIGHT CLASS');
     if (cue === 'sonic') {
       // The boom: a ring bursts out from dead ahead as the view changes.
-      this.rings.push({ x: this.w / 2, y: this.h * 0.38, age: 0, color: NEON.cyan });
+      this.rings.push({ x: this.w / 2, y: this.h * 0.38, age: 0, color: THEME_BY_ID[this.loadout.theme].accent });
       if (!this.reduceMotion) this.shake = 0.45;
     }
   };
@@ -872,10 +1021,11 @@ export class Game {
   private setState(state: State): void {
     this.state = state;
     this.stateTime = 0;
+    this.syncHangarButton();
   }
 
   private begin(): void {
-    this.hull = MAX_HULL;
+    this.hull = this.maxHull;
     this.energy = 0;
     this.jam = 0;
     this.score = 0;
@@ -1363,12 +1513,13 @@ export class Game {
     if (this.boss && this.hull > 0) this.taunt('hit', 'laugh', 1.6, 0.8);
     this.ship.invulnerable = 1.6;
     if (!this.reduceMotion) this.shake = 0.35;
+    const hullColor = this.coop ? SAND : THEME_BY_ID[this.loadout.theme].hull;
     for (let i = 0; i < 7; i++) {
       const a = rand(0, Math.PI * 2);
       const v = rand(60, 190);
       this.debris.push({
         x: this.ship.x, y: this.ship.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
-        rot: a, spin: rand(-5, 5), len: rand(4, 9), age: 0, ttl: rand(0.3, 0.6), color: SAND,
+        rot: a, spin: rand(-5, 5), len: rand(4, 9), age: 0, ttl: rand(0.3, 0.6), color: hullColor,
       });
     }
     if (this.hull <= 0) {
@@ -1385,7 +1536,7 @@ export class Game {
     for (const s of this.shots) if (s.hostile) s.dead = true;
     // In an asteroid field it clears the little rocks on screen. The tough ones shrug it off.
     this.sets.blast(this.setEnv());
-    this.rings.push({ x: this.ship.x, y: this.ship.y, age: 0, color: SAND });
+    this.rings.push({ x: this.ship.x, y: this.ship.y, age: 0, color: THEME_BY_ID[this.loadout.theme].hull });
     this.sound.play('blast');
     if (!this.reduceMotion) this.shake = 0.4;
   }
@@ -1396,7 +1547,14 @@ export class Game {
   }
 
   private gameOver(): void {
-    this.burst(SHIP, this.ship.x, this.ship.y, this.shipScale, 0, SAND);
+    this.burst(
+      shipShape(this.loadout.ship),
+      this.ship.x,
+      this.ship.y,
+      this.shipScale,
+      0,
+      THEME_BY_ID[this.loadout.theme].hull,
+    );
     this.queue = [];
     this.pickupTimes = [];
     this.upgradeTimes = [];
@@ -1472,6 +1630,7 @@ export class Game {
         this.warp = 3.2;
         this.begin();
       }
+      this.syncHangarButton();
     }
     const view = this.view;
     if (view) {
@@ -1733,7 +1892,8 @@ export class Game {
       dx *= Math.SQRT1_2;
       dy *= Math.SQRT1_2;
     }
-    const speed = 380 * this.scale;
+    const spec = SHIP_BY_ID[this.loadout.ship];
+    const speed = 380 * spec.speedMul * this.scale;
     ship.x += dx * speed * dt;
     ship.y += dy * speed * dt;
 
@@ -1742,7 +1902,7 @@ export class Game {
       const ty = input.touch.y - ship.y;
       const dist = Math.hypot(tx, ty);
       if (dist > 0.5) {
-        const step = Math.min(dist, 760 * dt);
+        const step = Math.min(dist, 760 * spec.speedMul * dt);
         ship.x += (tx / dist) * step;
         ship.y += (ty / dist) * step;
       }
@@ -1750,10 +1910,22 @@ export class Game {
     this.keepShipInBounds();
 
     if (input.firing && ship.cooldown <= 0 && this.jam <= 0 && !this.asking && !this.sets.tanker?.hooked) {
-      ship.cooldown = this.upgrades.has('rapid') ? 0.11 : 0.17;
+      ship.cooldown = this.upgrades.has('rapid') ? spec.rapidCooldown : spec.cooldown;
       this.volley += 1;
       this.sound.play('shot');
-      fireVolley(this.shots, ship.x, ship.y, this.energy, this.volley, this.scale, this.pace, Boolean(this.boss), this.upgrades);
+      fireVolley(
+        this.shots,
+        ship.x,
+        ship.y,
+        this.energy,
+        this.volley,
+        this.scale,
+        this.pace,
+        Boolean(this.boss),
+        this.upgrades,
+        THEME_BY_ID[this.loadout.theme].bolt,
+        this.loadout.ship,
+      );
     }
     if (this.enemies.length || this.boss?.state === 'fight') this.energy = Math.max(0, this.energy - dt / ENERGY_SECONDS);
   }
@@ -1999,7 +2171,7 @@ export class Game {
 
   private collide(): void {
     const ship = this.ship;
-    const shipRadius = 9 * this.scale;
+    const shipRadius = SHIP_BY_ID[this.loadout.ship].hitRadius * this.scale;
     const safe = ship.invulnerable > 0 || this.questions.prompt !== null;
 
     for (const s of this.shots) {
@@ -2134,6 +2306,8 @@ export class Game {
       showLeaderboard: this.showLeaderboard,
       ...(this.coop ? { coopRole: this.coop.isHost ? ('host' as const) : ('guest' as const) } : {}),
       grading: this.picking ? this.pickAge : null,
+      pilotId: this.loadout.pilot,
+      ...(this.coop ? {} : { themeId: this.loadout.theme, shipId: this.loadout.ship }),
     };
   }
 
@@ -2333,14 +2507,14 @@ export class Game {
       const shipVisible = this.state !== 'over' && (!view || view.ship > 0) && (!blinking || this.reduceMotion || Math.floor(this.time * 14) % 2 === 0);
       if (shipVisible) {
         const s = this.shipScale;
-        this.ink(SAND, blinking && this.reduceMotion ? 0.45 : 1, 1.7, () => trace(ctx, SHIP, this.ship.x, this.ship.y, s, 0));
+        const theme = THEME_BY_ID[this.loadout.theme];
+        const shape = shipShape(this.loadout.ship);
+        this.ink(theme.hull, blinking && this.reduceMotion ? 0.45 : 1, 1.7, () => trace(ctx, shape, this.ship.x, this.ship.y, s, 0));
         const flame = (this.state === 'playing' ? rand(8, 15) : rand(4, 8)) * s;
-        this.ink(PINK, 1, 1.5, () => {
-          ctx.moveTo(this.ship.x - 3 * s, this.ship.y + 13 * s);
-          ctx.lineTo(this.ship.x, this.ship.y + 13 * s + flame);
-          ctx.lineTo(this.ship.x + 3 * s, this.ship.y + 13 * s);
+        this.ink(theme.thruster, 1, 1.5, () => {
+          traceShipThrusters(ctx, this.loadout.ship, this.ship.x, this.ship.y, s, flame);
         });
-        if (prompt) this.ink(SAND, 0.5, 1.2, () => trace(ctx, CAPSULE, this.ship.x, this.ship.y, 2.1 * s, this.time * 0.5), false);
+        if (prompt) this.ink(theme.hull, 0.5, 1.2, () => trace(ctx, CAPSULE, this.ship.x, this.ship.y, 2.1 * s, this.time * 0.5), false);
 
         if (this.shield.ready) {
           this.ink(NEON.cyan, 0.5 + 0.2 * Math.sin(this.time * 4), 1.3, () => {

@@ -38,6 +38,11 @@
 <div class="arcade" data-game-overlay hidden role="dialog" aria-modal="true" aria-label="Arcade demo: fly the ship, shoot the enemies, and type or solve sums to power up" tabindex="-1">
   <canvas class="arcade-canvas"></canvas>
   <div class="arcade-controls">
+    <button class="arcade-btn arcade-icon arcade-hangar" type="button" data-game-hangar hidden aria-label="Hangar: change pilot and ship" aria-pressed="false" title="Hangar (H)">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path d="M12 4 L15.5 10.5 L20 18 L14.5 16 L13.5 19.5 L10.5 19.5 L9.5 16 L4 18 L8.5 10.5 Z M12 8 L13.4 11.2 L12 13.6 L10.6 11.2 Z" />
+      </svg>
+    </button>
     <button class="arcade-btn arcade-icon arcade-ranks" type="button" data-game-ranks aria-label="Top 10 Pilots" aria-pressed="false" title="Top 10 Pilots (L)">
       <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
         <path d="M12 4.5 L14.2 9 L19.2 9.7 L15.6 13.2 L16.5 18.2 L12 15.8 L7.5 18.2 L8.4 13.2 L4.8 9.7 L9.8 9 Z" />
@@ -394,6 +399,7 @@
     .arcade-btn { min-width: 44px; padding: 0 10px; letter-spacing: 0.14em; }
     .arcade-icon { padding: 0; }
   }
+  .arcade-hangar[aria-pressed='true'],
   .arcade-ranks[aria-pressed='true'] { color: #42f5ff; border-color: #42f5ff; }
   .arcade-sound .cross { display: none; }
   .arcade-sound[aria-pressed='false'] { color: color-mix(in srgb, var(--sand) 60%, transparent); }
@@ -827,6 +833,7 @@
   const sound = overlay?.querySelector<HTMLButtonElement>('[data-game-sound]');
   const pause = overlay?.querySelector<HTMLButtonElement>('[data-game-pause]');
   const ranks = overlay?.querySelector<HTMLButtonElement>('[data-game-ranks]');
+  const hangar = overlay?.querySelector<HTMLButtonElement>('[data-game-hangar]');
   const status = overlay?.querySelector<HTMLElement>('[data-game-status]');
   const leaveConfirm = overlay?.querySelector<HTMLElement>('[data-coop-leave-confirm]');
   const leaveDesc = overlay?.querySelector<HTMLElement>('[data-coop-leave-desc]');
@@ -912,6 +919,7 @@
       inCoopIsHost = false;
       game.destroy();
       game = null;
+      if (hangar) hangar.hidden = true;
       if (ranks) ranks.hidden = false;
       if (pause) pause.hidden = false;
       if (wasCoop && !fromCoopServerClose) {
@@ -1041,6 +1049,15 @@
             onLeaderboard: (openState) => {
               ranks?.setAttribute('aria-pressed', String(openState));
             },
+            onHangar: (available, active) => {
+              if (!hangar) return;
+              hangar.hidden = !available;
+              hangar.setAttribute('aria-pressed', String(active));
+              hangar.setAttribute(
+                'aria-label',
+                active ? 'Quick Fly with selected pilot and ship' : 'Hangar: change pilot and ship',
+              );
+            },
           });
           pause?.setAttribute('aria-pressed', 'false');
           pause?.setAttribute('aria-label', 'Pause');
@@ -1051,6 +1068,7 @@
           inCoopGame = false;
           inCoopIsHost = false;
           if (leaveConfirm) leaveConfirm.hidden = true;
+          if (hangar) hangar.hidden = true;
           if (ranks) ranks.hidden = false;
           if (pause) pause.hidden = false;
           overlay.hidden = true;
@@ -1137,6 +1155,10 @@
       },
       true,
     );
+    hangar?.addEventListener('click', () => {
+      game?.openHangarCustomizer();
+      overlay.focus({ preventScroll: true });
+    });
     ranks?.addEventListener('click', () => {
       game?.toggleLeaderboard();
       overlay.focus({ preventScroll: true });

@@ -3,6 +3,7 @@
  */
 import { NEON, SAND, SOUL, rand, type Ink } from './core';
 import { KINDS, type Enemy } from './enemies';
+import type { ShipId } from './loadout';
 import { PERSON_OUT, PERSON_UP, ROCKET, segments, trace, type Shape } from './shapes';
 import type { UpgradeId } from './upgrades';
 
@@ -52,25 +53,70 @@ export function fireVolley(
   hasBoss: boolean,
   upgrades: ReadonlySet<UpgradeId>,
   boltColor: string = SAND,
+  shipKind: ShipId = 'starhawk',
 ): void {
-  const up = -680 * pace;
+  const up = (shipKind === 'swift' ? -760 : shipKind === 'bastion' ? -640 : -680) * pace;
   const pierce = upgrades.has('pierce') ? 2 : 0;
-  const shoot = (dx: number, dy: number, vx: number, color: string = boltColor, stray = false) =>
-    shots.push({ x: shipX + dx * scale, y: shipY - dy * scale, vx, vy: up, hostile: false, dead: false, color, pierce, skip: null, stray });
+  const shoot = (dx: number, dy: number, vx: number, color: string = boltColor, stray = false, shotPierce = pierce) =>
+    shots.push({
+      x: shipX + dx * scale,
+      y: shipY - dy * scale,
+      vx,
+      vy: up,
+      hostile: false,
+      dead: false,
+      color,
+      pierce: shotPierce,
+      skip: null,
+      stray,
+    });
 
-  // Energy buys cannons: one from the nose, then one from each wing, then all three with the wings angled out.
-  if (energy <= 0) {
-    shoot(0, 18, 0);
-  } else if (energy <= TRIPLE_AT) {
-    shoot(-8, 6, 0);
-    shoot(8, 6, 0);
+  if (shipKind === 'swift') {
+    // Fast interceptor: rapid twin nose blasters at 0 energy, 3-needle stream at mid energy, quad volley at high energy.
+    if (energy <= 0) {
+      shoot(-3.2, 16, 0);
+      shoot(3.2, 16, 0);
+    } else if (energy <= TRIPLE_AT) {
+      const fan = hasBoss ? 0 : 48 * scale;
+      shoot(0, 20, 0);
+      shoot(-5.5, 11, -fan, boltColor, hasBoss);
+      shoot(5.5, 11, fan, boltColor, hasBoss);
+    } else {
+      const fan = hasBoss ? 0 : 115 * scale;
+      shoot(-3.2, 18, 0);
+      shoot(3.2, 18, 0);
+      shoot(-11, 8, -fan, boltColor, hasBoss);
+      shoot(11, 8, fan, boltColor, hasBoss);
+    }
+  } else if (shipKind === 'bastion') {
+    // Heavy gunship: slower cadence, built-in +1 piercing heavy plasma bolts + wingtip cannon pods when energized.
+    const heavyPierce = pierce + 1;
+    if (energy <= 0) {
+      shoot(0, 15, 0, boltColor, false, heavyPierce);
+    } else if (energy <= TRIPLE_AT) {
+      shoot(-4.8, 13, 0, boltColor, false, heavyPierce);
+      shoot(4.8, 13, 0, boltColor, false, heavyPierce);
+    } else {
+      const fan = hasBoss ? 0 : 88 * scale;
+      shoot(0, 16, 0, boltColor, false, heavyPierce);
+      shoot(-12, 6, -fan, boltColor, hasBoss, heavyPierce);
+      shoot(12, 6, fan, boltColor, hasBoss, heavyPierce);
+    }
   } else {
-    // The wing cannons fan out to sweep a wave, and point straight ahead to pound a boss.
-    const fan = hasBoss ? 0 : 105 * scale;
-    shoot(0, 18, 0);
-    shoot(-8, 6, -fan);
-    shoot(8, 6, fan);
+    // Starhawk (balanced fighter): one nose cannon, then twin wings, then all three fanned out.
+    if (energy <= 0) {
+      shoot(0, 18, 0);
+    } else if (energy <= TRIPLE_AT) {
+      shoot(-8, 6, 0);
+      shoot(8, 6, 0);
+    } else {
+      const fan = hasBoss ? 0 : 105 * scale;
+      shoot(0, 18, 0);
+      shoot(-8, 6, -fan);
+      shoot(8, 6, fan);
+    }
   }
+
   if (upgrades.has('wide')) {
     shoot(-10, 4, -215 * scale, boltColor, true);
     shoot(10, 4, 215 * scale, boltColor, true);
