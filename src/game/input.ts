@@ -55,8 +55,8 @@ export interface InputHost {
   pointerMove?(pointerId: number, x: number, y: number): boolean;
   pointerUp?(pointerId: number): boolean;
   pointerDrop?(): void;
-  /** Allow focused HTML `<button>` controls (e.g. Co-op Leave confirmation sheet) to receive `Space`. */
-  allowButtonSpace?: boolean;
+  /** Allow specific focused HTML `<button>` controls (strictly the Co-op Leave confirmation sheet) to receive `Space`. */
+  allowButtonSpace?: (target: EventTarget | null) => boolean;
 }
 
 /** The part of a canvas this needs: somewhere to listen, and where it is on the page. */
@@ -163,9 +163,9 @@ export class Input {
       e.preventDefault();
       return;
     }
-    // Enter still activates a focused button (Exit). Space always belongs to the game in Solo,
-    // so tabbing to Exit and then firing cannot end a run by accident; in Co-op, dialog/control buttons keep Space too.
-    if ((code === 'Enter' || (code === 'Space' && this.host.allowButtonSpace)) && onButton(e)) return;
+    // Enter still activates a focused button (Exit). Space always belongs to the game on in-game buttons,
+    // so tabbing to Exit/Pause/Sound and firing cannot act on the button by accident; only Leave-sheet buttons keep Space.
+    if ((code === 'Enter' || (code === 'Space' && this.host.allowButtonSpace?.(e.target))) && onButton(e)) return;
 
     // A key that answers the open question goes to the question. It is matched on the character, not the
     // physical key, so a line can be typed on any keyboard layout. Everything else (arrow keys, and any
@@ -189,8 +189,8 @@ export class Input {
 
   private onKeyUp = (event: Event): void => {
     const e = event as KeyboardEvent;
-    // A button is clicked when Space is released on it; see onKeyDown for why that is blocked in Solo.
-    if (e.code === 'Space' && !this.host.allowButtonSpace && onButton(e)) e.preventDefault();
+    // A button is clicked when Space is released on it; block that except on the Co-op Leave sheet's own buttons.
+    if (e.code === 'Space' && !this.host.allowButtonSpace?.(e.target) && onButton(e)) e.preventDefault();
     this.keys.delete(e.code);
   };
 

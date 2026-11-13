@@ -212,8 +212,11 @@ export class CoopThumbDeck {
     this.targetY = clamp(y, 24, COOP_ARENA_HEIGHT - 24);
   }
 
-  releasePointer(): void {
+  releasePointer(clearAutoFire = false): void {
     this.activePointerId = null;
+    if (clearAutoFire) {
+      this.autoFireLatch = false;
+    }
   }
 
   consumeArenaTap(): { x: number; y: number } | null {

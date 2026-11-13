@@ -357,8 +357,8 @@ export class Game {
               this.state === 'playing' && !this.paused && this.coop!.handlePointerDown(id, x, y, touch),
             pointerMove: (id: number, x: number, y: number) => this.coop!.handlePointerMove(id, x, y),
             pointerUp: (id: number) => this.coop!.handlePointerUp(id),
-            pointerDrop: () => this.coop!.releasePointers(),
-            allowButtonSpace: true,
+            pointerDrop: () => this.coop!.releasePointers(true),
+            allowButtonSpace: (target: EventTarget | null) => this.coop!.isLeaveSheetButton(target),
           }
         : {}),
     }, this.coarse ? 'touch' : 'keys');

@@ -18,6 +18,7 @@ import {
   encodeUpgradesMask,
   encodeWorldSnapshot,
   formatBossMathQuestion,
+  getSnapshotVersionMismatch,
   isSnapshotVersionMismatch,
   packBrokenRockWords,
   parseBossMathQuestion,
@@ -759,7 +760,13 @@ test('Round 13 (4.3): snapshot protocol version 2 rejects legacy v1 frames and d
     mutated[1] = (mutated[1]! & ~0x03) | wrongVer;
     assert.equal(decodeWorldSnapshot(mutated), null, `version ${wrongVer} is rejected by decoder`);
     assert.equal(isSnapshotVersionMismatch(mutated), true, `version ${wrongVer} is flagged as version mismatch`);
+    assert.equal(
+      getSnapshotVersionMismatch(mutated),
+      wrongVer === 1 ? 'older' : 'newer',
+      `version ${wrongVer} reports directional mismatch`,
+    );
   }
+  assert.equal(getSnapshotVersionMismatch(valid), null);
   const v0Mutated = new Uint8Array(valid);
   v0Mutated[1] = v0Mutated[1]! & ~0x03;
   assert.equal(decodeWorldSnapshot(v0Mutated), null, 'version 0 is rejected by decoder');

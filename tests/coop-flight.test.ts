@@ -839,7 +839,10 @@ test('Guest own-ship prediction has 0.0px lag/drift under 60±40ms jitter, and S
 
   let clockMs = 1_000;
   const now = () => clockMs;
-  const wireQueue: Array<{ at: number; toHost: boolean; bytes: Uint8Array }> = [];
+  const wireQueue: Array<{ at: number; order: number; toHost: boolean; bytes: Uint8Array }> = [];
+  let wireOrder = 0;
+  let lastToHostAt = 0;
+  let lastToGuestAt = 0;
 
   const hostClient = new CoopClient({ code: 'JITR77', role: 'host', callsign: 'NOVA-1', storage: null });
   const guestClient = new CoopClient({ code: 'JITR77', role: 'guest', callsign: 'STAR-2', storage: null });
@@ -865,13 +868,17 @@ test('Guest own-ship prediction has 0.0px lag/drift under 60±40ms jitter, and S
     return origGuestSub(h);
   };
   hostClient.sendBinary = (b) => {
-    wireQueue.push({ at: clockMs + 20 + nextRand() * 80, toHost: false, bytes: new Uint8Array(b) });
+    const at = Math.max(lastToGuestAt, clockMs + 20 + nextRand() * 80);
+    lastToGuestAt = at;
+    wireQueue.push({ at, order: ++wireOrder, toHost: false, bytes: new Uint8Array(b) });
     return true;
   };
   guestClient.sendBinary = (b) => {
     const copy = new Uint8Array(b);
     copy[1] = 1; // relay stamps authoritative seat
-    wireQueue.push({ at: clockMs + 20 + nextRand() * 80, toHost: true, bytes: copy });
+    const at = Math.max(lastToHostAt, clockMs + 20 + nextRand() * 80);
+    lastToHostAt = at;
+    wireQueue.push({ at, order: ++wireOrder, toHost: true, bytes: copy });
     return true;
   };
 
@@ -891,7 +898,7 @@ test('Guest own-ship prediction has 0.0px lag/drift under 60±40ms jitter, and S
 
   for (let f = 0; f < 360; f++) {
     clockMs += dt * 1000;
-    wireQueue.sort((a, b) => a.at - b.at);
+    wireQueue.sort((a, b) => a.at - b.at || a.order - b.order);
     while (wireQueue.length > 0 && wireQueue[0]!.at <= clockMs) {
       const pkt = wireQueue.shift()!;
       if (pkt.toHost) binarySinks.host?.(pkt.bytes);
@@ -957,23 +964,28 @@ function createDirectPair(opts?: {
   seats?: CoopPublicSeat[];
   tvMode?: boolean;
   guestViewport?: [number, number, boolean];
-  onVersionMismatch?: () => void;
+  onVersionMismatch?: (msg: string) => void;
 }) {
   let clockMs = 1000;
   const now = () => clockMs;
   const roster: CoopPublicSeat[] =
     opts?.seats ??
-    [
-      { seat: 0, callsign: 'ACE', ready: true, isHost: true, connected: true },
-      { seat: 1, callsign: 'NOVA', ready: true, isHost: false, connected: true },
-    ];
-  const wireQueue: Array<{ at: number; toHost: boolean; bytes: Uint8Array }> = [];
+    (opts?.tvMode
+      ? [{ seat: 1, callsign: 'NOVA', ready: true, isHost: false, connected: true }]
+      : [
+          { seat: 0, callsign: 'ACE', ready: true, isHost: true, connected: true },
+          { seat: 1, callsign: 'NOVA', ready: true, isHost: false, connected: true },
+        ]);
+  const wireQueue: Array<{ at: number; order: number; toHost: boolean; bytes: Uint8Array }> = [];
+  let wireOrder = 0;
+  let lastToHostAt = 0;
+  let lastToGuestAt = 0;
   const binarySinks: { host?: (b: Uint8Array) => void; guest?: (b: Uint8Array) => void } = {};
   const lobbySinks: { host?: (l: CoopLobbyState) => void; guest?: (l: CoopLobbyState) => void } = {};
   let upDelay: () => number = () => 5;
   let downDelay: () => number = () => 5;
 
-  const makeMockClient = (role: 'host' | 'guest', seat: 0 | 1) => {
+  const makeMockClient = (role: 'host' | 'guest', seat: -1 | 0 | 1) => {
     const c = new CoopClient({
       code: 'R13FIX',
       role,
@@ -995,9 +1007,12 @@ function createDirectPair(opts?: {
     };
     c.sendBinary = (bytes: Uint8Array) => {
       const copy = new Uint8Array(bytes);
-      if (role === 'guest') copy[1] = seat;
-      const delay = role === 'guest' ? upDelay() : downDelay();
-      wireQueue.push({ at: clockMs + delay, toHost: role === 'guest', bytes: copy });
+      if (role === 'guest' && seat >= 0) copy[1] = seat;
+      const rawAt = clockMs + (role === 'guest' ? upDelay() : downDelay());
+      const at = role === 'guest' ? Math.max(lastToHostAt, rawAt) : Math.max(lastToGuestAt, rawAt);
+      if (role === 'guest') lastToHostAt = at;
+      else lastToGuestAt = at;
+      wireQueue.push({ at, order: ++wireOrder, toHost: role === 'guest', bytes: copy });
       return true;
     };
     c.sendEvent = () => true;
@@ -1005,7 +1020,7 @@ function createDirectPair(opts?: {
     return c;
   };
 
-  const hostClient = makeMockClient('host', 0);
+  const hostClient = makeMockClient('host', opts?.tvMode ? -1 : 0);
   const guestClient = makeMockClient('guest', 1);
   const hostWorld = new HeadlessArenaWorld(false);
   const guestWorld = new HeadlessArenaWorld(true);
@@ -1025,7 +1040,7 @@ function createDirectPair(opts?: {
   }
 
   const flushWire = () => {
-    wireQueue.sort((a, b) => a.at - b.at);
+    wireQueue.sort((a, b) => a.at - b.at || a.order - b.order);
     while (wireQueue.length > 0 && wireQueue[0]!.at <= clockMs) {
       const pkt = wireQueue.shift()!;
       if (pkt.toHost) binarySinks.host?.(pkt.bytes);
@@ -1222,14 +1237,14 @@ test('Round 13 (3.4): 600ms upstream stalls expire stale velocity after 150ms wi
 
   const pair = createDirectPair();
   let stallUntilMs = 0;
-  let nextStallSec = 1.6;
+  let nextStallSec = 2.15; // overlaps Guest key release at t = 2.30s
   pair.setDelays(
     () => {
       const base = 20 + rand() * 80;
       const nowSec = (pair.clockMs - 1000) / 1000;
       if (nowSec >= nextStallSec) {
         stallUntilMs = pair.clockMs + 600;
-        nextStallSec += 2.2;
+        nextStallSec += 2.8;
       }
       const stallHold = Math.max(0, stallUntilMs - pair.clockMs);
       return base + stallHold;
@@ -1266,6 +1281,29 @@ test('Round 13 (3.4): 600ms upstream stalls expire stale velocity after 150ms wi
   assert.ok(maxReleaseSlidePx < 30, `600ms upstream stalls gave ${maxReleaseSlidePx.toFixed(1)}px release slide (< 30px)`);
   assert.ok(maxSingleFrameJumpPx <= 12, `max 1-frame Guest step=${maxSingleFrameJumpPx.toFixed(1)}px`);
   pair.dispose();
+
+  // Direct behavioural test of COOP_STALE_INPUT_SEC (150ms): if Guest upstream stalls while holding LEFT,
+  // Host advances Guest ship for <= 150ms (~57px) and then stops cold over the remaining 500ms (0.0px extra drift).
+  const stalePair = createDirectPair();
+  for (let f = 0; f < 15; f++) {
+    stalePair.advanceClock(dt * 1000);
+    stalePair.flushWire();
+    stalePair.guestDir.step(dt, dt, stalePair.guestWorld, { ...idle, across: -1 });
+    stalePair.hostDir.step(dt, dt, stalePair.hostWorld, idle);
+  }
+  stalePair.setDelays(() => 5000, () => 5);
+  const hostXAtCut = stalePair.hostDir.pilots[1].x;
+  let hostXAt200ms = hostXAtCut;
+  for (let f = 1; f <= 42; f++) {
+    stalePair.advanceClock(dt * 1000);
+    stalePair.flushWire();
+    stalePair.guestDir.step(dt, dt, stalePair.guestWorld, { ...idle, across: -1 });
+    stalePair.hostDir.step(dt, dt, stalePair.hostWorld, idle);
+    if (f === 12) hostXAt200ms = stalePair.hostDir.pilots[1].x;
+  }
+  assert.ok(hostXAtCut - hostXAt200ms <= 64, `Host coasted <= 64px before 150ms expiry (got ${(hostXAtCut - hostXAt200ms).toFixed(1)}px)`);
+  assert.equal(stalePair.hostDir.pilots[1].x, hostXAt200ms, 'Host copy stopped cold once last input exceeded COOP_STALE_INPUT_SEC (150ms)');
+  stalePair.dispose();
 
   // Direct verification of the 24px deadband + <= 8px/frame easing when Host forcibly displaces Guest by 45px
   const easePair = createDirectPair();
@@ -1427,4 +1465,301 @@ test('Round 13 (4.1, 4.3, Sec 5): bullet-crossing agreement, v1 mismatch banner,
   verPair.binarySinks.guest?.(v1Bytes);
   assert.equal(mismatchCount, 1);
   verPair.dispose();
+});
+
+test('Round 14 (3.1, 3.2, 4.1, 4.2, 4.3, Sec 5): smooth Host copy under 60±40ms jitter, 0px pointer overshoot, TV-mode last-pilot Game Over, 60±40ms crossing agreement, directional mismatch text, and <= 35 msg/s rate budget', () => {
+  const idle: CoopLocalControlInput = { across: 0, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 };
+  const dt = 1 / 60;
+  const makeRng = (s: number) => {
+    let st = s >>> 0;
+    return () => {
+      st = (st * 1664525 + 1013904223) >>> 0;
+      return st / 0x100000000;
+    };
+  };
+
+  // --- 3.1a: Steady key hold under 60 ± 40 ms jitter moves at normal speed in >= 95% of Host frames and never backwards ---
+  {
+    const rUp = makeRng(5);
+    const rDown = makeRng(6);
+    const pair = createDirectPair();
+    pair.setDelays(
+      () => 20 + rUp() * 80,
+      () => 20 + rDown() * 80,
+    );
+    const nominal = 380 * dt;
+    let prevHostX = pair.hostDir.pilots[1].x;
+    let normalFrames = 0;
+    let backwardFrames = 0;
+    let totalSampled = 0;
+
+    for (let f = 1; f <= 60 * 16; f++) {
+      pair.advanceClock(dt * 1000);
+      pair.flushWire();
+      const tSec = f * dt;
+      const holdPhase = tSec % 1.6;
+      const dir = Math.floor(tSec / 1.6) % 2 === 0 ? 1 : -1;
+      const across = holdPhase < 1.3 ? dir : 0;
+      pair.guestDir.step(dt, dt, pair.guestWorld, { ...idle, across });
+      pair.hostDir.step(dt, dt, pair.hostWorld, idle);
+
+      const hx = pair.hostDir.pilots[1].x;
+      const step = (hx - prevHostX) * dir;
+      prevHostX = hx;
+      if (tSec > 1.0 && holdPhase > 0.35 && holdPhase < 1.3 && hx > 60 && hx < COOP_WORLD_W - 60) {
+        totalSampled++;
+        if (step < -0.05) backwardFrames++;
+        else if (step >= 0.75 * nominal && step <= 1.25 * nominal) normalFrames++;
+      }
+    }
+    const normalRatio = normalFrames / Math.max(1, totalSampled);
+    assert.equal(backwardFrames, 0, 'Host copy never steps backwards during steady key holds under 60±40ms jitter');
+    assert.ok(normalRatio >= 0.95, `expected >= 95% normal-speed Host frames, got ${(normalRatio * 100).toFixed(1)}%`);
+    pair.dispose();
+  }
+
+  // --- 3.1b: Pointer fly-and-stop at 760 px/s under 60 ± 40 ms jitter overshoots stop point by <= 5 px ---
+  {
+    const rUp = makeRng(11);
+    const rDown = makeRng(12);
+    const pair = createDirectPair();
+    pair.setDelays(
+      () => 20 + rUp() * 80,
+      () => 20 + rDown() * 80,
+    );
+    const y = formationSpawnForSeat(1).y;
+    let maxOvershootPx = 0;
+    for (let f = 1; f <= 60 * 12; f++) {
+      pair.advanceClock(dt * 1000);
+      pair.flushWire();
+      const tSec = f * dt;
+      const targetX = Math.floor(tSec / 1.2) % 2 === 0 ? 650 : 120;
+      pair.guestDir.step(dt, dt, pair.guestWorld, {
+        ...idle,
+        touching: true,
+        touchX: targetX,
+        touchY: y,
+      });
+      pair.hostDir.step(dt, dt, pair.hostWorld, idle);
+      const hx = pair.hostDir.pilots[1].x;
+      maxOvershootPx = Math.max(maxOvershootPx, hx - 650, 120 - hx);
+    }
+    assert.ok(maxOvershootPx <= 5, `Host pointer-stop overshoot must be <= 5px, got ${maxOvershootPx.toFixed(2)}px`);
+    pair.dispose();
+  }
+
+  // --- 3.2: TV-mode Host (`seat = -1`): Wi-Fi blip keeps run alive; last guest leaving or pruned ends the run ---
+  {
+    const tvPair = createDirectPair({ tvMode: true });
+    assert.equal(tvPair.hostDir.localSeat, -1);
+    tvPair.advanceClock(dt * 1000);
+    tvPair.hostDir.step(dt, dt, tvPair.hostWorld, idle);
+    assert.equal(tvPair.hostWorld.gameOver, false);
+
+    // Last guest has a brief Wi-Fi drop (seat held by relay, `connected: false`) -> run stays alive
+    tvPair.lobbySinks.host?.({
+      code: 'R13FIX',
+      formattedCode: 'R13-FIX',
+      hostConnected: true,
+      tvMode: true,
+      locked: true,
+      seats: [{ seat: 1, callsign: 'NOVA', ready: true, isHost: false, connected: false }],
+    });
+    tvPair.advanceClock(dt * 1000);
+    tvPair.hostDir.step(dt, dt, tvPair.hostWorld, idle);
+    assert.equal(tvPair.hostWorld.gameOver, false, 'TV-mode run stays alive during 30s reconnect grace');
+
+    // Relay prunes the last seat (or guest explicitly leaves): `seats: []` -> Game Over triggers immediately
+    tvPair.lobbySinks.host?.({
+      code: 'R13FIX',
+      formattedCode: 'R13-FIX',
+      hostConnected: true,
+      tvMode: true,
+      locked: true,
+      seats: [],
+    });
+    assert.equal(tvPair.hostWorld.gameOver, true, 'TV-mode run ends immediately when the last pilot seat is removed');
+    tvPair.dispose();
+  }
+
+  // --- 4.1: 60 ± 40 ms crossing sweep agrees on hits, suppresses ghost continuation, and gives 0px hitbox lead ---
+  {
+    let agreeHit = 0;
+    let maxGhostBelowPx = 0;
+    const shipY = formationSpawnForSeat(1).y;
+    for (let k = 0; k <= 70; k++) {
+      const tCross = 2.3 + k * 0.01;
+      const rJit = makeRng(7);
+      const p = createDirectPair();
+      p.setDelays(
+        () => 20 + rJit() * 80,
+        () => 20 + rJit() * 80,
+      );
+      let spawned = false;
+      let minSeen = Infinity;
+      let localMaxBelowPx = -Infinity;
+      let hostKillMs: number | null = null;
+      for (let f = 1; f <= 220; f++) {
+        p.advanceClock(dt * 1000);
+        p.flushWire();
+        const t = (p.clockMs - 1000) / 1000;
+        const across = t >= 2.5 && t < 3.0 ? 1 : 0;
+        p.hostDir.step(dt, dt, p.hostWorld, idle);
+        if (!spawned && t >= tCross - 1.5) {
+          spawned = true;
+          p.hostWorld.shots.push({
+            x: 384,
+            y: shipY - 260 * (tCross - t),
+            vx: 0,
+            vy: 260,
+            hostile: true,
+            dead: false,
+            color: '#ff4466',
+          } as Shot);
+        }
+        for (const s of p.hostWorld.shots) {
+          s.x += s.vx * dt;
+          s.y += s.vy * dt;
+          if (s.y > COOP_WORLD_H + 40) s.dead = true;
+        }
+        const hullBefore = p.hostDir.pilots[1].hull;
+        p.hostDir.collideHostSquad(p.hostWorld, 1);
+        if (p.hostDir.pilots[1].hull < hullBefore && hostKillMs === null) hostKillMs = p.clockMs;
+        p.hostWorld.shots = p.hostWorld.shots.filter((s) => !s.dead);
+
+        p.guestDir.step(dt, dt, p.guestWorld, { ...idle, across });
+        const me = p.guestDir.pilots[1];
+        for (const s of p.guestWorld.shots) {
+          if (!s.hostile) continue;
+          minSeen = Math.min(minSeen, Math.hypot(s.x - me.x, s.y - me.y));
+          if (hostKillMs !== null && p.clockMs > hostKillMs) {
+            localMaxBelowPx = Math.max(localMaxBelowPx, s.y - me.y);
+          }
+        }
+      }
+      if (p.hostDir.pilots[1].hull < 3 && minSeen < 12) {
+        agreeHit++;
+        if (localMaxBelowPx > -Infinity) {
+          maxGhostBelowPx = Math.max(maxGhostBelowPx, localMaxBelowPx);
+        }
+      }
+      // Verify 0.0px hitbox cheat regardless of forged Guest targets
+      const hp = p.hostDir.pilots[1];
+      const hitPos = (p.hostDir as unknown as { hostPilotHitPos: (s: typeof hp) => { x: number; y: number } }).hostPilotHitPos(hp);
+      assert.equal(Math.hypot(hitPos.x - hp.x, hitPos.y - hp.y), 0);
+      p.dispose();
+    }
+    assert.ok(agreeHit >= 6, `expected >= 6 agreed hits under 60±40ms jitter, got ${agreeHit}`);
+    assert.ok(maxGhostBelowPx <= 16, `suppressed dead bullets after hit (max below ship=${maxGhostBelowPx.toFixed(1)}px)`);
+  }
+
+  // --- 4.2: Older (v1) vs newer (v3) snapshot mismatch messages point to the outdated side ---
+  {
+    const olderMsgs: string[] = [];
+    const newerMsgs: string[] = [];
+    const olderPair = createDirectPair({ onVersionMismatch: (m) => olderMsgs.push(m) });
+    const newerPair = createDirectPair({ onVersionMismatch: (m) => newerMsgs.push(m) });
+    const baseBytes = encodeWorldSnapshot({
+      session: 1,
+      tick: 1,
+      hostElapsedMs: 50,
+      wave: 1,
+      banner: 0,
+      teamScore: 0,
+      freed: 0,
+      energy: 0.5,
+      paused: false,
+      parked: false,
+      gameOver: false,
+      ships: [],
+      enemies: [],
+      boss: null,
+      tanker: null,
+      field: null,
+      shots: [],
+      items: [],
+      fx: [],
+    });
+    const v1 = new Uint8Array(baseBytes);
+    v1[1] = (v1[1]! & ~0x03) | 1;
+    const v3 = new Uint8Array(baseBytes);
+    v3[1] = (v3[1]! & ~0x03) | 3;
+
+    olderPair.binarySinks.guest?.(v1);
+    olderPair.binarySinks.guest?.(v1);
+    newerPair.binarySinks.guest?.(v3);
+    newerPair.binarySinks.guest?.(v3);
+
+    assert.equal(olderMsgs[0], "The host's game is out of date. Ask the host to refresh.");
+    assert.equal(newerMsgs[0], 'This game was updated. Refresh to rejoin.');
+    olderPair.dispose();
+    newerPair.dispose();
+  }
+
+  // --- 4.3: Frantic wiggle + 4 pod taps/s + 600ms upstream stalls stays <= 35 msg/s at relay with 0 dropped taps ---
+  {
+    const ratePair = createDirectPair();
+    const sumBoss = createBoss(2, ratePair.hostWorld.bossEnvObj);
+    sumBoss.state = 'fight';
+    ratePair.hostWorld.boss = sumBoss;
+    ratePair.guestWorld.boss = sumBoss;
+
+    const sendTimesMs: number[] = [];
+    const origSend = ratePair.guestClient.sendBinary.bind(ratePair.guestClient);
+    ratePair.guestClient.sendBinary = (b: Uint8Array) => {
+      sendTimesMs.push(ratePair.clockMs);
+      return origSend(b);
+    };
+
+    const rRelay = makeRng(9);
+    let nextTapSec = 0;
+    let totalTapsQueued = 0;
+    for (let f = 1; f <= 60 * 30; f++) {
+      ratePair.advanceClock(1000 / 60);
+      const t = (ratePair.clockMs - 1000) / 1000;
+      if (t >= nextTapSec) {
+        nextTapSec += 0.25;
+        totalTapsQueued++;
+        ratePair.guestDir.queueArenaTap(384, 300, ratePair.guestWorld);
+      }
+      const franticCtrl: CoopLocalControlInput = {
+        ...idle,
+        across: Math.floor(t / 0.07) % 2 ? 1 : -1,
+        firing: Math.floor(t / 0.11) % 2 === 0,
+      };
+      ratePair.guestDir.step(dt, dt, ratePair.guestWorld, franticCtrl);
+      ratePair.flushWire();
+      ratePair.hostDir.step(dt, dt, ratePair.hostWorld, idle);
+    }
+    ratePair.advanceClock(500);
+    ratePair.flushWire();
+    ratePair.hostDir.step(dt, dt, ratePair.hostWorld, idle);
+
+    // Simulate relay fixed 1s window after 20-100ms jitter + 600ms upstream stalls every 3s
+    let lastArrive = 0;
+    const arrivals = sendTimesMs.map((s) => {
+      let at = s + 20 + rRelay() * 80;
+      const ph = (s - 1000) % 3000;
+      if (ph < 600) at = Math.max(at, s - ph + 620);
+      at = Math.max(at, lastArrive);
+      lastArrive = at;
+      return at;
+    });
+    let winStart = -Infinity;
+    let count = 0;
+    let dropped = 0;
+    let maxWin = 0;
+    for (const a of arrivals) {
+      if (a - winStart >= 1000) {
+        winStart = a;
+        count = 0;
+      }
+      count++;
+      maxWin = Math.max(maxWin, count);
+      if (count > 35) dropped++;
+    }
+    assert.equal(dropped, 0, `relay drops 0 frames across 600ms stalls (max relay window=${maxWin})`);
+    assert.equal(ratePair.hostWorld.bossTaps.length, totalTapsQueued, 'all Sum Boss pod taps reached Host');
+    ratePair.dispose();
+  }
 });

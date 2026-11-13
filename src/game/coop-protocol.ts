@@ -727,14 +727,20 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
   return new Uint8Array(buf);
 }
 
+/** Classify a `0x02` snapshot frame carrying a non-zero wire version !== `SNAP_PROTOCOL_VERSION` (`'older'` vs `'newer'`). */
+export function getSnapshotVersionMismatch(bytes: Uint8Array): 'older' | 'newer' | null {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 18 || bytes.byteLength > MAX_BINARY_BYTES) {
+    return null;
+  }
+  if (bytes[0] !== BIN_FRAME_SNAP) return null;
+  const version = bytes[1]! & 0x03;
+  if (version === 0 || version === SNAP_PROTOCOL_VERSION) return null;
+  return version < SNAP_PROTOCOL_VERSION ? 'older' : 'newer';
+}
+
 /** True when `bytes` is a `0x02` snapshot frame carrying a non-zero wire version !== `SNAP_PROTOCOL_VERSION`. */
 export function isSnapshotVersionMismatch(bytes: Uint8Array): boolean {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 18 || bytes.byteLength > MAX_BINARY_BYTES) {
-    return false;
-  }
-  if (bytes[0] !== BIN_FRAME_SNAP) return false;
-  const version = bytes[1]! & 0x03;
-  return version !== 0 && version !== SNAP_PROTOCOL_VERSION;
+  return getSnapshotVersionMismatch(bytes) !== null;
 }
 
 /** Unpack a `0x02` `BIN_FRAME_SNAP` binary snapshot, returning `null` on any truncated or invalid frame. */
@@ -1163,10 +1169,33 @@ export class SnapshotInterpolator {
   private readonly shipSmoothOffset = new Map<CoopSeatIndex, { dx: number; dy: number }>();
   private readonly enemySmoothOffset = new Map<number, { dx: number; dy: number }>();
   private bossSmoothOffset: { dx: number; dy: number } = { dx: 0, dy: 0 };
+  private ackHostOffsetMs: number | null = null;
+  private bulletTracks: Array<{
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    atHostMs: number;
+    bornHostMs: number;
+  }> = [];
+  private shotBornHostMs = new WeakMap<CoopSnapShot, number>();
 
   constructor(opts?: { interpDelayMs?: number; maxExtrapolateMs?: number }) {
     this.interpDelayMs = opts?.interpDelayMs ?? 85;
     this.maxExtrapolateMs = opts?.maxExtrapolateMs ?? 65;
+  }
+
+  /** Feed `snap.hostElapsedMs - guestSentWallMs[ackSeq]` so enemy bullets align with Guest's 0ms local ship. */
+  setAckHostOffset(offsetMs: number | null): void {
+    if (offsetMs === null || !Number.isFinite(offsetMs)) {
+      this.ackHostOffsetMs = null;
+      return;
+    }
+    if (this.ackHostOffsetMs === null || Math.abs(offsetMs - this.ackHostOffsetMs) > 1200) {
+      this.ackHostOffsetMs = offsetMs;
+    } else {
+      this.ackHostOffsetMs += (offsetMs - this.ackHostOffsetMs) * 0.2;
+    }
   }
 
   reset(): void {
@@ -1194,6 +1223,9 @@ export class SnapshotInterpolator {
     this.shipSmoothOffset.clear();
     this.enemySmoothOffset.clear();
     this.bossSmoothOffset = { dx: 0, dy: 0 };
+    this.ackHostOffsetMs = null;
+    this.bulletTracks.length = 0;
+    this.shotBornHostMs = new WeakMap<CoopSnapShot, number>();
   }
 
   latest(): CoopWorldSnapshot | null {
@@ -1282,6 +1314,8 @@ export class SnapshotInterpolator {
       this.needsReseam = true;
     }
 
+    this.trackStraightBulletBirths(snap, hostMs, this.buffer.length === 0);
+
     this.buffer.push({
       unwrappedTick: this.unwrappedTick,
       hostMs,
@@ -1362,17 +1396,24 @@ export class SnapshotInterpolator {
 
     this.decaySmoothOffsets(wallDt);
 
-    // Extrapolate straight-flying shots from the newest snapshot forward to Host's present so bullets match Guest ship time.
-    const presentShotDt = last.snap.paused ? 0 : clampNum((presentHostMs - last.hostMs) / 1000, 0, 0.18);
-    const presentShots = this.extrapolateShots(last.snap.shots, presentShotDt);
+    const leadTargetHostMs =
+      this.ackHostOffsetMs !== null
+        ? clampNum(safeNow + this.ackHostOffsetMs, presentHostMs - 40, last.hostMs + 210)
+        : clampNum(presentHostMs, renderHostMs, last.hostMs + 180);
+    const straightShots = this.evaluateStraightShots(
+      last.snap,
+      last.hostMs,
+      renderHostMs,
+      leadTargetHostMs,
+    );
 
     if (this.needsReseam && this.prevSampleHostMs !== null) {
       this.needsReseam = false;
-      const reconstructedAtPrev = this.rawSampleAt(this.prevSampleHostMs, presentShots);
+      const reconstructedAtPrev = this.rawSampleAt(this.prevSampleHostMs, straightShots);
       this.captureExtrapolationSeam(reconstructedAtPrev, wallDt);
     }
 
-    const raw = this.rawSampleAt(renderHostMs, presentShots);
+    const raw = this.rawSampleAt(renderHostMs, straightShots);
     const smoothed = this.applySmoothOffsets(raw);
 
     this.prevSampleHostMs = renderHostMs;
@@ -1381,13 +1422,16 @@ export class SnapshotInterpolator {
     return smoothed;
   }
 
-  private rawSampleAt(hostMs: number, shotsOverride: CoopSnapShot[]): CoopWorldSnapshot {
+  private rawSampleAt(hostMs: number, straightShots: CoopSnapShot[]): CoopWorldSnapshot {
     const count = this.buffer.length;
     const first = this.buffer[0]!;
     const last = this.buffer[count - 1]!;
 
     if (hostMs <= first.hostMs) {
-      return { ...first.snap, shots: shotsOverride };
+      return {
+        ...first.snap,
+        shots: this.mergeShotsWithSpecials(straightShots, first.snap, 0),
+      };
     }
 
     if (hostMs <= last.hostMs) {
@@ -1404,7 +1448,15 @@ export class SnapshotInterpolator {
       }
       const span = Math.max(1, next.hostMs - prev.hostMs);
       const alpha = clampNum((hostMs - prev.hostMs) / span, 0, 1);
-      return this.interpolatePair(prev.snap, next.snap, alpha, shotsOverride);
+      const specialDtSec = next.snap.paused
+        ? 0
+        : clampNum((hostMs - next.hostMs) / 1000, -0.06, 0.08);
+      return this.interpolatePair(
+        prev.snap,
+        next.snap,
+        alpha,
+        this.mergeShotsWithSpecials(straightShots, next.snap, specialDtSec),
+      );
     }
 
     // Brief network jitter past `last.hostMs`: extrapolate smoothly up to `maxExtrapolateMs`, then hold.
@@ -1412,7 +1464,13 @@ export class SnapshotInterpolator {
     const span = Math.max(16, last.hostMs - prev.hostMs);
     const overMs = clampNum(hostMs - last.hostMs, 0, this.maxExtrapolateMs);
     const extraAlpha = 1 + overMs / span;
-    return this.interpolatePair(prev.snap, last.snap, extraAlpha, shotsOverride);
+    const specialDtSec = last.snap.paused ? 0 : clampNum(overMs / 1000, 0, 0.08);
+    return this.interpolatePair(
+      prev.snap,
+      last.snap,
+      extraAlpha,
+      this.mergeShotsWithSpecials(straightShots, last.snap, specialDtSec),
+    );
   }
 
   private stepSmoothVec(dx: number, dy: number, wallDt: number): { dx: number; dy: number } | null {
@@ -1547,24 +1605,151 @@ export class SnapshotInterpolator {
     this.lastRenderedBoss = snap.boss ? { x: snap.boss.x, y: snap.boss.y } : null;
   }
 
-  private extrapolateShots(shots: readonly CoopSnapShot[], dtSec: number): CoopSnapShot[] {
-    if (dtSec === 0) return shots as CoopSnapShot[];
-    return shots.map((sh) =>
-      sh.kind === 'beam'
-        ? sh
-        : {
-            ...sh,
-            x: sh.x + sh.vx * dtSec,
-            y: sh.y + sh.vy * dtSec,
-          },
-    );
+  private trackStraightBulletBirths(
+    snap: CoopWorldSnapshot,
+    hostMs: number,
+    initialSnap: boolean,
+  ): void {
+    const used = new Set<number>();
+    const nextTracks: Array<{
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      atHostMs: number;
+      bornHostMs: number;
+    }> = [];
+
+    for (const sh of snap.shots) {
+      if (sh.kind === 'beam' || sh.kind === 'rocket') continue;
+      if (initialSnap) {
+        this.shotBornHostMs.set(sh, -Infinity);
+        nextTracks.push({
+          x: sh.x,
+          y: sh.y,
+          vx: sh.vx,
+          vy: sh.vy,
+          atHostMs: hostMs,
+          bornHostMs: -Infinity,
+        });
+        continue;
+      }
+
+      let bestIdx = -1;
+      let bestDist = 28;
+      for (let i = 0; i < this.bulletTracks.length; i++) {
+        if (used.has(i)) continue;
+        const tr = this.bulletTracks[i]!;
+        if (Math.abs(tr.vx - sh.vx) > 16 || Math.abs(tr.vy - sh.vy) > 16) continue;
+        const dt = snap.paused ? 0 : (hostMs - tr.atHostMs) / 1000;
+        if (dt < -0.02 || dt > 0.45) continue;
+        const px = tr.x + tr.vx * Math.max(0, dt);
+        const py = tr.y + tr.vy * Math.max(0, dt);
+        const d = Math.hypot(px - sh.x, py - sh.y);
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = i;
+        }
+      }
+
+      const bornHostMs = bestIdx >= 0 ? this.bulletTracks[bestIdx]!.bornHostMs : hostMs;
+      if (bestIdx >= 0) used.add(bestIdx);
+      this.shotBornHostMs.set(sh, bornHostMs);
+      nextTracks.push({
+        x: sh.x,
+        y: sh.y,
+        vx: sh.vx,
+        vy: sh.vy,
+        atHostMs: hostMs,
+        bornHostMs,
+      });
+    }
+
+    this.bulletTracks =
+      nextTracks.length > SNAP_MAX_SHOTS ? nextTracks.slice(-SNAP_MAX_SHOTS) : nextTracks;
+  }
+
+  private evaluateStraightShots(
+    lastSnap: CoopWorldSnapshot,
+    lastHostMs: number,
+    renderHostMs: number,
+    leadTargetHostMs: number,
+  ): CoopSnapShot[] {
+    const out: CoopSnapShot[] = [];
+    for (const sh of lastSnap.shots) {
+      if (sh.kind === 'beam' || sh.kind === 'rocket') continue;
+      const born = this.shotBornHostMs.get(sh) ?? -Infinity;
+      if (Number.isFinite(born) && renderHostMs < born - 28) {
+        continue;
+      }
+      if (lastSnap.paused) {
+        out.push(sh);
+        continue;
+      }
+      const ramp = Number.isFinite(born)
+        ? clampNum((renderHostMs - (born - 28)) / 420, 0, 1)
+        : 1;
+      const evalHostMs = renderHostMs + ramp * (leadTargetHostMs - renderHostMs);
+      const dtSec = clampNum((evalHostMs - lastHostMs) / 1000, -0.14, 0.21);
+      out.push(
+        dtSec === 0
+          ? sh
+          : {
+              ...sh,
+              x: sh.x + sh.vx * dtSec,
+              y: sh.y + sh.vy * dtSec,
+            },
+      );
+    }
+    return out;
+  }
+
+  private mergeShotsWithSpecials(
+    straightShots: readonly CoopSnapShot[],
+    pairSnap: CoopWorldSnapshot,
+    specialDtSec: number,
+  ): CoopSnapShot[] {
+    let hasSpecial = false;
+    for (const sh of pairSnap.shots) {
+      if (sh.kind === 'beam' || sh.kind === 'rocket') {
+        hasSpecial = true;
+        break;
+      }
+    }
+    if (!hasSpecial) return straightShots as CoopSnapShot[];
+    const merged = straightShots.slice();
+    for (const sh of pairSnap.shots) {
+      if (sh.kind === 'beam') {
+        merged.push(sh);
+      } else if (sh.kind === 'rocket') {
+        merged.push(
+          specialDtSec === 0
+            ? sh
+            : {
+                ...sh,
+                x: sh.x + sh.vx * specialDtSec,
+                y: sh.y + sh.vy * specialDtSec,
+              },
+        );
+      }
+    }
+    return merged;
   }
 
   private advanceShots(snap: CoopWorldSnapshot, dtSec: number): CoopWorldSnapshot {
     if (dtSec === 0 || snap.paused) return snap;
+    const rocketDt = clampNum(dtSec, 0, 0.065);
     return {
       ...snap,
-      shots: this.extrapolateShots(snap.shots, dtSec),
+      shots: snap.shots.map((sh) => {
+        if (sh.kind === 'beam') return sh;
+        const step = sh.kind === 'rocket' ? rocketDt : dtSec;
+        return {
+          ...sh,
+          x: sh.x + sh.vx * step,
+          y: sh.y + sh.vy * step,
+        };
+      }),
     };
   }
 

@@ -121,7 +121,7 @@ function makeFakeMultiplayer() {
 }
 
 function makeKeyEvent(type: 'keydown' | 'keyup', code: string, keyName: string, target: unknown = null): Event {
-  const ev = Object.assign(new Event(type), {
+  const ev = Object.assign(new Event(type, { cancelable: true }), {
     code,
     key: keyName,
     repeat: false,
@@ -246,8 +246,12 @@ test('Round 13 (Sec 5): Co-op Space on focused button never triggers game behind
     return { game, director, client, canvas, sentSnaps };
   };
 
-  // 1. Space & Enter on a focused <button> (e.g., Leave confirmation sheet) leave Co-op Host paused / at Game Over
-  const buttonTarget = { tagName: 'BUTTON' };
+  // 1. Space & Enter on a Leave-sheet <button> (`data-coop-stay` / `data-coop-confirm-leave`) leave Co-op Host paused / at Game Over,
+  // while Space on an in-game button (`Pause` / `Sound`, without Leave-sheet attributes) shoots instead of re-clicking the button (Round 14 §4.4).
+  const sheetButtonTarget = {
+    tagName: 'BUTTON',
+    hasAttribute: (name: string) => name === 'data-coop-stay',
+  };
   for (const phase of ['paused', 'over'] as const) {
     const { game, director, client } = makeCoopGame('host', 1280, 800, false);
     if (phase === 'paused') {
@@ -262,11 +266,28 @@ test('Round 13 (Sec 5): Co-op Space on focused button never triggers game behind
       ['Enter', 'Enter'],
       ['Space', ' '],
     ] as const) {
-      winTarget.dispatchEvent(makeKeyEvent('keydown', code, keyName, buttonTarget));
-      winTarget.dispatchEvent(makeKeyEvent('keyup', code, keyName, buttonTarget));
+      const kd = makeKeyEvent('keydown', code, keyName, sheetButtonTarget);
+      winTarget.dispatchEvent(kd);
+      assert.equal(kd.defaultPrevented, false, `${code} on Leave-sheet button must not be preventDefault-ed by Input`);
+      winTarget.dispatchEvent(makeKeyEvent('keyup', code, keyName, sheetButtonTarget));
     }
-    if (phase === 'paused') assert.equal(game.paused, true, 'Space/Enter on button did not unpause Host');
-    else assert.equal(game.state, 'over', 'Space/Enter on button did not relaunch Host behind sheet');
+    if (phase === 'paused') assert.equal(game.paused, true, 'Space/Enter on sheet button did not unpause Host');
+    else assert.equal(game.state, 'over', 'Space/Enter on sheet button did not relaunch Host behind sheet');
+    game.destroy();
+    director.dispose();
+    client.dispose();
+  }
+
+  // Round 14 (4.4): Space while focus sits on an in-game button (`Pause` / `Sound`) prevents button activation and fires cannons
+  {
+    const topBarBtn = { tagName: 'BUTTON', hasAttribute: () => false };
+    const { game, director, client } = makeCoopGame('host', 1280, 800, false);
+    const kd = makeKeyEvent('keydown', 'Space', ' ', topBarBtn);
+    winTarget.dispatchEvent(kd);
+    assert.equal(kd.defaultPrevented, true, 'Space on focused in-game button must preventDefault so button does not click');
+    game.update(1 / 60);
+    assert.equal(director.pilots[0].firing, true, 'Space on focused in-game button fires ship cannons');
+    winTarget.dispatchEvent(makeKeyEvent('keyup', 'Space', ' ', topBarBtn));
     game.destroy();
     director.dispose();
     client.dispose();

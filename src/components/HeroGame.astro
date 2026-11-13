@@ -984,10 +984,11 @@
         announce(true);
         if (ranks) ranks.hidden = Boolean(coopSession);
         if (pause) pause.hidden = Boolean(coopSession && coopSession.client.role !== 'host');
+        let coopDirector: { dispose: () => void } | null = null;
         try {
           inCoopGame = Boolean(coopSession);
           inCoopIsHost = Boolean(coopSession && coopSession.client.role === 'host');
-          const coopDirector =
+          const dir =
             coopSession && coopFlightMod
               ? new coopFlightMod.CoopFlightDirector({
                   client: coopSession.client,
@@ -1002,7 +1003,6 @@
                   },
                   onVersionMismatch: (message) => {
                     close(false, true);
-                    coopModal?.controller.leaveRoom();
                     coopModal?.controller.reportError(message);
                     if (coopOverlay) {
                       coopOverlay.hidden = false;
@@ -1015,9 +1015,10 @@
                   },
                 })
               : null;
+          coopDirector = dir;
           game = new GameCtor(canvas, {
             multiplayer,
-            ...(coopDirector ? { coop: { director: coopDirector } } : {}),
+            ...(dir ? { coop: { director: dir } } : {}),
             onExit: () => {
               if (!inCoopGame) {
                 close();
@@ -1046,6 +1047,7 @@
           ranks?.setAttribute('aria-pressed', 'false');
         } catch (error) {
           // The game could not start (no canvas support, say): put the page back exactly as it was.
+          coopDirector?.dispose();
           inCoopGame = false;
           inCoopIsHost = false;
           if (leaveConfirm) leaveConfirm.hidden = true;
@@ -1053,8 +1055,15 @@
           if (pause) pause.hidden = false;
           overlay.hidden = true;
           document.documentElement.classList.remove('game-active');
-          rest().forEach((el) => (el.inert = false));
           announce(false);
+          if (coopSession && coopOverlay) {
+            coopModal?.controller.reportError('Could not start squad flight on this device.');
+            coopOverlay.hidden = false;
+            rest().forEach((el) => (el.inert = true));
+            coopOverlay.focus({ preventScroll: true });
+          } else {
+            rest().forEach((el) => (el.inert = false));
+          }
           console.error('The arcade demo could not start.', error);
           return;
         }
@@ -1108,7 +1117,7 @@
           e.preventDefault();
           e.stopImmediatePropagation();
           if (document.activeElement === stayBtn) {
-            (e.shiftKey ? confirmLeaveBtn : confirmLeaveBtn).focus({ preventScroll: true });
+            confirmLeaveBtn.focus({ preventScroll: true });
           } else if (document.activeElement === confirmLeaveBtn) {
             stayBtn.focus({ preventScroll: true });
           } else {
@@ -1118,9 +1127,11 @@
         }
         const onSheetBtn = document.activeElement === stayBtn || document.activeElement === confirmLeaveBtn;
         if (onSheetBtn && (e.code === 'Enter' || e.code === 'Space')) {
+          if (e.repeat) e.preventDefault();
           e.stopImmediatePropagation();
           return;
         }
+        if (/^F([1-9]|1[0-2])$/.test(e.code)) return;
         e.preventDefault();
         e.stopImmediatePropagation();
       },

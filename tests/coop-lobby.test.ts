@@ -612,4 +612,15 @@ test('HeroGame hides [hidden] arcade buttons, confirms before leaving Co-op flig
     .split('\n')
     .filter((line) => /^\s*import\s+(?!type\b).*from\s+['"]\.\/coop-/.test(line));
   assert.deepEqual(runtimeCoopImports, [], 'game.ts contains only type-only imports from ./coop-*');
+
+  // 4. Round 14 (4.2 & P2/P6): `onVersionMismatch` keeps Guest seat/token (never calls `leaveRoom()`),
+  // Leave-sheet keydown blocks key-repeat auto-activation while passing F5 through, and `new GameCtor` failure recovers cleanly.
+  const mismatchBlock = heroSrc.slice(
+    heroSrc.indexOf('onVersionMismatch:'),
+    heroSrc.indexOf('onStatus:', heroSrc.indexOf('onVersionMismatch:')),
+  );
+  assert.ok(!mismatchBlock.includes('leaveRoom('), 'onVersionMismatch preserves Guest seat & token for refresh rejoin');
+  assert.ok(heroSrc.includes('if (e.repeat) e.preventDefault();'), 'held Space/Enter repeat cannot immediately confirm Leave');
+  assert.match(heroSrc, /\/\^F\(\[1-9\]\|1\[0-2\]\)\$\/\.test\(e\.code\)/, 'F1..F12 (including F5 refresh) pass through Leave sheet');
+  assert.ok(heroSrc.includes('game = new GameCtor(canvas, {') && heroSrc.includes('coopDirector?.dispose();'), 'Game constructor failure cleans up director and returns to lobby');
 });
