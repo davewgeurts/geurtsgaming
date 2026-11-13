@@ -2389,3 +2389,35 @@ test('Round 15 (6): a TV relaunch with nobody seated ends instead of running an 
   assert.equal(fresh.hostWorld.gameOver, false, 'a squad that never had a pilot waits');
   fresh.dispose();
 });
+
+test('Round 15 (batch 4): 150 ms away, a bullet the guest flies under has still caught up to the lead when it gets there', () => {
+  const pair = createDirectPair();
+  delaysR15(pair, 'j150', 91);
+  const dt = 1 / 60;
+  const tick = (ctrl: CoopLocalControlInput) => {
+    for (const sh of pair.hostWorld.shots) sh.y += sh.vy * dt;
+    stepPairR15(pair, ctrl);
+  };
+  for (let f = 0; f < 300; f++) tick(idleCtrl);
+  const me = pair.guestDir.pilots[1];
+  const startX = me.x;
+  // A bullet 200 px to the side of the guest, 1.4 s above its row; the guest then flies right, under it.
+  pair.hostWorld.shots.push({ x: startX + 200, y: me.y - 420, vx: 0, vy: 300, hostile: true, dead: false, color: '#ff4d4d' });
+  const right: CoopLocalControlInput = { across: 1, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 };
+  let checked = false;
+  for (let f = 0; f < 120 && !checked; f++) {
+    tick(me.x < startX + 200 ? right : idleCtrl);
+    const drawn = pair.guestWorld.shots.find((sh) => sh.hostile);
+    const truth = pair.hostWorld.shots[0];
+    if (drawn && truth && drawn.y >= me.y - 40) {
+      const it = pair.guestDir.interpolator as unknown as { ackHostOffsetMs: number };
+      const fullLeadMs = pair.clockMs + it.ackHostOffsetMs - (pair.hostDir as unknown as { hostSimElapsedMs: number }).hostSimElapsedMs;
+      const drawnLeadMs = ((drawn.y - truth.y) / truth.vy) * 1000;
+      assert.ok(Math.abs(drawn.x - me.x) < 30, 'the guest is under the bullet');
+      assert.ok(drawnLeadMs >= fullLeadMs * 0.85, `drawn ${drawnLeadMs.toFixed(0)} ms ahead of ${fullLeadMs.toFixed(0)} ms`);
+      checked = true;
+    }
+  }
+  assert.ok(checked, 'the bullet reached the guest');
+  pair.dispose();
+});

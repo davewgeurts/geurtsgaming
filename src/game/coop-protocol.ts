@@ -1364,7 +1364,11 @@ export class SnapshotInterpolator {
     this.focus = x === null || y === null || !Number.isFinite(x) || !Number.isFinite(y) ? null : { x, y };
   }
 
-  /** How soon a bullet passes nearest this guest's ship, in ms (Infinity if it moves away or passes 120 px off). */
+  /**
+   * How soon a bullet passes nearest this guest's ship, in ms: Infinity if it moves away, or passes further off than
+   * the ship can fly (at 380 px/s, steering by keys) by then, plus 120 px. A bullet the ship could still get under
+   * has to have caught up by the time it gets there, or at 150 ms or more each way it lands well behind the lead.
+   */
   private reachOf(sh: CoopSnapShot): number {
     const f = this.focus;
     const v2 = sh.vx * sh.vx + sh.vy * sh.vy;
@@ -1372,7 +1376,7 @@ export class SnapshotInterpolator {
     const t = -((sh.x - f.x) * sh.vx + (sh.y - f.y) * sh.vy) / v2;
     if (t <= 0) return Infinity;
     const miss = Math.hypot(sh.x + sh.vx * t - f.x, sh.y + sh.vy * t - f.y);
-    return miss > 120 ? Infinity : t * 1000;
+    return miss > 120 + 380 * t ? Infinity : t * 1000;
   }
 
   latest(): CoopWorldSnapshot | null {
