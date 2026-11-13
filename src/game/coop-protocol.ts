@@ -38,6 +38,19 @@ import { AMBER, LILAC, NEON, PEBBLE, PINK, ROCK, ROSE, SAND } from './core';
 export const COOP_WORLD_W = COOP_ARENA_WIDTH;
 export const COOP_WORLD_H = COOP_ARENA_HEIGHT;
 export const SNAP_PROTOCOL_VERSION = COOP_PROTOCOL_VERSION;
+/**
+ * Version 2 kept the version in the low two bits of the flags byte, and 3 is the last value two bits can hold. From
+ * version 3 on, those bits are always 3 and the real version is the next byte. A version 2 page still sees 3 there and
+ * asks its player to refresh; later versions only change the version byte.
+ */
+const SNAP_VERSION_BITS_EXTENDED = 3;
+/** Fixed header: type, flags, version, session, tick, wave, banner, score, freed, energy, upgrades, host time, counts. */
+const SNAP_HEADER_BYTES = 26;
+/**
+ * How far past the newest snapshot straight bullets may be drawn. It must exceed round trip plus two snapshot
+ * intervals, or bullets stand still at the cap until the next snapshot and then hop (round 15, 3.2).
+ */
+const STRAIGHT_LEAD_CAP_MS = 450;
 
 export const INPUT_FLAG_FIRING = INPUT_FLAG_FIRE;
 export {
@@ -374,9 +387,13 @@ export function formatBossMathQuestion(a: number, op: MathWireOp, b: number): st
   return `${a & 0xff} ${op} ${b & 0xff}`;
 }
 
-/** Pack an 8-byte `0x01` `BIN_FRAME_INPUT` frame. */
+/**
+ * Pack a `0x01` `BIN_FRAME_INPUT` frame: 8 bytes, plus 2 when `sendMs` is given (the guest's own clock in ms, low 16 bits),
+ * which lets the host time each input from when it was sent rather than when it arrived (network jitter removed).
+ */
 export function encodeGuestInput(input: CoopGuestInput): Uint8Array {
-  const buf = new ArrayBuffer(8);
+  const hasSendMs = typeof input.sendMs === 'number' && Number.isFinite(input.sendMs);
+  const buf = new ArrayBuffer(hasSendMs ? 10 : 8);
   const view = new DataView(buf);
   let flags = 0;
   if (input.firing) flags |= INPUT_FLAG_FIRING;
@@ -394,12 +411,13 @@ export function encodeGuestInput(input: CoopGuestInput): Uint8Array {
   view.setUint16(4, encodeCoord(input.targetY), true);
   view.setUint8(6, flags);
   view.setUint8(7, input.seq & 0xff);
+  if (hasSendMs) view.setUint16(8, Math.round(input.sendMs!) & 0xffff, true);
   return new Uint8Array(buf);
 }
 
-/** Unpack an 8-byte `0x01` `BIN_FRAME_INPUT` frame, returning `null` if malformed. */
+/** Unpack an 8- or 10-byte `0x01` `BIN_FRAME_INPUT` frame, returning `null` if malformed. */
 export function decodeGuestInput(bytes: Uint8Array): CoopGuestInput | null {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 8) return null;
+  if (!(bytes instanceof Uint8Array) || (bytes.byteLength !== 8 && bytes.byteLength !== 10)) return null;
   if (bytes[0] !== BIN_FRAME_INPUT) return null;
   const seatRaw = bytes[1]!;
   if (seatRaw > 3) return null;
@@ -421,6 +439,7 @@ export function decodeGuestInput(bytes: Uint8Array): CoopGuestInput | null {
     tap: (flags & INPUT_FLAG_TAP) !== 0,
     picking: (flags & INPUT_FLAG_PICKING) !== 0,
     seq,
+    ...(bytes.byteLength === 10 ? { sendMs: view.getUint16(8, true) } : {}),
   };
 }
 
@@ -495,7 +514,7 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
   const fieldBytes = field ? 9 + rockBitmap.byteLength : 0;
 
   const totalBytes =
-    25 +
+    SNAP_HEADER_BYTES +
     ships.length * 12 +
     enemies.length * 9 +
     bossBytes +
@@ -513,7 +532,7 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
   const view = new DataView(buf);
   let off = 0;
 
-  let vFlags = SNAP_PROTOCOL_VERSION & 0x03; // protocol v2
+  let vFlags = SNAP_VERSION_BITS_EXTENDED;
   if (snap.paused) vFlags |= 0x04;
   if (snap.parked) vFlags |= 0x08;
   if (snap.gameOver) vFlags |= 0x10;
@@ -536,6 +555,7 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
 
   view.setUint8(off++, BIN_FRAME_SNAP);
   view.setUint8(off++, vFlags);
+  view.setUint8(off++, SNAP_PROTOCOL_VERSION);
   view.setUint8(off++, sessionByte);
   view.setUint16(off, snap.tick & 0xffff, true);
   off += 2;
@@ -737,8 +757,10 @@ export function getSnapshotVersionMismatch(bytes: Uint8Array): 'older' | 'newer'
     return null;
   }
   if (bytes[0] !== BIN_FRAME_SNAP) return null;
-  const version = bytes[1]! & 0x03;
-  if (version === 0 || version === SNAP_PROTOCOL_VERSION) return null;
+  const bits = bytes[1]! & 0x03;
+  if (bits === 0) return null;
+  const version = bits === SNAP_VERSION_BITS_EXTENDED ? bytes[2]! : bits;
+  if (version === SNAP_PROTOCOL_VERSION) return null;
   return version < SNAP_PROTOCOL_VERSION ? 'older' : 'newer';
 }
 
@@ -749,7 +771,7 @@ export function isSnapshotVersionMismatch(bytes: Uint8Array): boolean {
 
 /** Unpack a `0x02` `BIN_FRAME_SNAP` binary snapshot, returning `null` on any truncated or invalid frame. */
 export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 25 || bytes.byteLength > MAX_BINARY_BYTES) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength < SNAP_HEADER_BYTES || bytes.byteLength > MAX_BINARY_BYTES) {
     return null;
   }
   if (bytes[0] !== BIN_FRAME_SNAP) return null;
@@ -759,7 +781,8 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
   let off = 1;
 
   const vFlags = view.getUint8(off++);
-  if ((vFlags & 0x03) !== SNAP_PROTOCOL_VERSION) return null;
+  if ((vFlags & 0x03) !== SNAP_VERSION_BITS_EXTENDED) return null;
+  if (view.getUint8(off++) !== SNAP_PROTOCOL_VERSION) return null;
 
   const paused = (vFlags & 0x04) !== 0;
   const parked = (vFlags & 0x08) !== 0;
@@ -1134,7 +1157,14 @@ function isNewerTick(prevTick: number, nextTick: number): boolean {
   return delta > 0 && delta < 32768;
 }
 
+/** The host sends a snapshot about every 55.6 ms (18 a second). */
 const HOST_SNAP_PERIOD_MS = 1000 / 18;
+/**
+ * How much of each new sample the bullet lead's running average takes. A guest and its host keep the same average (the
+ * guest for its bullets, the host for that guest's ship), so it must be the same on both sides; a small gain keeps the
+ * two close while a sample is still on its way from one to the other.
+ */
+export const COOP_LEAD_AVERAGE_GAIN = 0.05;
 
 interface BufferedSnapshot {
   unwrappedTick: number;
@@ -1176,7 +1206,9 @@ export class SnapshotInterpolator {
   private readonly shipSmoothOffset = new Map<CoopSeatIndex, { dx: number; dy: number }>();
   private readonly enemySmoothOffset = new Map<number, { dx: number; dy: number }>();
   private bossSmoothOffset: { dx: number; dy: number } = { dx: 0, dy: 0 };
+  /** The bullet lead in use. It glides toward `ackHostOffsetGoalMs` so a new measurement never makes bullets jump. */
   private ackHostOffsetMs: number | null = null;
+  private ackHostOffsetGoalMs: number | null = null;
   private bulletTracks: Array<{
     x: number;
     y: number;
@@ -1196,13 +1228,25 @@ export class SnapshotInterpolator {
   setAckHostOffset(offsetMs: number | null): void {
     if (offsetMs === null || !Number.isFinite(offsetMs)) {
       this.ackHostOffsetMs = null;
+      this.ackHostOffsetGoalMs = null;
       return;
     }
-    if (this.ackHostOffsetMs === null || Math.abs(offsetMs - this.ackHostOffsetMs) > 1200) {
+    if (this.ackHostOffsetGoalMs === null || this.ackHostOffsetMs === null || Math.abs(offsetMs - this.ackHostOffsetGoalMs) > 1200) {
       this.ackHostOffsetMs = offsetMs;
+      this.ackHostOffsetGoalMs = offsetMs;
     } else {
-      this.ackHostOffsetMs += (offsetMs - this.ackHostOffsetMs) * 0.2;
+      // The host keeps this same average (coop-flight.ts mirrorGuestLeads): change both together, or hits disagree.
+      this.ackHostOffsetGoalMs += (offsetMs - this.ackHostOffsetGoalMs) * COOP_LEAD_AVERAGE_GAIN;
     }
+  }
+
+  /** Move the lead in use toward the measured one by at most a tenth of the frame time, so bullets keep within 10% of their speed. */
+  private glideAckHostOffset(wallDtMs: number): void {
+    if (this.ackHostOffsetMs === null || this.ackHostOffsetGoalMs === null) return;
+    const gap = this.ackHostOffsetGoalMs - this.ackHostOffsetMs;
+    // A gap this big is a clock that jumped (a short host pause), not jitter: take it at once.
+    const step = Math.abs(gap) > 150 ? Math.abs(gap) : Math.max(0, wallDtMs) * 0.1;
+    this.ackHostOffsetMs += clampNum(gap, -step, step);
   }
 
   reset(): void {
@@ -1231,6 +1275,7 @@ export class SnapshotInterpolator {
     this.enemySmoothOffset.clear();
     this.bossSmoothOffset = { dx: 0, dy: 0 };
     this.ackHostOffsetMs = null;
+    this.ackHostOffsetGoalMs = null;
     this.bulletTracks.length = 0;
     this.shotBornHostMs = new WeakMap<CoopSnapShot, number>();
   }
@@ -1402,17 +1447,13 @@ export class SnapshotInterpolator {
     this.lastSampleWallMs = safeNow;
 
     this.decaySmoothOffsets(wallDt);
+    this.glideAckHostOffset(wallDt);
 
     const leadTargetHostMs =
       this.ackHostOffsetMs !== null
-        ? clampNum(safeNow + this.ackHostOffsetMs, presentHostMs - 40, last.hostMs + 210)
-        : clampNum(presentHostMs, renderHostMs, last.hostMs + 180);
-    const straightShots = this.evaluateStraightShots(
-      last.snap,
-      last.hostMs,
-      renderHostMs,
-      leadTargetHostMs,
-    );
+        ? clampNum(safeNow + this.ackHostOffsetMs, presentHostMs - 40, last.hostMs + STRAIGHT_LEAD_CAP_MS)
+        : clampNum(presentHostMs, renderHostMs, last.hostMs + STRAIGHT_LEAD_CAP_MS);
+    const straightShots = this.evaluateStraightShots(last.snap, last.hostMs, renderHostMs, leadTargetHostMs);
 
     if (this.needsReseam && this.prevSampleHostMs !== null) {
       this.needsReseam = false;
@@ -1683,21 +1724,24 @@ export class SnapshotInterpolator {
     leadTargetHostMs: number,
   ): CoopSnapShot[] {
     const out: CoopSnapShot[] = [];
+    // A new bullet appears at its muzzle as of the host's present (the render clock plus the interpolation delay, which
+    // moves smoothly) and catches up to the lead without ever flying more than 15% faster than it really does.
+    const startHostMs = Math.min(renderHostMs + this.interpDelayMs, Math.max(renderHostMs, leadTargetHostMs));
     for (const sh of lastSnap.shots) {
       if (sh.kind === 'beam' || sh.kind === 'rocket') continue;
       const born = this.shotBornHostMs.get(sh) ?? -Infinity;
-      if (Number.isFinite(born) && renderHostMs < born - 28) {
+      if (Number.isFinite(born) && startHostMs < born - 28) {
         continue;
       }
       if (lastSnap.paused) {
         out.push(sh);
         continue;
       }
-      const ramp = Number.isFinite(born)
-        ? clampNum((renderHostMs - (born - 28)) / 420, 0, 1)
-        : 1;
-      const evalHostMs = renderHostMs + ramp * (leadTargetHostMs - renderHostMs);
-      const dtSec = clampNum((evalHostMs - lastHostMs) / 1000, -0.14, 0.21);
+      const leadMs = Math.max(0, leadTargetHostMs - startHostMs);
+      const rampMs = Math.max(420, leadMs / 0.15);
+      const ramp = Number.isFinite(born) ? clampNum((startHostMs - (born - 28)) / rampMs, 0, 1) : 1;
+      const evalHostMs = startHostMs + ramp * (leadTargetHostMs - startHostMs);
+      const dtSec = clampNum((evalHostMs - lastHostMs) / 1000, -0.14, STRAIGHT_LEAD_CAP_MS / 1000);
       out.push(
         dtSec === 0
           ? sh

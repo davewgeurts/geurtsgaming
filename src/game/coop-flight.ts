@@ -18,6 +18,7 @@
 import type { Boss } from './boss';
 import type { CoopClient, StorageLike } from './coop-client';
 import {
+  COOP_LEAD_AVERAGE_GAIN,
   COOP_WORLD_H,
   COOP_WORLD_W,
   SNAP_MAX_FX,
@@ -133,6 +134,27 @@ const CHALLENGE_ID_BLOCK = 1_000_000;
 const upgradeIndexOf = (id: UpgradeId | null): number => (id ? UPGRADES.findIndex((u) => u.id === id) : -1);
 /** How many sent answers a guest keeps, to re-send one the host lost. */
 const ANSWER_CACHE_SIZE = 64;
+/** Fastest the host moves a guest's ship while following it (the pointer-plus-keys top speed). */
+const FOLLOW_MAX_SPEED = 1140;
+
+/** Host: a guest's recent reported positions, timed by its own send clock. */
+interface GuestTrack {
+  /** Unwrapped send time of the newest sample, in the guest's ms (null before the first). */
+  sendFull: number | null;
+  /** Smallest (arrival - send) seen, creeping up slowly: the base one-way delay plus the clock difference. */
+  offsetMinMs: number | null;
+  lastArrivalMs: number;
+  /** How late inputs usually arrive beyond the fastest one (an average, ms; stalls count as at most 150 ms). */
+  jitterMs: number;
+  /** Newest last. */
+  samples: { s: number; x: number; y: number }[];
+  /** Whether the samples carry the guest's own send times (10-byte frames) rather than arrival times. */
+  timedBySender: boolean;
+}
+
+function freshTrack(): GuestTrack {
+  return { sendFull: null, offsetMinMs: null, lastArrivalMs: 0, jitterMs: 0, samples: [], timedBySender: false };
+}
 const HOST_STATE_PREFIX = 'gg_coop_host_state_';
 const FX_RETENTION_SEC = 0.24;
 const ARM_COLORS = [NEON.lime, NEON.yellow, NEON.orange, NEON.violet] as const;
@@ -182,7 +204,6 @@ export interface CoopPilotShip {
   orbit: number;
   ackSeq: number;
   latestInput: CoopGuestInput | null;
-  pendingTap: { x: number; y: number } | null;
 }
 
 export interface CoopPickupItem {
@@ -362,8 +383,22 @@ export class CoopFlightDirector {
   ];
   /** Guest: answers already sent (by question or offer id), re-sent if the host asks again after losing one. */
   private readonly guestAnswerCache = new Map<number, { answerId: number; verdict: Grade; quality: number }>();
+  /** Host: each guest's recent reported positions, timed by the guest's own send clock (network jitter removed). */
+  private readonly tracks: GuestTrack[] = [freshTrack(), freshTrack(), freshTrack(), freshTrack()];
+  /** Host: per seat, the send time (in the track's unwrapped guest ms) of the newest input accepted, taps included. */
+  private readonly ackSendFull: Array<number | null> = [null, null, null, null];
+  /**
+   * Host: per seat, the bullet lead that guest's own screen uses: snapshot host time minus the send time of the input
+   * the snapshot acknowledges, averaged exactly as `setAckHostOffset` does. See `trackProjAgeSec`.
+   */
+  private readonly mirrorLeadMs: Array<number | null> = [null, null, null, null];
+  private readonly mirrorAckSeq: Array<number | null> = [null, null, null, null];
+  /** Host: pod taps waiting to strike the boss, per seat (a stalled link can deliver several at once). */
+  private readonly tapQueue: Array<{ x: number; y: number }>[] = [[], [], [], []];
   /** Guest: the host page's session byte, to forget answered question ids when the host page reloads. */
   private lastHostSession: number | null = null;
+  /** Guest: the input whose acknowledgement last calibrated the bullet lead (only a new ack is a new sample). */
+  private lastCalibAckSeq: number | null = null;
   private guestParked = false;
   private mismatchCount = 0;
   private lastSentDiscreteMask = -1;
@@ -441,7 +476,6 @@ export class CoopFlightDirector {
         orbit: 0,
         ackSeq: 0,
         latestInput: null,
-        pendingTap: null,
       };
     }) as [CoopPilotShip, CoopPilotShip, CoopPilotShip, CoopPilotShip];
 
@@ -830,6 +864,7 @@ export class CoopFlightDirector {
   resetSquadForNewRun(): void {
     this.pendingBreakWave = null;
     this.pickingHeldSec.fill(0);
+    for (let i = 0; i < 4; i++) this.resetGuestTiming(i as CoopSeatIndex);
     this.guestLocalBolts.length = 0;
     this.guestSendTimesMs.length = 0;
     this.guestSuppressedBullets.length = 0;
@@ -861,7 +896,6 @@ export class CoopFlightDirector {
     this.hadAnyPilotInRun = this.pilots.some((p) => p.present);
     for (const p of this.pilots) {
       p.latestInput = null;
-      p.pendingTap = null;
       p.answering = false;
       p.jamSec = 0;
       p.revives = 0;
@@ -1087,6 +1121,7 @@ export class CoopFlightDirector {
     this.pruneRecentFx();
     this.snapTick = (this.snapTick + 1) & 0xffff;
     const snap = this.buildWorldSnapshot(world);
+    this.mirrorGuestLeads(snap);
     const bytes = encodeWorldSnapshot(snap);
     this.client.sendBinary(bytes);
     return bytes;
@@ -1672,6 +1707,7 @@ export class CoopFlightDirector {
       if (!prevConnected && s.connected && !s.isHost) {
         reconnectedGuests.push(s.seat);
         this.hasHostSeenSeq[s.seat] = false;
+        this.resetGuestTiming(s.seat);
       }
       this.wasSeatConnected[s.seat] = s.connected;
     }
@@ -1680,6 +1716,7 @@ export class CoopFlightDirector {
       if (!lobby.seats.some((s) => s.seat === seat)) {
         this.wasSeatConnected[seat] = false;
         this.hasHostSeenSeq[seat] = false;
+        this.resetGuestTiming(seat);
       }
     }
 
@@ -1790,14 +1827,17 @@ export class CoopFlightDirector {
         if (!this.hasHostSeenSeq[pilot.seat]!) {
           pilot.ackSeq = input.seq;
           this.hasHostSeenSeq[pilot.seat] = true;
+          this.ackSendFull[pilot.seat] = this.senderTimeOf(pilot.seat, input);
         } else {
           const fwd = (input.seq - pilot.ackSeq + 256) & 0xff;
-          if (fwd < 128) pilot.ackSeq = input.seq;
+          if (fwd < 128) {
+            pilot.ackSeq = input.seq;
+            this.ackSendFull[pilot.seat] = this.senderTimeOf(pilot.seat, input);
+          }
         }
-        pilot.pendingTap = {
-          x: clamp(input.targetX, 0, COOP_WORLD_W),
-          y: clamp(input.targetY, 0, COOP_WORLD_H),
-        };
+        const queue = this.tapQueue[pilot.seat]!;
+        queue.push({ x: clamp(input.targetX, 0, COOP_WORLD_W), y: clamp(input.targetY, 0, COOP_WORLD_H) });
+        if (queue.length > 8) queue.shift();
         if (pilot.latestInput) {
           pilot.latestInput = { ...pilot.latestInput, firing: input.firing, seq: pilot.ackSeq };
         }
@@ -1826,6 +1866,8 @@ export class CoopFlightDirector {
 
       this.lastInputAtSec[pilot.seat] = this.elapsedSec;
       pilot.latestInput = input;
+      this.recordGuestSample(pilot.seat, input, tx, ty);
+      this.ackSendFull[pilot.seat] = this.senderTimeOf(pilot.seat, input);
       return;
     }
 
@@ -1869,7 +1911,17 @@ export class CoopFlightDirector {
       const wireMe = snap.ships.find((sh) => sh.seat === this.client.seat);
       if (wireMe) {
         const hist = this.predHistory[wireMe.ackSeq & 0xff];
-        if (hist && hist.valid && hist.seq === wireMe.ackSeq && Number.isFinite(hist.sentAtMs)) {
+        // During an upstream stall every snapshot repeats the same ack while host time runs on; feeding those
+        // would inflate the lead and make bullets surge. Calibrate once per newly acknowledged input.
+        if (
+          wireMe.ackSeq !== this.lastCalibAckSeq &&
+          hist &&
+          hist.valid &&
+          hist.seq === wireMe.ackSeq &&
+          Number.isFinite(hist.sentAtMs)
+        ) {
+          this.lastCalibAckSeq = wireMe.ackSeq;
+          // The host mirrors this same average (mirrorGuestLeads) to place our ship, so both screens agree on hits.
           this.interpolator.setAckHostOffset(snap.hostElapsedMs - hist.sentAtMs);
         }
       }
@@ -2032,7 +2084,8 @@ export class CoopFlightDirector {
         p.answering = false;
         p.jamSec = 0;
         p.latestInput = null;
-        p.pendingTap = null;
+        this.tracks[p.seat]!.samples.length = 0;
+        this.tapQueue[p.seat]!.length = 0;
         if (anyOtherLiving && !world.gameOver) {
           p.respawnSec = Math.max(0, p.respawnSec - simDt);
           if (p.respawnSec <= 0 && p.connected) {
@@ -2070,10 +2123,12 @@ export class CoopFlightDirector {
       const isHookedPilot = tankerHooked && this.hookedSeat === p.seat;
       const fireBlocked = squadParked || isHookedPilot || p.answering || p.jamSec > 0;
 
-      if (p.seat !== this.client.seat && p.connected && p.pendingTap) {
-        const tap = p.pendingTap;
-        p.pendingTap = null;
-        world.strikeBoss(tap.x, tap.y, true, true);
+      if (p.seat !== this.client.seat && p.connected) {
+        const queue = this.tapQueue[p.seat]!;
+        while (queue.length > 0) {
+          const tap = queue.shift()!;
+          world.strikeBoss(tap.x, tap.y, true, true);
+        }
       }
 
       if (this.squadBreakActive) {
@@ -2109,29 +2164,40 @@ export class CoopFlightDirector {
           } else if (!stale && inp.hasPointer) {
             p.x += dx * 380 * simDt;
             p.y += dy * 380 * simDt;
+            // Chase the newest reported position at the guest's own speed (from its send-timed reports), so the
+            // ship glides between the 20-a-second reports instead of jumping to each one and waiting. It never
+            // passes the reported position, so a stop is exact.
             const goalX = clampArenaShipX(inp.targetX);
             const goalY = clampArenaShipY(inp.targetY);
             const tx = goalX - p.x;
             const ty = goalY - p.y;
             const dist = Math.hypot(tx, ty);
             if (dist > 0.25) {
-              const step = Math.min(dist, 760 * simDt);
+              const est = this.trackSpeed(p.seat);
+              // About 100 ms of travel behind the newest report, so a report that is a little late does not
+              // let the copy catch up and stop.
+              const chase = clamp(est + Math.max(0, dist - est * 0.1) * 3, 30, FOLLOW_MAX_SPEED);
+              const step = Math.min(dist, chase * simDt);
               p.x += (tx / dist) * step;
               p.y += (ty / dist) * step;
             }
           } else if (!stale && (dx || dy)) {
             p.x += dx * 380 * simDt;
             p.y += dy * 380 * simDt;
-            const projAge = Math.min(age, COOP_STALE_INPUT_SEC);
+            // Projected from when the guest sent the input to the guest's own time for this host moment (see
+            // trackProjAgeSec), and no further than the next report could be late. A release is never overrun far.
+            const projAge = Math.min(this.trackProjAgeSec(p.seat) ?? age, this.trackLeadCapSec(p.seat));
             const goalX = clampArenaShipX(inp.targetX + dx * 380 * projAge);
             const goalY = clampArenaShipY(inp.targetY + dy * 380 * projAge);
             if (dx !== 0) {
               const dirX = Math.sign(dx);
               const leadX = (goalX - p.x) * dirX;
-              if (leadX > 12) {
-                p.x += dirX * Math.min(leadX - 12, 76 * simDt);
-              } else if (leadX < -34) {
-                p.x -= dirX * Math.min(-34 - leadX, 76 * simDt);
+              if (leadX > 1) {
+                // Behind (a late first report): close the gap within about a tenth of a second.
+                p.x += dirX * Math.min(leadX - 1, clamp((leadX - 1) * 10, 30, 520) * simDt);
+              } else if (leadX < 0) {
+                // Ahead of the guest: slow down (never reverse while the key is held).
+                p.x -= dirX * Math.min(-leadX, 380 * simDt);
               }
             } else {
               const errX = clampArenaShipX(inp.targetX) - p.x;
@@ -2142,10 +2208,11 @@ export class CoopFlightDirector {
             if (dy !== 0) {
               const dirY = Math.sign(dy);
               const leadY = (goalY - p.y) * dirY;
-              if (leadY > 12) {
-                p.y += dirY * Math.min(leadY - 12, 76 * simDt);
-              } else if (leadY < -34) {
-                p.y -= dirY * Math.min(-34 - leadY, 76 * simDt);
+              if (leadY > 1) {
+                // Behind (a late first report): close the gap within about a tenth of a second.
+                p.y += dirY * Math.min(leadY - 1, clamp((leadY - 1) * 10, 30, 520) * simDt);
+              } else if (leadY < 0) {
+                p.y -= dirY * Math.min(-leadY, 380 * simDt);
               }
             } else {
               const errY = clampArenaShipY(inp.targetY) - p.y;
@@ -2154,11 +2221,12 @@ export class CoopFlightDirector {
               }
             }
           } else if (!inp.hasPointer && !dx && !dy) {
+            // Stopped: settle onto the reported position with an ease-out, not a slide.
             const tx = clampArenaShipX(inp.targetX) - p.x;
             const ty = clampArenaShipY(inp.targetY) - p.y;
             const dist = Math.hypot(tx, ty);
             if (dist > 0.25) {
-              const step = Math.min(dist, 380 * simDt);
+              const step = Math.min(dist, Math.min(380, dist * 7 + 25) * simDt);
               p.x += (tx / dist) * step;
               p.y += (ty / dist) * step;
             }
@@ -2259,8 +2327,8 @@ export class CoopFlightDirector {
       me.firing = false;
     }
 
-    // 2. Send 8-byte `0x01` `BIN_FRAME_INPUT` at 20 Hz (borrowing from the 50ms budget on discrete edges,
-    // keeping total Guest sends well below the relay's 35 msg/s cap even across 600ms upstream stalls, while never dropping pod taps).
+    // 2. Send `0x01` `BIN_FRAME_INPUT` at 20 Hz. A key, fire or touch change goes out on the next frame instead, and
+    // pushes the next regular send back a full interval, so the rate never passes 20 a second (plus pod taps).
     const nowMs = this.nowFn();
     while (this.guestSendTimesMs.length > 0 && nowMs - this.guestSendTimesMs[0]! >= 1000) {
       this.guestSendTimesMs.shift();
@@ -2283,8 +2351,8 @@ export class CoopFlightDirector {
       this.sendGuestInputFrame(me, localCtrl, nowMs);
     } else if (
       this.guestSendTimesMs.length < 20 &&
-      (this.inputAccumSec >= COOP_INPUT_INTERVAL_SEC ||
-        (discreteChanged && this.inputAccumSec >= 0.032 && this.guestSendTimesMs.length < 18))
+      !this.upstreamStalledThrottle(nowMs) &&
+      (this.inputAccumSec >= COOP_INPUT_INTERVAL_SEC || (discreteChanged && this.inputAccumSec >= 0.015))
     ) {
       this.inputAccumSec -= COOP_INPUT_INTERVAL_SEC;
       this.lastSentDiscreteMask = discreteMask;
@@ -2395,7 +2463,7 @@ export class CoopFlightDirector {
             this.lastSeenAckSeq = wireMe.ackSeq;
             if (deltaAck >= 3 && deltaAck < 128) {
               // Upstream stall just flushed multiple queued inputs; give Host time to walk `p` within speed caps.
-              this.reconcileGraceSec = 0.42;
+              this.reconcileGraceSec = 0.7;
               this.pendingAckErr.dx = 0;
               this.pendingAckErr.dy = 0;
             } else if (this.reconcileGraceSec <= 0) {
@@ -2778,6 +2846,7 @@ export class CoopFlightDirector {
       tap: Boolean(tap),
       seq: this.inputSeq,
       picking: this.quiz.isPickingGrade(),
+      sendMs: sentAtMs,
     });
     this.client.sendBinary(frame);
   }
@@ -2813,7 +2882,6 @@ export class CoopFlightDirector {
       this.quiz.clearActive();
     }
     p.latestInput = null;
-    p.pendingTap = null;
     p.respawnSec = COOP_WINGMAN_RESPAWN_SEC;
     world.burst(SHIP, p.x, p.y, 1.15 * scale, 0, p.color);
     this.recordHostFx('ring', p.x, p.y, p.color);
@@ -3161,6 +3229,114 @@ export class CoopFlightDirector {
     return revivedCount;
   }
 
+  /**
+   * Guest: while the host has stopped acknowledging inputs (an upload stall: 10 or more outstanding, half a second),
+   * send a regular input only every 200 ms. The rest would only queue up and arrive in one burst that the relay's
+   * 35-a-second limit drops. Taps are never held back.
+   */
+  private upstreamStalledThrottle(nowMs: number): boolean {
+    if (this.lastSeenAckSeq === null) return false;
+    const outstanding = (this.inputSeq - this.lastSeenAckSeq + 256) & 0xff;
+    if (outstanding < 10 || outstanding > 200) return false;
+    const lastSent = this.guestSendTimesMs[this.guestSendTimesMs.length - 1];
+    return lastSent !== undefined && nowMs - lastSent < 200;
+  }
+
+  /** Host: forget a seat's timing (a new run, or the guest's page or socket started again). */
+  private resetGuestTiming(seat: CoopSeatIndex): void {
+    this.tracks[seat] = freshTrack();
+    this.tapQueue[seat]!.length = 0;
+    this.ackSendFull[seat] = null;
+    this.mirrorLeadMs[seat] = null;
+    this.mirrorAckSeq[seat] = null;
+  }
+
+  /** Host: an input's send time in the seat's track's unwrapped guest ms (null for an 8-byte frame without one). */
+  private senderTimeOf(seat: CoopSeatIndex, input: CoopGuestInput): number | null {
+    if (typeof input.sendMs !== 'number' || !Number.isFinite(input.sendMs)) return null;
+    const ref = this.tracks[seat]!.sendFull;
+    if (ref === null) return input.sendMs;
+    const low = ((ref % 65536) + 65536) % 65536;
+    const delta = (input.sendMs - low + 65536) % 65536;
+    return delta < 32768 ? ref + delta : ref - (65536 - delta);
+  }
+
+  /** Host: average each guest's bullet lead from this snapshot, once per newly acknowledged input, as the guest does. */
+  private mirrorGuestLeads(snap: CoopWorldSnapshot): void {
+    const hostMs = snap.hostElapsedMs;
+    if (hostMs === undefined || !Number.isFinite(hostMs)) return;
+    for (const ship of snap.ships) {
+      const seat = ship.seat;
+      if (seat === this.client.seat) continue;
+      const sent = this.ackSendFull[seat];
+      if (sent === null || ship.ackSeq === this.mirrorAckSeq[seat]) continue;
+      this.mirrorAckSeq[seat] = ship.ackSeq;
+      const sample = hostMs - sent;
+      const cur = this.mirrorLeadMs[seat];
+      this.mirrorLeadMs[seat] =
+        cur === null || Math.abs(sample - cur) > 1200 ? sample : cur + (sample - cur) * COOP_LEAD_AVERAGE_GAIN;
+    }
+  }
+
+  /** Host: record a guest's reported position, timed by its own send clock where the frame carries one. */
+  private recordGuestSample(seat: CoopSeatIndex, input: CoopGuestInput, x: number, y: number): void {
+    let tr = this.tracks[seat]!;
+    const arrival = this.nowFn();
+    let full = this.senderTimeOf(seat, input) ?? arrival; // an older 8-byte frame: time it by arrival
+    if (tr.sendFull !== null && full < tr.sendFull - 1000) {
+      // Over an ordered socket a report never comes from a second earlier: the guest's clock started again.
+      this.resetGuestTiming(seat);
+      tr = this.tracks[seat]!;
+      full = this.senderTimeOf(seat, input) ?? arrival;
+    }
+    if (tr.sendFull !== null && full <= tr.sendFull) return;
+    tr.timedBySender = typeof input.sendMs === 'number' && Number.isFinite(input.sendMs);
+    const raw = arrival - full;
+    tr.offsetMinMs =
+      tr.offsetMinMs === null ? raw : Math.min(tr.offsetMinMs + Math.max(0, arrival - tr.lastArrivalMs) * 0.002, raw);
+    tr.jitterMs += (clamp(raw - tr.offsetMinMs, 0, 150) - tr.jitterMs) * 0.1;
+    tr.lastArrivalMs = arrival;
+    tr.sendFull = full;
+    tr.samples.push({ s: full, x, y });
+    if (tr.samples.length > 6) tr.samples.shift();
+  }
+
+  /**
+   * Host: how far to project a guest's newest input, in seconds (null until it can be timed). A guest draws enemy
+   * bullets as they will be when its current input reaches the host: its screen maps host time to its own clock by the
+   * lead in `mirrorLeadMs`. Projected to the guest's own time for this host moment by that same mapping, the copy is
+   * where the guest's screen shows its ship when it shows the bullets of this moment, so both agree on every hit. The
+   * network's jitter does not move it. It is negative for a report that came in sooner than usual.
+   */
+  private trackProjAgeSec(seat: CoopSeatIndex): number | null {
+    const tr = this.tracks[seat]!;
+    const newest = tr.samples[tr.samples.length - 1];
+    const lead = this.mirrorLeadMs[seat];
+    if (!newest || lead === null || !tr.timedBySender) return null;
+    return Math.max(-120, this.hostSimElapsedMs - lead - newest.s) / 1000;
+  }
+
+  /** Host: the furthest to project: one report interval plus how late a report can usually be. */
+  private trackLeadCapSec(seat: CoopSeatIndex): number {
+    const jitter = this.tracks[seat]!.jitterMs;
+    return Math.min(COOP_STALE_INPUT_SEC, (50 + clamp(jitter * 1.25, 10, 80)) / 1000);
+  }
+
+  /** Host: the guest's speed from its last reports (px/s), measured over at least 30 ms of its own clock. */
+  private trackSpeed(seat: CoopSeatIndex): number {
+    const samples = this.tracks[seat]!.samples;
+    const newest = samples[samples.length - 1];
+    if (!newest) return 0;
+    for (let i = samples.length - 2; i >= 0; i--) {
+      const old = samples[i]!;
+      const span = newest.s - old.s;
+      if (span >= 30) {
+        return Math.min(FOLLOW_MAX_SPEED, Math.hypot(newest.x - old.x, newest.y - old.y) / (span / 1000));
+      }
+    }
+    return 0;
+  }
+
   /** While a pilot's grade picker is up, their question clock (and the break's) waits; at most COOP_GRADE_PICK_SEC. */
   private holdClocksWhilePicking(dt: number): void {
     let breakHeld = false;
@@ -3307,7 +3483,6 @@ export class CoopFlightDirector {
     p.jamSec = 0;
     this.downedAtSec[p.seat] = this.elapsedSec;
     p.latestInput = null;
-    p.pendingTap = null;
     p.respawnSec = COOP_WINGMAN_RESPAWN_SEC;
     world.ring(p.x, p.y, NEON.red, 110 * scale);
     world.ring(p.x, p.y, NEON.orange, 85 * scale);

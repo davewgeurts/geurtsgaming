@@ -6,7 +6,11 @@
  */
 import type { Grade } from './fireworks';
 
-export const COOP_PROTOCOL_VERSION = 2;
+/**
+ * 3: input frames may carry the guest's send time (10 bytes), the PICKING input flag and the answering bit, and the
+ * snapshot header carries the version in its own byte. Bump it whenever either frame changes shape or meaning.
+ */
+export const COOP_PROTOCOL_VERSION = 3;
 
 /** Unambiguous 31-symbol room code alphabet (`0/O/1/I/L` omitted) — matches `relay/room.mjs`. */
 export const COOP_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
@@ -332,6 +336,8 @@ export interface CoopGuestInput {
   seq: number;
   /** Grade picker on screen (never which grade). */
   picking?: boolean;
+  /** The guest's own clock when sent, ms mod 65536 (absent in older 8-byte frames). */
+  sendMs?: number;
 }
 
 export interface CoopMissionSummary {

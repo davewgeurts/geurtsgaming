@@ -1682,13 +1682,14 @@ test('Round 14 (3.1, 3.2, 4.1, 4.2, 4.3, Sec 5): smooth Host copy under 60±40ms
     });
     const v1 = new Uint8Array(baseBytes);
     v1[1] = (v1[1]! & ~0x03) | 1;
-    const v3 = new Uint8Array(baseBytes);
-    v3[1] = (v3[1]! & ~0x03) | 3;
+    // From version 3 the two old bits always hold 3 and the version is the next byte (Round 15, 5.12).
+    const v4 = new Uint8Array(baseBytes);
+    v4[2] = 4;
 
     olderPair.binarySinks.guest?.(v1);
     olderPair.binarySinks.guest?.(v1);
-    newerPair.binarySinks.guest?.(v3);
-    newerPair.binarySinks.guest?.(v3);
+    newerPair.binarySinks.guest?.(v4);
+    newerPair.binarySinks.guest?.(v4);
 
     assert.equal(olderMsgs[0], "The host's game is out of date. Ask the host to refresh.");
     assert.equal(newerMsgs[0], 'This game was updated. Refresh to rejoin.');
@@ -1762,4 +1763,289 @@ test('Round 14 (3.1, 3.2, 4.1, 4.2, 4.3, Sec 5): smooth Host copy under 60±40ms
     assert.equal(ratePair.hostWorld.bossTaps.length, totalTapsQueued, 'all Sum Boss pod taps reached Host');
     ratePair.dispose();
   }
+});
+
+// -----------------------------------------------------------------------------------------------------------------
+// Round 15 netcode fixes (Claude). Each test fails on 473f55e.
+// -----------------------------------------------------------------------------------------------------------------
+
+const { encodeGuestInput: encodeGuestInputR15 } = await import('../src/game/coop-protocol');
+
+/** A seeded random stream, so jitter is the same on every run. */
+function seededR15(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
+}
+
+type PairR15 = ReturnType<typeof createDirectPair>;
+function stepPairR15(pair: PairR15, guestCtrl: CoopLocalControlInput, dt = 1 / 60): void {
+  pair.advanceClock(dt * 1000);
+  pair.flushWire();
+  pair.hostDir.step(dt, dt, pair.hostWorld, idleCtrl);
+  pair.guestDir.step(dt, dt, pair.guestWorld, guestCtrl);
+}
+
+type NetProfileR15 = 'lan' | 'j60' | 'j100' | 'j150' | 'gate';
+/**
+ * One-way delays: LAN 5 ms; 60 ± 40, 100 ± 20 and 150 ± 30 ms; and the gate's profile, which is 60 ± 40 ms with 2% of
+ * messages held up a further 200–320 ms. The wire keeps order, so a held message holds up the ones behind it.
+ */
+function delaysR15(pair: PairR15, profile: NetProfileR15, seed: number): void {
+  const rnd = seededR15(seed);
+  const one = (): number => {
+    switch (profile) {
+      case 'lan':
+        return 5;
+      case 'j60':
+        return 20 + rnd() * 80;
+      case 'j100':
+        return 80 + rnd() * 40;
+      case 'j150':
+        return 120 + rnd() * 60;
+      case 'gate':
+        return 20 + rnd() * 80 + (rnd() < 0.02 ? 200 + rnd() * 120 : 0);
+    }
+  };
+  pair.setDelays(one, one);
+}
+
+test('Round 15 (3.1): a mouse or thumb moving at 250 or 400 px/s glides on the host instead of hopping', () => {
+  for (const profile of ['lan', 'j60'] as const) {
+    for (const speed of [250, 400]) {
+      const pair = createDirectPair();
+      delaysR15(pair, profile, 7);
+      const y = pair.guestDir.pilots[1].y;
+      const hold = (x: number): CoopLocalControlInput => ({
+        across: 0,
+        down: 0,
+        firing: false,
+        touching: true,
+        touchX: x,
+        touchY: y,
+      });
+      for (let f = 0; f < 120; f++) stepPairR15(pair, hold(80)); // park the ship at the left
+      let normal = 0;
+      let counted = 0;
+      let backward = 0;
+      let prev = pair.hostDir.pilots[1].x;
+      let px = 80;
+      for (let f = 0; f < 90; f++) {
+        px += speed / 60; // the pointer sweeps right, and the ship follows it
+        stepPairR15(pair, hold(px));
+        const hx = pair.hostDir.pilots[1].x;
+        const v = (hx - prev) * 60;
+        if (f >= 24 && f < 84) {
+          counted += 1;
+          if (v >= speed * 0.75 && v <= speed * 1.25) normal += 1;
+          if (hx < prev - 0.05) backward += 1;
+        }
+        prev = hx;
+      }
+      const share = normal / counted;
+      assert.equal(backward, 0, `${profile} ${speed} px/s: never steps backwards`);
+      assert.ok(share >= 0.95, `${profile} ${speed} px/s: ${(share * 100).toFixed(1)}% of host frames at normal speed`);
+      pair.dispose();
+    }
+  }
+});
+
+test('Round 15 (3.2): straight enemy bullets keep moving on a guest 100-150 ms away, without freezing or hopping', () => {
+  const dt = 1 / 60;
+  for (const profile of ['j100', 'j150'] as const) {
+    const pair = createDirectPair();
+    delaysR15(pair, profile, 11);
+    for (let f = 0; f < 150; f++) stepPairR15(pair, idleCtrl); // calibrate the bullet lead
+    const speed = 200;
+    const last = new Map<number, number>();
+    let frames = 0;
+    let still = 0;
+    let worst = 0;
+    for (let f = 0; f < 360; f++) {
+      if (f % 30 === 0 && f < 240) {
+        const lane = 60 + (f / 30) * 70; // one bullet every half second, each in its own lane
+        pair.hostWorld.shots.push({ x: lane, y: 40, vx: 0, vy: speed, hostile: true, dead: false, color: '#ff4d4d' });
+      }
+      for (const sh of pair.hostWorld.shots) sh.y += sh.vy * dt;
+      pair.hostWorld.shots = pair.hostWorld.shots.filter((sh) => sh.y < 1000);
+      stepPairR15(pair, idleCtrl);
+      const seen = new Set<number>();
+      for (const sh of pair.guestWorld.shots) {
+        if (!sh.hostile) continue;
+        const lane = Math.round(sh.x);
+        seen.add(lane);
+        const before = last.get(lane);
+        last.set(lane, sh.y);
+        if (before === undefined) continue;
+        const step = (sh.y - before) / (speed * dt);
+        frames += 1;
+        if (step < 0.25) still += 1;
+        worst = Math.max(worst, step);
+      }
+      for (const lane of [...last.keys()]) if (!seen.has(lane)) last.delete(lane);
+    }
+    assert.ok(frames > 1000, `${profile}: ${frames} bullet frames`);
+    assert.ok(still / frames < 0.02, `${profile}: bullets stood still in ${still} of ${frames} frames`);
+    assert.ok(worst <= 1.5, `${profile}: a bullet moved ${worst.toFixed(2)}x its speed in one frame`);
+    pair.dispose();
+  }
+});
+
+test("Round 15 (3.3): after 250 and 600 ms upload stalls the guest's own ship stays put when it stops", () => {
+  for (const stallMs of [250, 600]) {
+    for (const seed of [3, 4]) {
+      const pair = createDirectPair();
+      const rnd = seededR15(seed);
+      const base = () => 20 + rnd() * 80;
+      // Every 3 s, the upload stalls for `stallMs`: whatever is sent then arrives together when it ends.
+      const up = () => {
+        const ph = (pair.clockMs - 2000) % 3000;
+        return ph >= 2000 && ph < 2000 + stallMs ? base() + (2000 + stallMs - ph) : base();
+      };
+      pair.setDelays(up, base);
+      let releasedAt: number | null = null;
+      let drift = 0;
+      let wasMoving = false;
+      for (let f = 0; f < 60 * 13; f++) {
+        const t = (pair.clockMs - 2000) / 1000;
+        // Hold a key for 0.8 s, let go for 0.2 s, and change direction every second.
+        const across = t < 0 ? 0 : (Math.floor(t) % 2 === 0 ? 1 : -1) * (t % 1 < 0.8 ? 1 : 0);
+        stepPairR15(pair, { across, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 });
+        const me = pair.guestDir.pilots[1].x;
+        const moving = across !== 0;
+        if (wasMoving && !moving) releasedAt = me;
+        if (!moving && releasedAt !== null) drift = Math.max(drift, Math.abs(me - releasedAt));
+        if (moving) releasedAt = null;
+        wasMoving = moving;
+      }
+      assert.ok(drift <= 2, `${stallMs} ms stalls, seed ${seed}: the stopped ship was pulled ${drift.toFixed(1)} px`);
+      pair.dispose();
+    }
+  }
+});
+
+function releaseOvershootR15(profile: NetProfileR15): number[] {
+  const overshoots: number[] = [];
+  const HOLD = 1.6;
+  const REL = 0.5;
+  for (const seed of [5, 15, 25]) {
+    const pair = createDirectPair();
+    delaysR15(pair, profile, seed);
+    let stop: { x: number; dir: number } | null = null;
+    let over = 0;
+    let wasHeld = false;
+    for (let f = 0; f < 60 * 32; f++) {
+      const t = f / 60;
+      const dir = Math.floor(t / HOLD) % 2 === 0 ? 1 : -1;
+      const held = t > 1 && t % HOLD < HOLD - REL;
+      stepPairR15(pair, { across: held ? dir : 0, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 });
+      if (wasHeld && !held) {
+        if (stop) overshoots.push(over);
+        stop = { x: pair.guestDir.pilots[1].x, dir };
+        over = 0;
+      }
+      if (stop && !held) over = Math.max(over, (pair.hostDir.pilots[1].x - stop.x) * stop.dir);
+      wasHeld = held;
+    }
+    pair.dispose();
+  }
+  return overshoots.sort((a, b) => a - b);
+}
+
+test("Round 15 (3.3): the host's copy runs only a little past a released key, then settles", () => {
+  const pct = (xs: number[], q: number) => xs[Math.min(xs.length - 1, Math.floor(xs.length * q))]!;
+  const j60 = releaseOvershootR15('j60');
+  const gate = releaseOvershootR15('gate');
+  const info = `60 ± 40: p95 ${pct(j60, 0.95).toFixed(1)} max ${j60[j60.length - 1]!.toFixed(1)} | gate: p95 ${pct(gate, 0.95).toFixed(1)} max ${gate[gate.length - 1]!.toFixed(1)}`;
+  console.log(`release overshoot ${info}`);
+  assert.ok(pct(j60, 0.95) <= 22, info);
+  assert.ok(pct(gate, 0.95) <= 26, info);
+});
+
+test('Round 15 (5.7): pod taps that arrive together all reach the boss', () => {
+  const pair = createDirectPair();
+  const boss = createBoss(2, pair.hostWorld.bossEnvObj);
+  boss.state = 'fight';
+  boss.x = 384;
+  boss.y = 200;
+  pair.hostWorld.boss = boss;
+  for (let f = 0; f < 30; f++) stepPairR15(pair, idleCtrl);
+  const before = pair.hostWorld.bossTaps.length;
+  for (let i = 0; i < 4; i++) {
+    pair.binarySinks.host!(
+      encodeGuestInputR15({
+        seat: 1,
+        targetX: 300 + i * 10,
+        targetY: 200,
+        firing: false,
+        hasPointer: false,
+        left: false,
+        right: false,
+        up: false,
+        down: false,
+        tap: true,
+        seq: 200 + i,
+      }),
+    );
+  }
+  pair.hostDir.step(1 / 60, 1 / 60, pair.hostWorld, idleCtrl);
+  assert.equal(pair.hostWorld.bossTaps.length - before, 4);
+  pair.dispose();
+});
+
+test('Round 15 (5.7): through repeated 900 ms upload stalls, the relay never sees more than 35 inputs in a second', async () => {
+  const { GUEST_MAX_MESSAGES_PER_SEC } = await import('../relay/room.mjs');
+  const pair = createDirectPair();
+  const rnd = seededR15(9);
+  const base = () => 20 + rnd() * 80;
+  // Every 3 s the upload stalls for 900 ms: whatever is sent then arrives together when it ends.
+  const up = () => {
+    const ph = (pair.clockMs - 2000) % 3000;
+    return ph >= 1000 && ph < 1900 ? base() + (1900 - ph) : base();
+  };
+  pair.setDelays(up, base);
+  const arrivals: number[] = [];
+  const deliver = pair.binarySinks.host!;
+  pair.binarySinks.host = (bytes: Uint8Array) => {
+    arrivals.push(pair.clockMs);
+    deliver(bytes);
+  };
+  for (let f = 0; f < 60 * 13; f++) {
+    const t = pair.clockMs / 1000;
+    // Frantic steering: change direction every 120 ms, so the guest also sends early on every change.
+    const across = Math.floor(t / 0.12) % 3 === 0 ? -1 : Math.floor(t / 0.12) % 3 === 1 ? 1 : 0;
+    stepPairR15(pair, { across, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 });
+  }
+  let busiest = 0;
+  for (let i = 0, j = 0; i < arrivals.length; i++) {
+    while (arrivals[i]! - arrivals[j]! >= 1000) j += 1;
+    busiest = Math.max(busiest, i - j + 1);
+  }
+  assert.ok(arrivals.length > 150, `${arrivals.length} inputs arrived`);
+  assert.ok(busiest <= GUEST_MAX_MESSAGES_PER_SEC, `busiest second at the relay: ${busiest} inputs`);
+  pair.dispose();
+});
+
+test('Round 15 (3.2): the bullet lead does not balloon during an upload stall', () => {
+  const pair = createDirectPair();
+  const rnd = seededR15(5);
+  let stallUntil = -1;
+  pair.setDelays(
+    () => (pair.clockMs < stallUntil ? stallUntil - pair.clockMs + 60 : 60 + (rnd() * 2 - 1) * 40),
+    () => 60 + (rnd() * 2 - 1) * 40,
+  );
+  for (let f = 0; f < 240; f++) stepPairR15(pair, idleCtrl);
+  // The measured lead (on 473f55e there is no separate goal, so read the one value it has).
+  const lead = () => {
+    const it = pair.guestDir.interpolator as unknown as { ackHostOffsetMs: number | null; ackHostOffsetGoalMs?: number | null };
+    return (it.ackHostOffsetGoalMs ?? it.ackHostOffsetMs)!;
+  };
+  const before = lead();
+  stallUntil = pair.clockMs + 600;
+  let peak = before;
+  for (let f = 0; f < 60; f++) {
+    stepPairR15(pair, idleCtrl);
+    peak = Math.max(peak, lead());
+  }
+  assert.ok(peak - before <= 80, `lead grew ${(peak - before).toFixed(0)} ms during the stall`);
+  pair.dispose();
 });

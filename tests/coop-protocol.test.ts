@@ -725,9 +725,9 @@ test('SnapshotInterpolator rides out 250ms network stalls without snap-jumps and
   assert.equal(fxIt256.consumeNewFx().length, 1, 'exact 256-FX wrap across gap still plays next FX');
 });
 
-test('Round 13 (4.3): snapshot protocol version 2 rejects legacy v1 frames and detects version mismatches cleanly', () => {
-  assert.equal(COOP_PROTOCOL_VERSION, 2);
-  assert.equal(SNAP_PROTOCOL_VERSION, 2);
+test('Round 13 (4.3), Round 15 (5.12): snapshot protocol version 3 rejects other versions and names which side is out of date', () => {
+  assert.equal(COOP_PROTOCOL_VERSION, 3);
+  assert.equal(SNAP_PROTOCOL_VERSION, 3);
 
   const valid = encodeWorldSnapshot({
     session: 9,
@@ -750,22 +750,26 @@ test('Round 13 (4.3): snapshot protocol version 2 rejects legacy v1 frames and d
     items: [],
     fx: [],
   });
-  assert.equal(valid.byteLength, 25, 'minimum v2 snapshot header is 25 bytes');
-  assert.equal(valid[1]! & 0x03, 2, 'version bits encode protocol version 2');
+  assert.equal(valid.byteLength, 26, 'minimum v3 snapshot header is 26 bytes');
+  // A version 2 page reads the two version bits, sees 3 instead of its own 2, and asks its player to refresh.
+  assert.equal(valid[1]! & 0x03, 3, 'the two old version bits hold 3, meaning "the version is in the next byte"');
+  assert.equal(valid[2], 3, 'the version byte holds 3');
   assert.equal(isSnapshotVersionMismatch(valid), false);
   assert.ok(decodeWorldSnapshot(valid));
 
-  for (const wrongVer of [1, 3]) {
+  // Frames from version 1 and 2 hosts keep the version in the two bits.
+  for (const oldVer of [1, 2]) {
     const mutated = new Uint8Array(valid);
-    mutated[1] = (mutated[1]! & ~0x03) | wrongVer;
-    assert.equal(decodeWorldSnapshot(mutated), null, `version ${wrongVer} is rejected by decoder`);
-    assert.equal(isSnapshotVersionMismatch(mutated), true, `version ${wrongVer} is flagged as version mismatch`);
-    assert.equal(
-      getSnapshotVersionMismatch(mutated),
-      wrongVer === 1 ? 'older' : 'newer',
-      `version ${wrongVer} reports directional mismatch`,
-    );
+    mutated[1] = (mutated[1]! & ~0x03) | oldVer;
+    assert.equal(decodeWorldSnapshot(mutated), null, `version ${oldVer} is rejected by decoder`);
+    assert.equal(isSnapshotVersionMismatch(mutated), true, `version ${oldVer} is flagged as version mismatch`);
+    assert.equal(getSnapshotVersionMismatch(mutated), 'older', `version ${oldVer} is older`);
   }
+  // Later versions keep 3 in the bits and change the version byte.
+  const future = new Uint8Array(valid);
+  future[2] = 4;
+  assert.equal(decodeWorldSnapshot(future), null, 'version 4 is rejected by decoder');
+  assert.equal(getSnapshotVersionMismatch(future), 'newer', 'version 4 is newer');
   assert.equal(getSnapshotVersionMismatch(valid), null);
   const v0Mutated = new Uint8Array(valid);
   v0Mutated[1] = v0Mutated[1]! & ~0x03;
