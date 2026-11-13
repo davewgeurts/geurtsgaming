@@ -85,7 +85,9 @@ const ogImage = new URL(image, Astro.site ?? 'https://geurtsgaming.com');
         cookie_expires: 0,
       });
       gtag('js', new Date());
-      gtag('config', 'G-R00Y85816Z');
+      gtag('config', 'G-R00Y85816Z', {
+        page_location: location.origin + location.pathname,
+      });
     </script>
 
     <slot name="head" />
