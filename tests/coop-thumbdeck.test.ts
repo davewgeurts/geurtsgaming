@@ -417,8 +417,9 @@ test('Round 13 (4.2): tablet portrait (768x1024 and 810x1080) wingman tags have 
   }
 });
 
-test('Round 13 (Sec 5): Guest Game Over shows host-relaunch notice without Top 10, Game Over hides reboot timers, and stacked wrecks stagger labels', () => {
-  // 1. Guest Game Over draws "WAITING FOR THE HOST TO RELAUNCH" (at mid + 96) and omits BEST + Top 10 + Retry
+test('Round 13 (Sec 5): Guest Game Over shows host-relaunch notice without Top 10, Game Over hides reboot timers, and stacked wrecks stagger labels', async () => {
+  // 1. A squad's game over is its mission summary: the solo HUD lines (BEST, Top 10, Retry) are not drawn at all, and
+  // a guest's summary says it is waiting for the host (Round 15, 6: the HUD's own co-op lines were never shown).
   const guestRec = createStrokeRecorder();
   renderMessages(
     baseHudContext(guestRec.ctx, guestRec.ink, {
@@ -430,11 +431,24 @@ test('Round 13 (Sec 5): Guest Game Over shows host-relaunch notice without Top 1
       coopRole: 'guest',
     }),
   );
-  const expectedWaitWidth = textWidth('WAITING FOR THE HOST TO RELAUNCH', 10);
-  assert.equal(guestRec.batches.length, 4, 'Guest Game Over draws exactly 4 lines (GAME OVER, SCORE, SQUAD SET FREE, WAITING FOR HOST)');
-  const waitBatch = guestRec.batches[3]!;
-  assert.equal(waitBatch.color, NEON.cyan);
-  assert.ok(Math.abs(waitBatch.w - expectedWaitWidth) < 4, 'bottom line matches WAITING FOR THE HOST TO RELAUNCH');
+  assert.equal(guestRec.batches.length, 0, 'the HUD draws nothing over a squad game over');
+  const { renderSquadMissionSummary } = await import('../src/game/coop-quiz');
+  const summaryRec = createStrokeRecorder();
+  renderSquadMissionSummary(summaryRec.ctx as never, summaryRec.ink, {
+    formattedCode: 'R13-SEC',
+    isHost: false,
+    coarse: false,
+    time: 0.2,
+    stateTime: 1.5,
+    score: 1200,
+    wave: 4,
+    totalFreed: 3,
+    upgrades: new Set(),
+    pilots: [{ seat: 1, callsign: 'NOVA', color: NEON.cyan, questionsRight: 2, revives: 1 }],
+  });
+  const expectedWaitWidth = textWidth('WAITING FOR THE HOST TO RELAUNCH', 10.5);
+  const waitBatch = summaryRec.batches.find((b) => b.color === NEON.cyan && Math.abs(b.w - expectedWaitWidth) < 4);
+  assert.ok(waitBatch, "a guest's summary says WAITING FOR THE HOST TO RELAUNCH");
 
   // Solo Game Over still draws BEST + TOP 10 + PRESS SPACE TO RETRY (6 lines)
   const soloRec = createStrokeRecorder();
@@ -603,4 +617,48 @@ test('Round 15 (6): wreck labels never overprint, and deck card titles use only 
   assert.ok(card && card.kind === 'choice');
   const blanks = [...card.title].filter((ch) => !hasGlyph(ch));
   assert.deepEqual(blanks, [], `"${card.title}" draws blanks for ${blanks.join(' ')}`);
+});
+
+test("Round 15 (6): on a phone and a tablet, the page's buttons never cover the Sum Boss's face, health bar or taunt", () => {
+  const seats: CoopPublicSeat[] = [0, 1].map((i) => ({ seat: i as 0 | 1, callsign: `P${i + 1}`, ready: true, isHost: i === 0, connected: true }));
+  for (const [vw, vh] of [
+    [390, 844],
+    [360, 640],
+    [768, 1024],
+  ] as const) {
+    const client = new CoopClient({ code: 'BOSS15', role: 'host', storage: null });
+    Object.assign(client, { seat: 0, seats });
+    const dir = new CoopFlightDirector({ client, initialSeats: seats, storage: null, now: () => 1000 });
+    const layout = dir.setViewport(vw, vh, undefined, true);
+    // A host's row in co-op (HeroGame.astro): Pause and Sound 44 px, Exit 57 px (measured in Chrome at 390x844), 6 px
+    // apart on narrow phones; wider screens give Exit more room. 12 px from the top and right, 44 px tall.
+    const rowW = vw <= 420 ? 44 + 44 + 57 + 2 * 6 : 44 + 44 + 80 + 2 * 8;
+    const controls: Box = { x: vw - 12 - rowW, y: 12, w: rowW, h: 44 };
+    const draw = (bossShown: boolean) => {
+      const rec = createStrokeRecorder();
+      rec.ctx.save();
+      rec.ctx.translate(layout.arenaRect.x, layout.arenaRect.y);
+      rec.ctx.scale(layout.arenaScale, layout.arenaScale);
+      const ctxv = baseHudContext(rec.ctx, rec.ink, { controlsBottom: dir.mapCanvasPointToArena(0, 56).y });
+      if (!bossShown) {
+        ctxv.boss = null;
+        ctxv.villain.show = 0;
+      }
+      renderHud(ctxv);
+      rec.ctx.restore();
+      return rec.batches;
+    };
+    // The boss's corner is drawn last: whatever a boss adds to the HUD is its face, health bar and taunt.
+    const without = draw(false).length;
+    const bossParts = draw(true).slice(without);
+    assert.ok(bossParts.length >= 3, `${vw}x${vh}: the boss's corner was drawn`);
+    const covered = bossParts.filter((b) => boxesOverlap(b, controls));
+    assert.deepEqual(
+      covered.map((b) => `${b.color} at (${Math.round(b.x)},${Math.round(b.y)}) ${Math.round(b.w)}x${Math.round(b.h)}`),
+      [],
+      `${vw}x${vh}: the boss's corner is drawn under the buttons`,
+    );
+    dir.dispose();
+    client.dispose();
+  }
 });

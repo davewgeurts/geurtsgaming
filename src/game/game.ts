@@ -2105,6 +2105,8 @@ export class Game {
       scale: this.scale,
       shipScale: this.shipScale,
       inset: this.inset,
+      // The page's buttons (HeroGame.astro .arcade-controls: 12 px from the top, 44 px tall) over co-op's scaled arena.
+      ...(this.coop ? { controlsBottom: this.coop.mapCanvasPointToArena(0, this.viewInset.top + 56).y } : {}),
       room: this.room,
       homeY: this.homeY,
       time: this.time,

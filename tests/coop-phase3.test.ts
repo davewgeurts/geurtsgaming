@@ -2277,3 +2277,21 @@ test("Round 15 follow-up 2 (privacy): the host ignores a guest's score, and the 
     sq.cleanup();
   }
 });
+
+test('Round 15 (6): an answer that reaches a paused host changes nothing until play resumes, then counts', async () => {
+  const sq = await createLiveSquad({ guestCount: 1 });
+  sq.hostDir.setGrade(1);
+  sq.guestDirs[0]!.setGrade(1);
+  const p1 = bombOnGuest(sq);
+  await sq.tickSquad(36); // past the grace: the guest shows the question
+  sq.hostWorld.paused = true; // the host pauses just as the guest answers
+  await answerGuestCard(sq, 0, true, 96);
+  await sq.tickSquad(30);
+  assert.equal(p1.answering, true, 'nothing changes while the host is paused');
+  assert.equal(p1.alive, true);
+  sq.hostWorld.paused = false;
+  await sq.tickSquad(6);
+  assert.equal(p1.answering, false, 'the answer counts once play resumes');
+  assert.equal(p1.alive, true, 'the bomb was defused, not set off');
+  sq.cleanup();
+});

@@ -1057,6 +1057,8 @@
           document.documentElement.classList.remove('game-active');
           announce(false);
           if (coopSession && coopOverlay) {
+            // Give up the seat: a pilot that never moves or answers would hold every break up for the squad.
+            coopModal?.controller.leaveRoom();
             coopModal?.controller.reportError('Could not start squad flight on this device.');
             coopOverlay.hidden = false;
             rest().forEach((el) => (el.inert = true));

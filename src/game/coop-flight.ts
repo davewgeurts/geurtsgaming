@@ -427,6 +427,8 @@ export class CoopFlightDirector {
   /** Host: the host's own link dropped, and has come back (the next host step asks every open question again). */
   private hostLinkDropped = false;
   private hostLinkReturned = false;
+  /** Answers that came in while the host was paused: nothing changes during a pause, so they wait for play to resume. */
+  private answersWhilePaused: CoopAnswerMessage[] = [];
   /** Host: game.ts ends each frame with endHostFrame, so the periodic snapshot waits for it (`hostSnapDue`). */
   private hostFrameEnds = false;
   private hostSnapDue = false;
@@ -976,6 +978,7 @@ export class CoopFlightDirector {
 
   /** Reset all present pilots to formation & full hull when the Host starts a fresh squad run. */
   resetSquadForNewRun(): void {
+    this.answersWhilePaused = [];
     this.pickingHeldSec.fill(0);
     this.staleHeldSec.fill(0);
     this.pendingAnswer = null;
@@ -1008,7 +1011,8 @@ export class CoopFlightDirector {
     this.lastInputAtSec.fill(0);
     this.awaitingRespawnSync.fill(true);
     this.respawnSyncDeadlineSec.fill(this.elapsedSec + 0.9);
-    this.hadAnyPilotInRun = this.pilots.some((p) => p.present);
+    // A relaunch with nobody seated must still end (TV mode): only a squad that has never had a pilot waits for one.
+    this.hadAnyPilotInRun ||= this.pilots.some((p) => p.present);
     for (const p of this.pilots) {
       p.latestInput = null;
       p.answering = false;
@@ -2231,6 +2235,11 @@ export class CoopFlightDirector {
     }
 
     if (!world.gameOver && !world.paused) {
+      if (this.answersWhilePaused.length > 0) {
+        const held = this.answersWhilePaused;
+        this.answersWhilePaused = [];
+        for (const msg of held) this.handleWireAnswer(msg);
+      }
       this.holdQuestionClocks(simDt, world);
       this.checkHostQuizTimeouts(world);
       if (world.gameOver) {
@@ -3262,6 +3271,12 @@ export class CoopFlightDirector {
     if (!w || w.gameOver) return;
     if (typeof msg.seat !== 'number' || !Number.isInteger(msg.seat) || msg.seat < 0 || msg.seat > 3) return;
     if (typeof msg.id !== 'number' || !Number.isInteger(msg.id) || msg.id <= 0) return;
+    if (w.paused) {
+      // One that was on its way when the pause began still counts, once play resumes (each seat and id once).
+      const dup = this.answersWhilePaused.some((a) => a.seat === msg.seat && a.id === msg.id);
+      if (!dup && this.answersWhilePaused.length < 16) this.answersWhilePaused.push(msg);
+      return;
+    }
     const verdict: Grade =
       msg.verdict === 'perfect' || msg.verdict === 'good' || msg.verdict === 'failed' ? msg.verdict : 'failed';
     // Only right or wrong counts: the guest's score is ignored (a band-scaled score would reveal the grade band).

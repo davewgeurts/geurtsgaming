@@ -2360,3 +2360,32 @@ test('Round 15 follow-up (b2 13): a key change goes out on the next frame, and t
   }
   pair.dispose();
 });
+
+test('Round 15 (6): a TV relaunch with nobody seated ends instead of running an empty squad forever', () => {
+  const dt = 1 / 60;
+  const tvPair = createDirectPair({ tvMode: true });
+  const lobby = (seats: CoopPublicSeat[]) =>
+    tvPair.lobbySinks.host?.({ code: 'R15TV0', formattedCode: 'R15-TV0', hostConnected: true, tvMode: true, locked: true, seats });
+  tvPair.advanceClock(dt * 1000);
+  tvPair.hostDir.step(dt, dt, tvPair.hostWorld, idleCtrl);
+  lobby([]); // the last pilot leaves: the run ends
+  assert.equal(tvPair.hostWorld.gameOver, true);
+  // The TV relaunches from the mission summary with nobody seated.
+  tvPair.hostWorld.gameOver = false;
+  tvPair.hostDir.resetSquadForNewRun();
+  for (let f = 0; f < 30 && !tvPair.hostWorld.gameOver; f++) {
+    tvPair.advanceClock(dt * 1000);
+    tvPair.hostDir.step(dt, dt, tvPair.hostWorld, idleCtrl);
+  }
+  assert.equal(tvPair.hostWorld.gameOver, true, 'the empty relaunch ends again');
+  tvPair.dispose();
+
+  // A first start with nobody seated yet still waits for its pilots.
+  const fresh = createDirectPair({ tvMode: true, seats: [] });
+  for (let f = 0; f < 30; f++) {
+    fresh.advanceClock(dt * 1000);
+    fresh.hostDir.step(dt, dt, fresh.hostWorld, idleCtrl);
+  }
+  assert.equal(fresh.hostWorld.gameOver, false, 'a squad that never had a pilot waits');
+  fresh.dispose();
+});

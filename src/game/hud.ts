@@ -122,6 +122,11 @@ export interface HudViewContext {
   scale: number;
   shipScale: number;
   inset: { top: number; right: number; bottom: number; left: number };
+  /**
+   * How far down, in these coordinates, the page's own buttons reach (top right). Co-op's scaled arena can start
+   * under them; solo leaves it out (its HUD is in screen pixels, already clear of them).
+   */
+  controlsBottom?: number;
   room: number;
   homeY: number;
   time: number;
@@ -449,7 +454,7 @@ export function renderHud(v: HudViewContext): void {
   // Top right, under the Sound and Exit buttons: the boss, with its health and whatever it is saying beside it.
   if (!boss && villain.show <= time) return;
   const bx = w - inset.right - 12 - box;
-  const by = inset.top + 64;
+  const by = Math.max(inset.top + 64, (v.controlsBottom ?? 0) + 8);
   renderFace(v, 'boss', bx, by, box);
   const edge = bx - 10;
   const room = edge - left;
@@ -573,22 +578,13 @@ export function renderMessages(v: HudViewContext): void {
   }
 
   if (state === 'over') {
+    // A squad's game over is its mission summary (coop-quiz.ts renderSquadMissionSummary), not these solo lines.
+    if (v.coopRole) return;
     const alpha = Math.min(1, stateTime / 0.5);
     drawCentred(v, 'GAME OVER', mid - 38, 32, alpha);
     drawCentred(v, `SCORE ${pad6(score)}`, mid + 20, 15, alpha);
-    if (!v.coopRole) {
-      drawCentred(v, newBest ? 'NEW BEST!' : `BEST ${pad6(best)}`, mid + 48, 11, alpha * 0.8, newBest ? PINK : SAND);
-    }
+    drawCentred(v, newBest ? 'NEW BEST!' : `BEST ${pad6(best)}`, mid + 48, 11, alpha * 0.8, newBest ? PINK : SAND);
     const totalFreed = freed + soulsInFlight;
-    if (v.coopRole) {
-      drawCentred(v, totalFreed === 1 ? 'SQUAD SET 1 PERSON FREE' : `SQUAD SET ${totalFreed} PEOPLE FREE`, mid + 54, 11, alpha, SOUL);
-      if (v.coopRole === 'guest') {
-        drawCentred(v, 'WAITING FOR THE HOST TO RELAUNCH', mid + 96, 10, alpha * 0.9, NEON.cyan);
-      } else if (stateTime > 0.9 && blink) {
-        drawCentred(v, coarse ? 'TAP TO RELAUNCH SQUAD' : 'PRESS SPACE TO RELAUNCH - ESC TO LEAVE', mid + 104, 10, 0.9);
-      }
-      return;
-    }
     drawCentred(v, totalFreed === 1 ? 'YOU SET 1 PERSON FREE' : `YOU SET ${totalFreed} PEOPLE FREE`, mid + 72, 11, alpha, SOUL);
     if (v.lastRank) {
       drawCentred(v, `TOP 10 PILOT RANK ${v.lastRank} - ${v.callsign ?? 'PILOT'}`, mid + 96, 10, alpha, NEON.cyan);

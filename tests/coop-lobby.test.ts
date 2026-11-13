@@ -623,4 +623,9 @@ test('HeroGame hides [hidden] arcade buttons, confirms before leaving Co-op flig
   assert.ok(heroSrc.includes('if (e.repeat) e.preventDefault();'), 'held Space/Enter repeat cannot immediately confirm Leave');
   assert.match(heroSrc, /\/\^F\(\[1-9\]\|1\[0-2\]\)\$\/\.test\(e\.code\)/, 'F1..F12 (including F5 refresh) pass through Leave sheet');
   assert.ok(heroSrc.includes('game = new GameCtor(canvas, {') && heroSrc.includes('coopDirector?.dispose();'), 'Game constructor failure cleans up director and returns to lobby');
+  // Round 15 (5.10): a squad game that cannot start gives up its seat, then says why.
+  const failBlock = heroSrc.slice(heroSrc.indexOf('coopDirector?.dispose();'), heroSrc.indexOf("console.error('The arcade demo could not start.'"));
+  const leaveAt = failBlock.indexOf('controller.leaveRoom()');
+  assert.ok(leaveAt >= 0, 'the failed start leaves the room');
+  assert.ok(leaveAt < failBlock.indexOf('reportError('), 'the room is left before the message is shown, so the message stays');
 });
