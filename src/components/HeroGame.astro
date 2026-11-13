@@ -940,15 +940,23 @@
       }
     });
 
-    // Zero-cost URL/sessionStorage check: only downloads Co-op bundle on initial load when
-    // arriving via `?j=ABCDEF` QR/invite link or refreshing an active Co-op lobby tab!
+    // Zero-cost invite/session check: only downloads Co-op bundle on initial load when
+    // arriving via `?j=ABCDEF` QR/invite link (stashed in `gg_coop_invite` / `window.__ggInvite`
+    // by Base.astro before Google Analytics runs) or refreshing an active Co-op lobby tab!
     try {
-      const hasInviteParam = new URLSearchParams(location.search).has('j');
-      const hasSavedSession = Boolean(sessionStorage.getItem('gg_coop_active'));
-      if (hasInviteParam || hasSavedSession) {
+      const win = window as Window & { __ggInvite?: string };
+      let hasInvite = Boolean(win.__ggInvite) || new URLSearchParams(location.search).has('j');
+      let hasSavedSession = false;
+      try {
+        hasInvite = hasInvite || sessionStorage.getItem('gg_coop_invite') !== null;
+        hasSavedSession = Boolean(sessionStorage.getItem('gg_coop_active'));
+      } catch {
+        /* storage blocked; window.__ggInvite fallback still works */
+      }
+      if (hasInvite || hasSavedSession) {
         void Promise.all([import('../game/coop-client'), import('../game/coop-lobby')]).then(
-          ([{ consumeInviteCodeFromLocation }, { loadActiveCoopSession }]) => {
-            const inviteCode = consumeInviteCodeFromLocation();
+          ([{ consumePendingInviteCode }, { loadActiveCoopSession }]) => {
+            const inviteCode = consumePendingInviteCode();
             if (inviteCode) {
               void openCoopModal(inviteCode, 'guest');
               return;

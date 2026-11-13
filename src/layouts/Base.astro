@@ -28,6 +28,22 @@ const ogImage = new URL(image, Astro.site ?? 'https://geurtsgaming.com');
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!--
+      Strip Co-op invite room codes (`?j=ABCDEF`) from the address BEFORE Google Analytics runs,
+      stashing the code in `sessionStorage` (or `window.__ggInvite` if storage is blocked) for `HeroGame.astro`.
+    -->
+    <script is:inline>
+      (() => {
+        try {
+          const u = new URL(location.href);
+          const j = u.searchParams.get('j');
+          if (j === null) return;
+          try { sessionStorage.setItem('gg_coop_invite', j); } catch { window.__ggInvite = j; }
+          u.searchParams.delete('j');
+          history.replaceState(history.state, '', u.pathname + u.search + u.hash);
+        } catch {}
+      })();
+    </script>
     <title>{fullTitle}</title>
     <meta name="description" content={description} />
     {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
@@ -85,9 +101,7 @@ const ogImage = new URL(image, Astro.site ?? 'https://geurtsgaming.com');
         cookie_expires: 0,
       });
       gtag('js', new Date());
-      gtag('config', 'G-R00Y85816Z', {
-        page_location: location.origin + location.pathname,
-      });
+      gtag('config', 'G-R00Y85816Z');
     </script>
 
     <slot name="head" />

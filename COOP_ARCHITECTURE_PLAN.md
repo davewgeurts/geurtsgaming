@@ -88,7 +88,7 @@ flowchart LR
 ### Privacy & Trust Invariants (`/privacy/` Alignment)
 1. **Zero IP Recording:** Relay holds IP addresses strictly in transient Worker RAM for 60-second flood limits and never writes IPs to DO storage or logs.
 2. **Per-Tab `sessionStorage` Only:** Room seat tokens (`gg_coop_token_<CODE>`) and per-tab `cid` live in `sessionStorage` only (never `localStorage`), documented in `src/data/trust.ts` when Co-op launches.
-3. **Invite Link Stripped from Analytics:** When `?j=ABCDEF` auto-join lands, [src/layouts/Base.astro](src/layouts/Base.astro) passes `page_location: location.origin + location.pathname` to `gtag('config', ...)` (keeping `gtag('set', ...)` first) and strips `?j=...` via `history.replaceState`.
+3. **Invite Link Stripped Before Analytics:** When `?j=ABCDEF` auto-join lands, an early inline `<head>` script in [src/layouts/Base.astro](src/layouts/Base.astro) stashes the code in `sessionStorage` (`gg_coop_invite`) and strips `?j=` via `history.replaceState` *before* the Google tag runs (since `gtag` ignores `page_location` overrides).
 
 ---
 
@@ -140,7 +140,7 @@ flowchart TD
 
 ### Phase 1 — QR Invite, 4-Seat Lobby & Auto-Reconnect
 - **[AGY Mac #2 (`coop/ux`)]** Zero-dep SVG QR encoder (`src/game/qr.ts` + `tests/qr.test.ts`) + Co-op Lobby UI (`src/game/coop-lobby.ts` + `src/components/HeroGame.astro` hooks; say `"removed"` rather than `"blocked"` on kick).
-- **[AGY Mac #1 (`coop/engine`)]** `src/game/coop-client.ts` (`partysocket` `WebSocket` wrapper, room-scoped `sessionStorage` token + `cid`, bounded queue, immediate `.close()` on `refused`/`room-closed`, 60s `ping`/`pong`, `navigator.wakeLock`, `mp.setCoopActive(true)`, and `page_location` Analytics query-strip in `src/layouts/Base.astro`).
+- **[AGY Mac #1 (`coop/engine`)]** `src/game/coop-client.ts` (`partysocket` `WebSocket` wrapper, room-scoped `sessionStorage` token + `cid`, bounded queue, immediate `.close()` on `refused`/`room-closed`/`4001`, 55s `ping`/`pong`, `navigator.wakeLock` with release re-acquisition, `mp.setCoopActive(true)`, and early `<head>` `?j=` Analytics strip in `src/layouts/Base.astro`).
 - **[Claude QA Gate #1]** 4 real browser windows joining via QR URL & typed code, host kick, mid-lobby refresh + 20s idle hibernation survival, late-close Wi-Fi reconnect, locking on Launch.
 
 ### Phase 2 — Shared `3:4` Arena, Binary Netcode & Smooth 4-Ship Flight

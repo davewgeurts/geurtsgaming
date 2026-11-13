@@ -34,6 +34,7 @@ import {
 
 const TOKEN_PREFIX = 'gg_coop_token_';
 const CID_KEY = 'gg_coop_cid';
+export const INVITE_STORAGE_KEY = 'gg_coop_invite';
 const PING_INTERVAL_MS = 55_000;
 /** Initial connection attempt + up to 2 retries before first `welcome`; stops infinite 400/403/429 loops. */
 const MAX_PRE_WELCOME_ATTEMPTS = 3;
@@ -122,6 +123,47 @@ export function consumeInviteCodeFromLocation(
   }
 
   return isValidCoopRoomCode(rawJoin) ? normalizeCoopRoomCode(rawJoin) : null;
+}
+
+/**
+ * Consume a pending Co-op invite code stashed by `Base.astro`'s early `<head>` script
+ * (`sessionStorage['gg_coop_invite']` or `window.__ggInvite`) before Google Analytics ran,
+ * falling back to `consumeInviteCodeFromLocation` if `?j=` is still in `location.search`.
+ */
+export function consumePendingInviteCode(opts?: {
+  storage?: StorageLike | null;
+  win?: { __ggInvite?: unknown } | null;
+  loc?: Location;
+  hist?: Pick<History, 'replaceState'>;
+}): string | null {
+  const storage = opts?.storage === undefined ? defaultSessionStorage() : opts.storage;
+  const win =
+    opts?.win === undefined
+      ? typeof window !== 'undefined'
+        ? (window as unknown as { __ggInvite?: unknown })
+        : null
+      : opts.win;
+
+  let rawFromStorage: string | null = null;
+  try {
+    rawFromStorage = storage?.getItem(INVITE_STORAGE_KEY) ?? null;
+    if (rawFromStorage !== null) {
+      storage?.removeItem(INVITE_STORAGE_KEY);
+    }
+  } catch {
+    /* ignore restricted storage */
+  }
+
+  let rawFromWindow: string | null = null;
+  if (win && typeof win.__ggInvite === 'string') {
+    rawFromWindow = win.__ggInvite;
+    delete win.__ggInvite;
+  }
+
+  const fromUrl = consumeInviteCodeFromLocation(opts?.loc, opts?.hist);
+  const candidate = rawFromStorage ?? rawFromWindow ?? fromUrl;
+  if (!candidate) return null;
+  return isValidCoopRoomCode(candidate) ? normalizeCoopRoomCode(candidate) : null;
 }
 
 /** Ensure a valid preset callsign (`PREFIX-[1-9]`), falling back cleanly if needed. */
@@ -258,7 +300,9 @@ export interface CoopConnectOptions extends CoopClientCallbacks {
 }
 
 interface WakeLockSentinelLike {
+  released?: boolean;
   release(): Promise<void>;
+  addEventListener?(type: 'release', listener: () => void): void;
 }
 
 export class CoopClient {
@@ -335,6 +379,7 @@ export class CoopClient {
       minReconnectionDelay: 250,
       maxReconnectionDelay: 2_500,
       connectionTimeout: 6_000,
+      shouldReconnectOnClose: (ev: { code?: number }) => ev.code !== 4001,
     });
     ws.binaryType = 'arraybuffer';
     this.socket = ws;
@@ -359,10 +404,20 @@ export class CoopClient {
       }
     });
 
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', (ev) => {
       this.stopKeepAlive();
       this.callbacks.onConnectionChange?.(false);
       if (this.permanentlyStopped) return;
+
+      // Close code 4001 ("Replaced by reconnect") is always final so two duplicated tabs sharing
+      // one seat token never fight over the seat — even against an older relay without `refused`.
+      if ((ev as { code?: number }).code === 4001) {
+        clearStoredCoopToken(this.code, this.storage);
+        this.token = '';
+        this.stopSocket();
+        this.callbacks.onRefused?.('replaced');
+        return;
+      }
 
       if (!this.welcomed) {
         this.preWelcomeFailures += 1;
@@ -578,13 +633,26 @@ export class CoopClient {
   };
 
   private async acquireWakeLock(): Promise<void> {
-    if (this.wakeLock || typeof navigator === 'undefined') return;
+    if ((this.wakeLock && !this.wakeLock.released) || this.permanentlyStopped || typeof navigator === 'undefined') {
+      return;
+    }
+    if (typeof document !== 'undefined' && document.hidden) return;
     const nav = navigator as unknown as {
       wakeLock?: { request(type: 'screen'): Promise<WakeLockSentinelLike> };
     };
     if (!nav.wakeLock) return;
     try {
-      this.wakeLock = await nav.wakeLock.request('screen');
+      const sentinel = await nav.wakeLock.request('screen');
+      if (this.permanentlyStopped) {
+        void sentinel.release().catch(() => {});
+        return;
+      }
+      this.wakeLock = sentinel;
+      sentinel.addEventListener?.('release', () => {
+        if (this.wakeLock === sentinel) {
+          this.wakeLock = null;
+        }
+      });
     } catch {
       this.wakeLock = null;
     }

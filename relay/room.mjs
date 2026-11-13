@@ -448,16 +448,7 @@ export class CoopRoom {
       if (this.hostConn && this.hostConn !== conn) {
         const oldHost = this.hostConn;
         this.conns.delete(oldHost);
-        try {
-          oldHost.setAttachment?.(null);
-        } catch {
-          /* ignore */
-        }
-        try {
-          oldHost.close(4001, 'Replaced by reconnect');
-        } catch {
-          /* ignore */
-        }
+        refuseConn(oldHost, 4001, 'replaced', 'Replaced by reconnect');
       }
       const wasDisconnected = this.hostDisconnectedAt !== null;
       const gen = this.nextGen++;
@@ -497,16 +488,7 @@ export class CoopRoom {
           if (info.conn && info.conn !== conn) {
             const oldGuest = info.conn;
             this.conns.delete(oldGuest);
-            try {
-              oldGuest.setAttachment?.(null);
-            } catch {
-              /* ignore */
-            }
-            try {
-              oldGuest.close(4001, 'Replaced by reconnect');
-            } catch {
-              /* ignore */
-            }
+            refuseConn(oldGuest, 4001, 'replaced', 'Replaced by reconnect');
           }
           const gen = this.nextGen++;
           info.gen = gen;

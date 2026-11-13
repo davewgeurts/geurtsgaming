@@ -100,7 +100,8 @@ export type CoopRefusalReason =
   | 'started'
   | 'full'
   | 'kicked'
-  | 'already-hosted';
+  | 'already-hosted'
+  | 'replaced';
 
 export type CoopRoomClosedReason = 'expired' | 'host-left' | 'closed';
 

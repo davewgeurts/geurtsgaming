@@ -317,6 +317,7 @@ test('Reconnect arriving before old socket close (3.1) & alarm loop prevention (
 
     clock += 4_000;
     const host2 = await w.join({ role: 'host', token: hostToken });
+    assert.equal(host1.last('refused')?.reason, 'replaced', 'replaced host socket receives refused: replaced before 4001');
     assert.deepEqual(host1.closedWith, { code: 4001, reason: 'Replaced by reconnect' });
     assert.equal(host1.att, null, 'superseded host socket attachment cleared');
 
@@ -357,6 +358,8 @@ test('Reconnect arriving before old socket close (3.1) & alarm loop prevention (
 
     clock += 3_000;
     const guest2 = await w.join({ token: guestToken });
+    assert.equal(guest1.last('refused')?.reason, 'replaced', 'replaced guest socket receives refused: replaced before 4001');
+    assert.deepEqual(guest1.closedWith, { code: 4001, reason: 'Replaced by reconnect' });
     clock += 200;
     await w.obj.webSocketClose(guest1);
 

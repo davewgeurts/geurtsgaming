@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { CoopRoom } from '../relay/room.mjs';
 import { CoopClient, type CoopConnectOptions, type StorageLike } from '../src/game/coop-client';
@@ -244,4 +245,60 @@ test('4-seat CoopLobbyController drives host creation, chimes, callsign, ready, 
 
   g1MidGameReload.dispose();
   hostLobby.dispose();
+});
+
+test('Duplicated lobby tab shows friendly "another tab" message and stops, and copy says 6-character', async () => {
+  assert.equal(
+    describeRefusalReason('replaced'),
+    'This squad is open in another tab or on another device.',
+  );
+
+  const lobbySrc = await readFile(new URL('../src/game/coop-lobby.ts', import.meta.url), 'utf8');
+  assert.ok(lobbySrc.includes('6-character room code'), 'uses accurate 6-character room code wording');
+  assert.equal(lobbySrc.includes('6-letter'), false, 'no stale 6-letter wording');
+
+  const room = new CoopRoom('PRNS6N');
+  const WsBridge = createRoomWsConstructor(room);
+  const makeClient = (opts: CoopConnectOptions) =>
+    new CoopClient({
+      ...opts,
+      wsBase: 'ws://localhost:84/relay',
+      WebSocketConstructor: WsBridge,
+      pingIntervalMs: 0,
+    });
+
+  const host = new CoopLobbyController({
+    storage: new MemoryStorage(),
+    createRoomFn: async () => ({ code: 'PRNS6N', formattedCode: 'PRN-S6N' }),
+    clientFactory: makeClient,
+  });
+  await host.hostNewRoom();
+  await flush();
+
+  const tab1Store = new MemoryStorage();
+  const tab1 = new CoopLobbyController({ storage: tab1Store, clientFactory: makeClient });
+  tab1.joinRoomByCode('PRNS6N');
+  await flush();
+  assert.equal(tab1.snapshot().screen, 'lobby');
+
+  // Duplicate tab copies sessionStorage (`gg_coop_active` + seat token)
+  const tab2Store = new MemoryStorage();
+  for (const [k, v] of tab1Store.map.entries()) tab2Store.setItem(k, v);
+  const resumed = loadActiveCoopSession(tab2Store)!;
+  const tab2 = new CoopLobbyController({ storage: tab2Store, clientFactory: makeClient });
+  tab2.joinRoomByCode(resumed.code, resumed.role);
+
+  await new Promise((r) => setTimeout(r, 500));
+
+  assert.equal(tab1.snapshot().screen, 'choose', 'first tab exits cleanly to choose screen');
+  assert.equal(
+    tab1.snapshot().error,
+    'This squad is open in another tab or on another device.',
+  );
+  assert.equal(loadActiveCoopSession(tab1Store), null, 'first tab clears gg_coop_active');
+  assert.equal(tab2.snapshot().screen, 'lobby', 'second tab remains connected in seat 1');
+  assert.equal(tab2.snapshot().mySeat, 1);
+
+  tab2.dispose();
+  host.dispose();
 });

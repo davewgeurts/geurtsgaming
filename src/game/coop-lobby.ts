@@ -128,6 +128,8 @@ export function describeRefusalReason(reason: CoopRefusalReason | 'invalid-code'
       return 'You were removed from the squad lobby by the host.';
     case 'already-hosted':
       return 'That room already has an active host.';
+    case 'replaced':
+      return 'This squad is open in another tab or on another device.';
     case 'invalid-code':
       return 'Enter a valid 6-character code (A–Z and 2–9; no 0, O, 1, I, or L).';
   }
@@ -467,6 +469,9 @@ export class CoopLobbyModal {
   private draftJoinCode = '';
   private lastQrUrl = '';
   private lastQrSvg = '';
+  private lastRenderedError: string | null = null;
+  private lastRenderedStatus: string | null = null;
+  private lastRenderedStatusStyle: 'info' | 'warn' | 'connecting' = 'info';
   private unsubscribe: (() => void) | null = null;
 
   constructor(opts: CoopLobbyModalOptions) {
@@ -583,53 +588,194 @@ export class CoopLobbyModal {
     });
   }
 
+  private ensurePanelSlots(panel: HTMLElement): {
+    headSlot: HTMLElement;
+    alertSlot: HTMLElement;
+    statusSlot: HTMLElement;
+    bodySlot: HTMLElement;
+  } {
+    let headSlot = panel.querySelector<HTMLElement>('[data-coop-head-slot]');
+    let alertSlot = panel.querySelector<HTMLElement>('[data-coop-alert-slot]');
+    let statusSlot = panel.querySelector<HTMLElement>('[data-coop-status-slot]');
+    let bodySlot = panel.querySelector<HTMLElement>('[data-coop-body-slot]');
+    if (!headSlot || !alertSlot || !statusSlot || !bodySlot) {
+      panel.innerHTML = `
+        <div style="display:contents" data-coop-head-slot></div>
+        <div style="display:contents" data-coop-alert-slot></div>
+        <div style="display:contents" data-coop-status-slot></div>
+        <div style="display:contents" data-coop-body-slot></div>
+      `;
+      this.lastRenderedError = null;
+      this.lastRenderedStatus = null;
+      headSlot = panel.querySelector<HTMLElement>('[data-coop-head-slot]')!;
+      alertSlot = panel.querySelector<HTMLElement>('[data-coop-alert-slot]')!;
+      statusSlot = panel.querySelector<HTMLElement>('[data-coop-status-slot]')!;
+      bodySlot = panel.querySelector<HTMLElement>('[data-coop-body-slot]')!;
+    }
+    return { headSlot, alertSlot, statusSlot, bodySlot };
+  }
+
   private render(snap: CoopLobbySnapshot): void {
     const panel = this.root.querySelector<HTMLElement>('[data-coop-panel]');
     if (!panel) return;
 
-    // Preserve focus on the room-code input if the user is actively typing
-    const activeEl = document.activeElement;
+    // Remember whichever interactive control inside `panel` currently holds keyboard focus so
+    // lobby updates (ready toggles, new joins, callsign cycles) never drop focus onto `<body>`.
+    const activeEl =
+      typeof document !== 'undefined' &&
+      document.activeElement instanceof HTMLElement &&
+      panel.contains(document.activeElement)
+        ? document.activeElement
+        : null;
     const wasTypingCode = activeEl instanceof HTMLInputElement && activeEl.name === 'coop-code';
+    const codeSelStart = wasTypingCode ? activeEl.selectionStart : null;
+    const codeSelEnd = wasTypingCode ? activeEl.selectionEnd : null;
+    const wasJoinBtn = Boolean(activeEl?.hasAttribute('data-coop-join-btn'));
+    const focusedAction = activeEl?.dataset.coopAction ?? null;
+    const focusedSeat = activeEl?.dataset.seat ?? null;
+    const hadFocusInPanel = Boolean(activeEl);
+
+    const { headSlot, alertSlot, statusSlot, bodySlot } = this.ensurePanelSlots(panel);
+
+    let headHtml = '';
+    let bodyHtml = '';
+    const errorText = snap.error;
+    let statusText = snap.notice;
+    let statusStyle: 'info' | 'warn' | 'connecting' = 'info';
 
     if (snap.screen === 'choose') {
-      panel.innerHTML = this.renderChooseHtml(snap);
-      if (wasTypingCode) {
-        const nextInput = panel.querySelector<HTMLInputElement>('input[name="coop-code"]');
-        nextInput?.focus({ preventScroll: true });
-      }
-      return;
-    }
-
-    if (snap.screen === 'connecting') {
-      panel.innerHTML = `
+      headHtml = `
+        <div class="coop-head">
+          <div>
+            <p class="coop-eyebrow">2–4 Pilots · Same Wi-Fi or Anywhere</p>
+            <h2 id="coop-modal-title" class="coop-title">Fly With Friends</h2>
+          </div>
+          <button type="button" class="coop-icon-btn" data-coop-action="close" aria-label="Close squad modal">✕</button>
+        </div>
+      `;
+      bodyHtml = this.renderChooseBodyHtml();
+      statusStyle = 'info';
+    } else if (snap.screen === 'connecting') {
+      headHtml = `
         <div class="coop-head">
           <h2 id="coop-modal-title" class="coop-title">Squad Comms</h2>
           <button type="button" class="coop-icon-btn" data-coop-action="close" aria-label="Cancel and close">✕</button>
         </div>
-        <p class="coop-status-banner" role="status">${escapeHtml(snap.notice || 'Connecting...')}</p>
       `;
-      return;
+      statusText = snap.notice || 'Connecting...';
+      statusStyle = 'connecting';
+      bodyHtml = '';
+    } else {
+      headHtml = `
+        <div class="coop-head">
+          <div>
+            <p class="coop-eyebrow">${snap.locked ? 'Squad Locked · Mission Active' : 'Squad Hangar · Up to 4 Pilots'}</p>
+            <h2 id="coop-modal-title" class="coop-title">Room <span class="coop-code-badge" data-coop-room-code>${escapeHtml(snap.formattedCode)}</span></h2>
+          </div>
+          <button type="button" class="coop-btn coop-btn-ghost" data-coop-action="leave" data-coop-leave>Leave</button>
+        </div>
+      `;
+      bodyHtml = this.renderHangarBodyHtml(snap);
+      statusStyle = 'warn';
     }
 
-    panel.innerHTML = this.renderHangarHtml(snap);
+    // Only re-insert `role="alert"` / `role="status"` live regions when their text actually changes,
+    // preventing screen readers from repeating unchanged banners on every lobby broadcast.
+    if (errorText !== this.lastRenderedError) {
+      this.lastRenderedError = errorText;
+      alertSlot.innerHTML = errorText
+        ? `<p class="coop-alert coop-alert-err" role="alert">${escapeHtml(errorText)}</p>`
+        : '';
+    }
+    if (
+      statusText !== this.lastRenderedStatus ||
+      (statusText !== '' && statusStyle !== this.lastRenderedStatusStyle)
+    ) {
+      this.lastRenderedStatus = statusText;
+      this.lastRenderedStatusStyle = statusStyle;
+      if (!statusText) {
+        statusSlot.innerHTML = '';
+      } else if (statusStyle === 'connecting') {
+        statusSlot.innerHTML = `<p class="coop-status-banner" role="status">${escapeHtml(statusText)}</p>`;
+      } else if (statusStyle === 'warn') {
+        statusSlot.innerHTML = `<p class="coop-alert coop-alert-warn" data-coop-banner role="status">${escapeHtml(statusText)}</p>`;
+      } else {
+        statusSlot.innerHTML = `<p class="coop-alert coop-alert-info" role="status">${escapeHtml(statusText)}</p>`;
+      }
+    }
+
+    headSlot.innerHTML = headHtml;
+    bodySlot.innerHTML = bodyHtml;
+
+    if (hadFocusInPanel) {
+      this.restoreFocus(panel, {
+        wasTypingCode,
+        codeSelStart,
+        codeSelEnd,
+        wasJoinBtn,
+        focusedAction,
+        focusedSeat,
+      });
+    }
   }
 
-  private renderChooseHtml(snap: CoopLobbySnapshot): string {
+  private restoreFocus(
+    panel: HTMLElement,
+    saved: {
+      wasTypingCode: boolean;
+      codeSelStart: number | null;
+      codeSelEnd: number | null;
+      wasJoinBtn: boolean;
+      focusedAction: string | null;
+      focusedSeat: string | null;
+    },
+  ): void {
+    if (saved.wasTypingCode) {
+      const nextInput = panel.querySelector<HTMLInputElement>('input[name="coop-code"]');
+      if (nextInput) {
+        nextInput.focus({ preventScroll: true });
+        if (saved.codeSelStart !== null && saved.codeSelEnd !== null) {
+          try {
+            nextInput.setSelectionRange(saved.codeSelStart, saved.codeSelEnd);
+          } catch {
+            /* ignore */
+          }
+        }
+        return;
+      }
+    }
+
+    let nextTarget: HTMLElement | null = null;
+    if (saved.wasJoinBtn) {
+      nextTarget = panel.querySelector<HTMLElement>('[data-coop-join-btn]:not([disabled])');
+    } else if (saved.focusedAction) {
+      if (saved.focusedSeat !== null) {
+        nextTarget = panel.querySelector<HTMLElement>(
+          `[data-coop-action="${saved.focusedAction}"][data-seat="${saved.focusedSeat}"]:not([disabled])`,
+        );
+      }
+      if (!nextTarget) {
+        nextTarget = panel.querySelector<HTMLElement>(
+          `[data-coop-action="${saved.focusedAction}"]:not([disabled])`,
+        );
+      }
+    }
+
+    if (!nextTarget) {
+      nextTarget = panel.querySelector<HTMLElement>(
+        '[data-coop-host-btn], [data-coop-copy-link], [data-coop-ready-btn], [data-coop-leave], [data-coop-action="close"]',
+      );
+    }
+    nextTarget?.focus({ preventScroll: true });
+  }
+
+  private renderChooseBodyHtml(): string {
     return `
-      <div class="coop-head">
-        <div>
-          <p class="coop-eyebrow">2–4 Pilots · Same Wi-Fi or Anywhere</p>
-          <h2 id="coop-modal-title" class="coop-title">Fly With Friends</h2>
-        </div>
-        <button type="button" class="coop-icon-btn" data-coop-action="close" aria-label="Close squad modal">✕</button>
-      </div>
-      ${snap.error ? `<p class="coop-alert coop-alert-err" role="alert">${escapeHtml(snap.error)}</p>` : ''}
-      ${snap.notice ? `<p class="coop-alert coop-alert-info" role="status">${escapeHtml(snap.notice)}</p>` : ''}
       <div class="coop-choose-grid">
         <button type="button" class="coop-primary-card" data-coop-action="host" data-coop-host-btn>
           <span class="coop-card-kicker">Open a Hangar</span>
           <span class="coop-card-heading">Host a Squad</span>
-          <span class="coop-card-sub">Get a 6-letter room code &amp; QR code for up to 3 wingmen.</span>
+          <span class="coop-card-sub">Get a 6-character room code &amp; QR code for up to 3 wingmen.</span>
         </button>
         <form class="coop-join-card" data-coop-join-form novalidate>
           <label class="coop-card-kicker" for="coop-code-input">Have a Room Code?</label>
@@ -656,7 +802,7 @@ export class CoopLobbyModal {
     `;
   }
 
-  private renderHangarHtml(snap: CoopLobbySnapshot): string {
+  private renderHangarBodyHtml(snap: CoopLobbySnapshot): string {
     if (snap.inviteUrl && snap.inviteUrl !== this.lastQrUrl) {
       this.lastQrUrl = snap.inviteUrl;
       this.lastQrSvg = renderQrSvg(snap.inviteUrl, {
@@ -730,17 +876,6 @@ export class CoopLobbyModal {
           : `${readyGuests} of ${totalGuests} wingmen marked Ready.`;
 
     return `
-      <div class="coop-head">
-        <div>
-          <p class="coop-eyebrow">${snap.locked ? 'Squad Locked · Mission Active' : 'Squad Hangar · Up to 4 Pilots'}</p>
-          <h2 id="coop-modal-title" class="coop-title">Room <span class="coop-code-badge" data-coop-room-code>${escapeHtml(snap.formattedCode)}</span></h2>
-        </div>
-        <button type="button" class="coop-btn coop-btn-ghost" data-coop-action="leave" data-coop-leave>Leave</button>
-      </div>
-
-      ${snap.notice ? `<p class="coop-alert coop-alert-warn" data-coop-banner role="status">${escapeHtml(snap.notice)}</p>` : ''}
-      ${snap.error ? `<p class="coop-alert coop-alert-err" role="alert">${escapeHtml(snap.error)}</p>` : ''}
-
       ${
         !snap.locked
           ? `
