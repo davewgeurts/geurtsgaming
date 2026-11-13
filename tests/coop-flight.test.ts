@@ -2049,3 +2049,314 @@ test('Round 15 (3.2): the bullet lead does not balloon during an upload stall', 
   assert.ok(peak - before <= 80, `lead grew ${(peak - before).toFixed(0)} ms during the stall`);
   pair.dispose();
 });
+
+// -----------------------------------------------------------------------------------------------------------------
+// Round 15 netcode follow-up (Claude): what the two reviews of 57f22a7 found. Each test fails on 04c5620.
+// -----------------------------------------------------------------------------------------------------------------
+
+const quizRef = await import('../src/game/coop-quiz');
+
+/**
+ * Hit agreement: at each host frame, the distance between the host's copy of the guest and the guest's own ship at the
+ * moment the guest's screen showed that same host time (its bullets are drawn `lead` ahead). Same clock in this harness.
+ */
+function agreementR15(
+  pair: PairR15,
+  steer: (t: number) => CoopLocalControlInput,
+  seconds: number,
+  opts: { from?: number; hostEvery?: number; onFrame?: (f: number) => void } = {},
+): { median: number; over8: number; n: number } {
+  const shown: Array<{ hostMs: number; x: number }> = [];
+  const errs: number[] = [];
+  const dt = 1 / 60;
+  const hostEvery = opts.hostEvery ?? 1;
+  for (let f = 0; f < seconds * 60; f++) {
+    opts.onFrame?.(f);
+    pair.advanceClock(dt * 1000);
+    pair.flushWire();
+    const hostStep = f % hostEvery === 0;
+    if (hostStep) pair.hostDir.step(dt * hostEvery, dt * hostEvery, pair.hostWorld, idleCtrl);
+    pair.guestDir.step(dt, dt, pair.guestWorld, steer(f * dt));
+    const lead = (pair.guestDir.interpolator as unknown as { ackHostOffsetMs: number | null }).ackHostOffsetMs;
+    if (lead !== null) shown.push({ hostMs: pair.clockMs + lead, x: pair.guestDir.pilots[1].x });
+    if (!hostStep || f < (opts.from ?? 2) * 60) continue;
+    const T = (pair.hostDir as unknown as { hostSimElapsedMs: number }).hostSimElapsedMs;
+    let best: { hostMs: number; x: number } | null = null;
+    for (let i = shown.length - 1; i >= 0 && i >= shown.length - 60; i--) {
+      if (!best || Math.abs(shown[i]!.hostMs - T) < Math.abs(best.hostMs - T)) best = shown[i]!;
+    }
+    if (best && Math.abs(best.hostMs - T) <= 9) errs.push(Math.abs(pair.hostDir.pilots[1].x - best.x));
+  }
+  errs.sort((a, b) => a - b);
+  return {
+    median: errs[Math.floor(errs.length / 2)] ?? Infinity,
+    over8: errs.filter((e) => e > 8).length / Math.max(1, errs.length),
+    n: errs.length,
+  };
+}
+
+test('Round 15 follow-up (b2 1): host and guest agree where a mouse- or thumb-steered ship is when bullets reach it', () => {
+  for (const speed of [250, 400]) {
+    const pair = createDirectPair();
+    delaysR15(pair, 'j60', 21);
+    const y = pair.guestDir.pilots[1].y;
+    // The pointer sweeps back and forth across the arena at `speed`, and the ship follows it.
+    const steer = (t: number): CoopLocalControlInput => {
+      const span = 500;
+      const phase = (t * speed) % (2 * span);
+      return { across: 0, down: 0, firing: false, touching: true, touchX: 130 + (phase < span ? phase : 2 * span - phase), touchY: y };
+    };
+    const r = agreementR15(pair, steer, 12);
+    assert.ok(r.n > 300, `${r.n} judgments`);
+    assert.ok(r.median <= 8 && r.over8 <= 0.25, `${speed} px/s: median ${r.median.toFixed(1)} px, ${(r.over8 * 100).toFixed(1)}% over 8 px`);
+    pair.dispose();
+  }
+});
+
+test('Round 15 follow-up (b2 2): a stalled download does not throttle a guest that can still send', () => {
+  const pair = createDirectPair();
+  let stallUntil = -1;
+  pair.setDelays(() => 40, () => (pair.clockMs < stallUntil ? stallUntil - pair.clockMs + 40 : 40));
+  const keys = (t: number): CoopLocalControlInput => ({ across: Math.floor(t) % 2 === 0 ? 1 : -1, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 });
+  for (let f = 0; f < 120; f++) stepPairR15(pair, keys(f / 60));
+  let sent = 0;
+  const realSend = pair.guestClient.sendBinary.bind(pair.guestClient);
+  pair.guestClient.sendBinary = (bytes: Uint8Array) => {
+    sent += 1;
+    return realSend(bytes);
+  };
+  stallUntil = pair.clockMs + 1200; // nothing reaches the guest for 1.2 s; its own uploads are fine
+  for (let f = 0; f < 72; f++) stepPairR15(pair, keys(2 + f / 60));
+  assert.ok(sent >= 22, `${sent} inputs sent in 1.2 s`);
+  pair.dispose();
+});
+
+test('Round 15 follow-up (b2 3): after a short host pause both screens agree again within a second', () => {
+  const pair = createDirectPair();
+  delaysR15(pair, 'j60', 31);
+  const keys = (t: number): CoopLocalControlInput => ({
+    across: t % 1.6 < 1.1 ? (Math.floor(t / 1.6) % 2 === 0 ? 1 : -1) : 0,
+    down: 0,
+    firing: false,
+    touching: false,
+    touchX: 0,
+    touchY: 0,
+  });
+  let paused = false;
+  const dt = 1 / 60;
+  // 4 s of play, then the host stops for 0.7 s (a pause, or a long frame), then 3 s more.
+  for (let f = 0; f < 240; f++) stepPairR15(pair, keys(f * dt));
+  for (let f = 0; f < 42; f++) {
+    pair.advanceClock(dt * 1000);
+    pair.flushWire();
+    paused = true;
+    pair.guestDir.step(dt, dt, pair.guestWorld, keys((240 + f) * dt));
+  }
+  assert.ok(paused);
+  const r = agreementR15(pair, (t) => keys(282 * dt + t), 3, { from: 1 });
+  assert.ok(r.median <= 10, `after the pause: median ${r.median.toFixed(1)} px, ${(r.over8 * 100).toFixed(1)}% over 8 px`);
+  pair.dispose();
+});
+
+test("Round 15 follow-up (b2 4): when the host's link drops and returns, the bullet lead does not jump", () => {
+  const pair = createDirectPair();
+  delaysR15(pair, 'j60', 41);
+  for (let f = 0; f < 360; f++) stepPairR15(pair, idleCtrl);
+  const it = pair.guestDir.interpolator as unknown as { ackHostOffsetMs: number | null; reset(): void };
+  const before = it.ackHostOffsetMs!;
+  // The host's link goes down for 0.6 s: what either side sends meanwhile is lost. Inputs sent just before still reach
+  // the host, but the snapshots acknowledging them never leave; the first one after the return repeats that old
+  // acknowledgement, long after the input was sent.
+  const downFrom = pair.clockMs;
+  const down = () => pair.clockMs >= downFrom && pair.clockMs < downFrom + 600;
+  const realHostSend = pair.hostClient.sendBinary.bind(pair.hostClient);
+  pair.hostClient.sendBinary = (b: Uint8Array) => (down() ? true : realHostSend(b));
+  const realGuestSend = pair.guestClient.sendBinary.bind(pair.guestClient);
+  pair.guestClient.sendBinary = (b: Uint8Array) => (down() ? true : realGuestSend(b));
+  for (let f = 0; f < 36; f++) stepPairR15(pair, idleCtrl);
+  // The relay tells the guest the host is back (its interpolator starts afresh); the host is welcomed again.
+  it.reset();
+  const hostEmit = (pair.hostClient as unknown as { emit: (k: string, ...a: unknown[]) => void }).emit.bind(pair.hostClient);
+  hostEmit('onConnectionChange', false);
+  hostEmit('onWelcome', {});
+  let worst = 0;
+  for (let f = 0; f < 180; f++) {
+    stepPairR15(pair, idleCtrl);
+    const lead = it.ackHostOffsetMs;
+    if (lead !== null) worst = Math.max(worst, Math.abs(lead - before));
+  }
+  assert.ok(worst <= 60, `the lead was off by ${worst.toFixed(0)} ms after the return`);
+  pair.dispose();
+});
+
+test('Round 15 follow-up (b2 5): a bullet fired close to a guest has caught up to the lead before it gets there', () => {
+  const pair = createDirectPair();
+  delaysR15(pair, 'j100', 51);
+  const dt = 1 / 60;
+  for (let f = 0; f < 240; f++) stepPairR15(pair, idleCtrl);
+  const me = pair.guestDir.pilots[1];
+  pair.hostWorld.shots.push({ x: me.x + 4, y: me.y - 260, vx: 0, vy: 300, hostile: true, dead: false, color: '#ff4d4d' });
+  let checked = false;
+  for (let f = 0; f < 90 && !checked; f++) {
+    for (const sh of pair.hostWorld.shots) sh.y += sh.vy * dt;
+    stepPairR15(pair, idleCtrl);
+    const drawn = pair.guestWorld.shots.find((sh) => sh.hostile);
+    const truth = pair.hostWorld.shots[0]!;
+    if (drawn && drawn.y >= me.y - 40) {
+      const it = pair.guestDir.interpolator as unknown as { ackHostOffsetMs: number };
+      const fullLeadMs = pair.clockMs + it.ackHostOffsetMs - (pair.hostDir as unknown as { hostSimElapsedMs: number }).hostSimElapsedMs;
+      const drawnLeadMs = ((drawn.y - truth.y) / truth.vy) * 1000;
+      assert.ok(drawnLeadMs >= fullLeadMs * 0.8, `drawn ${drawnLeadMs.toFixed(0)} ms ahead of ${fullLeadMs.toFixed(0)} ms`);
+      checked = true;
+    }
+  }
+  assert.ok(checked, 'the bullet reached the guest');
+  pair.dispose();
+});
+
+test('Round 15 follow-up (b2 14): after a 1.2 s download stall, bullets fired meanwhile still meet the guest on time', () => {
+  const pair = createDirectPair();
+  const rnd = seededR15(71);
+  let stallUntil = -1;
+  const one = () => 20 + rnd() * 80;
+  // Nothing from the host gets through for 1.2 s; then it all arrives at once, in order. Uploads are fine.
+  pair.setDelays(one, () => {
+    const d = one();
+    return pair.clockMs < stallUntil ? stallUntil - pair.clockMs + d : d;
+  });
+  const dt = 1 / 60;
+  const me = pair.guestDir.pilots[1];
+  const tick = () => {
+    for (const sh of pair.hostWorld.shots) sh.y += sh.vy * dt;
+    stepPairR15(pair, idleCtrl);
+  };
+  for (let f = 0; f < 240; f++) tick();
+  const stallFrom = pair.clockMs;
+  stallUntil = stallFrom + 1200;
+  // One bullet 1.4 s from the guest's ship row, fired 0.3 and 0.9 s into the stall, at its end, and 0.5 and 1 s after.
+  const fireAtMs = [300, 900, 1200, 1700, 2200];
+  const lateness: string[] = [];
+  let reached = 0;
+  const seen = new Set<number>();
+  for (let f = 0; f < 60 * 4.5; f++) {
+    const sinceMs = pair.clockMs - stallFrom;
+    fireAtMs.forEach((at, k) => {
+      if (sinceMs >= at && sinceMs < at + dt * 1000) {
+        pair.hostWorld.shots.push({ x: me.x + 4 + k, y: me.y - 420, vx: 0, vy: 300, hostile: true, dead: false, color: '#ff4d4d' });
+      }
+    });
+    tick();
+    for (let k = 0; k < fireAtMs.length; k++) {
+      if (seen.has(k)) continue;
+      const truth = pair.hostWorld.shots.find((sh) => sh.x === me.x + 4 + k);
+      const drawn = pair.guestWorld.shots.find((sh) => sh.hostile && Math.abs(sh.x - (me.x + 4 + k)) < 0.2);
+      if (!truth || !drawn || drawn.y < me.y - 40) continue;
+      seen.add(k);
+      reached += 1;
+      const it = pair.guestDir.interpolator as unknown as { ackHostOffsetMs: number };
+      const fullLeadMs = pair.clockMs + it.ackHostOffsetMs - (pair.hostDir as unknown as { hostSimElapsedMs: number }).hostSimElapsedMs;
+      const drawnLeadMs = ((drawn.y - truth.y) / truth.vy) * 1000;
+      if (drawnLeadMs < fullLeadMs - 45) lateness.push(`fired at +${fireAtMs[k]} ms: drawn ${drawnLeadMs.toFixed(0)} ms ahead of ${fullLeadMs.toFixed(0)} ms`);
+    }
+  }
+  assert.equal(reached, fireAtMs.length, 'every bullet was drawn reaching the guest');
+  assert.deepEqual(lateness, []);
+  pair.dispose();
+});
+
+test('Round 15 follow-up (b2 15): after one long host frame, bullets are not drawn ahead of where they meet the guest', () => {
+  const pair = createDirectPair();
+  delaysR15(pair, 'j60', 81);
+  const dt = 1 / 60;
+  const me = pair.guestDir.pilots[1];
+  const tick = () => {
+    for (const sh of pair.hostWorld.shots) sh.y += sh.vy * dt;
+    stepPairR15(pair, idleCtrl);
+  };
+  // Bullets 1 s from the guest's ship row: three fired 0.7, 0.5 and 0.3 s before the long frame, five after it.
+  const fireAtMs = [-700, -500, -300, 100, 400, 700, 1000, 1300];
+  const fire = (k: number) =>
+    pair.hostWorld.shots.push({ x: me.x + 4 + k, y: me.y - 300, vx: 0, vy: 300, hostile: true, dead: false, color: '#ff4d4d' });
+  for (let f = 0; f < 240; f++) {
+    fireAtMs.forEach((at, k) => {
+      if (at < 0 && f === 240 + Math.round(at / (dt * 1000))) fire(k);
+    });
+    tick();
+  }
+  // A 300 ms host frame (a busy tab): the game runs it as 50 ms, so the host's clock falls 250 ms behind.
+  for (let f = 0; f < 18; f++) {
+    pair.advanceClock(dt * 1000);
+    pair.flushWire();
+    pair.guestDir.step(dt, dt, pair.guestWorld, idleCtrl);
+  }
+  for (const sh of pair.hostWorld.shots) sh.y += sh.vy * 0.05;
+  pair.hostDir.step(0.05, 0.05, pair.hostWorld, idleCtrl);
+  const after = pair.clockMs;
+  const off: string[] = [];
+  const seen = new Set<number>();
+  for (let f = 0; f < 60 * 2.6; f++) {
+    const sinceMs = pair.clockMs - after;
+    fireAtMs.forEach((at, k) => {
+      if (at > 0 && sinceMs >= at && sinceMs < at + dt * 1000) fire(k);
+    });
+    tick();
+    for (let k = 0; k < fireAtMs.length; k++) {
+      if (seen.has(k)) continue;
+      const truth = pair.hostWorld.shots.find((sh) => sh.x === me.x + 4 + k);
+      const drawn = pair.guestWorld.shots.find((sh) => sh.hostile && Math.abs(sh.x - (me.x + 4 + k)) < 0.2);
+      if (!truth || !drawn || drawn.y < me.y - 40) continue;
+      seen.add(k);
+      const it = pair.guestDir.interpolator as unknown as { ackHostOffsetMs: number };
+      const fullLeadMs = pair.clockMs + it.ackHostOffsetMs - (pair.hostDir as unknown as { hostSimElapsedMs: number }).hostSimElapsedMs;
+      const drawnLeadMs = ((drawn.y - truth.y) / truth.vy) * 1000;
+      if (Math.abs(drawnLeadMs - fullLeadMs) > 45) off.push(`fired at ${fireAtMs[k]} ms: drawn ${drawnLeadMs.toFixed(0)} ms ahead, lead ${fullLeadMs.toFixed(0)} ms`);
+    }
+  }
+  assert.equal(seen.size, fireAtMs.length, 'every bullet was drawn reaching the guest');
+  assert.deepEqual(off, []);
+  pair.dispose();
+});
+
+test('Round 15 follow-up (b2 8): a guest hidden in a background tab keeps its question clock on time', () => {
+  const pair = createDirectPair();
+  pair.guestDir.setGrade(1);
+  pair.hostDir.setGrade(1);
+  for (let f = 0; f < 30; f++) stepPairR15(pair, idleCtrl);
+  const events = pair.guestDir as unknown as { handleHostEvent: (m: unknown) => void };
+  const { encodeStakeCode } = quizRef;
+  events.handleHostEvent({ type: 'event', kind: 'challenge', to: 1, id: 3_000_101, wave: 2, values: [encodeStakeCode('hull')] });
+  stepPairR15(pair, idleCtrl);
+  const quiz = () => (pair.guestDir.quiz as unknown as { active: { challenge: { timeLeft: number } } | null }).active;
+  const before = quiz()!.challenge.timeLeft;
+  // A hidden tab's timer ticks once a second and runs that second as twenty 0.05 s steps at one instant.
+  for (let tick = 0; tick < 5; tick++) {
+    pair.advanceClock(1000);
+    for (let i = 0; i < 20; i++) pair.guestDir.step(0.05, 0.05, pair.guestWorld, idleCtrl);
+  }
+  const moved = before - quiz()!.challenge.timeLeft;
+  assert.ok(moved >= 4.5, `the clock moved ${moved.toFixed(2)} s in 5 s`);
+  pair.dispose();
+});
+
+test('Round 15 follow-up (b2 13): a key change goes out on the next frame, and the relay window stays well clear', async () => {
+  const pair = createDirectPair();
+  for (let f = 0; f < 90; f++) stepPairR15(pair, idleCtrl);
+  const flags: number[] = [];
+  const realSend = pair.guestClient.sendBinary.bind(pair.guestClient);
+  pair.guestClient.sendBinary = (bytes: Uint8Array) => {
+    flags.push(bytes[6]!);
+    return realSend(bytes);
+  };
+  const { INPUT_FLAG_RIGHT } = await import('../src/game/coop-types');
+  const right: CoopLocalControlInput = { across: 1, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 };
+  // Twelve presses and releases at different points of the 20-a-second send rhythm.
+  for (let press = 0; press < 12; press++) {
+    for (let f = 0; f < 7 + press; f++) stepPairR15(pair, idleCtrl);
+    flags.length = 0;
+    stepPairR15(pair, right);
+    stepPairR15(pair, right);
+    assert.ok(flags.some((fl) => (fl & INPUT_FLAG_RIGHT) !== 0), `press ${press}: the right key was sent within two frames`);
+    for (let f = 0; f < 6; f++) stepPairR15(pair, right);
+  }
+  pair.dispose();
+});

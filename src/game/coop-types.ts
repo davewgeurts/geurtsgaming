@@ -7,8 +7,9 @@
 import type { Grade } from './fireworks';
 
 /**
- * 3: input frames may carry the guest's send time (10 bytes), the PICKING input flag and the answering bit, and the
- * snapshot header carries the version in its own byte. Bump it whenever either frame changes shape or meaning.
+ * 3: input frames may carry the guest's send time (10 bytes) and a pointer's destination (14 bytes), the PICKING input
+ * flag and the answering bit, and the snapshot header carries the version in its own byte. Bump it whenever either
+ * frame changes shape or meaning.
  */
 export const COOP_PROTOCOL_VERSION = 3;
 
@@ -338,6 +339,14 @@ export interface CoopGuestInput {
   picking?: boolean;
   /** The guest's own clock when sent, ms mod 65536 (absent in older 8-byte frames). */
   sendMs?: number;
+  /**
+   * While steering by pointer or thumb deck: where the ship is heading (the pointer, or the deck's target). The
+   * ship flies toward it at up to 760 px/s, so the host can follow exactly as the guest's own screen does.
+   */
+  destX?: number;
+  destY?: number;
+  /** The destination has stopped moving (the finger or the deck's target is still). */
+  destStill?: boolean;
 }
 
 export interface CoopMissionSummary {

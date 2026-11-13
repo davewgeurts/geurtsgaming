@@ -77,8 +77,12 @@ export const COOP_BREAK_TOUCH_ROUNDS = 2;
  * automatically would show the squad which band that pilot was given.
  */
 export const COOP_GRADE_PICK_SEC = 12;
-/** If the host's close never arrives, the picker closes itself this long after it opened. */
-const COOP_GRADE_PICK_FALLBACK_SEC = COOP_GRADE_PICK_SEC + 3;
+/**
+ * After COOP_GRADE_PICK_SEC the picker says nothing is lost and stops taking picks, but stays (still "picking" on the
+ * wire) until the host closes the question: the host's count of picking time only advances while inputs arrive, and
+ * closing early would let it go on to set off the bomb. Only if the host is gone does it close itself, this late.
+ */
+const COOP_GRADE_PICK_FALLBACK_SEC = 45;
 /** How long an upgrade offer stays open; the host fits the first offer when it runs out. */
 export const COOP_OFFER_SEC = 16;
 /** Pause between the touch break's sums, after a wrong answer (the longest of the two pauses). */
@@ -774,7 +778,7 @@ export class CoopLocalQuizController {
     if (st.stage === 'grade') {
       return {
         kind: 'grade',
-        interactive: st.age >= COOP_GRADE_GRACE_SEC,
+        interactive: st.age >= COOP_GRADE_GRACE_SEC && st.age < COOP_GRADE_PICK_SEC,
         timeLeft: Math.max(0, COOP_GRADE_PICK_SEC - st.age),
         timeLimit: COOP_GRADE_PICK_SEC,
       };
@@ -922,7 +926,8 @@ export class CoopLocalQuizController {
         }
       });
       const left = Math.max(0, Math.ceil(COOP_GRADE_PICK_SEC - st.age));
-      this.drawCentred(ctx, ink, `CLOSES IN ${left} - NOTHING LOST`, cx, top + 214, 8, room, alpha * 0.7, SAND);
+      const note = left > 0 ? `CLOSES IN ${left} - NOTHING LOST` : 'NO LEVEL PICKED - NOTHING LOST';
+      this.drawCentred(ctx, ink, note, cx, top + 214, 8, room, alpha * 0.7, SAND);
       return;
     }
 
@@ -1014,7 +1019,8 @@ export class CoopLocalQuizController {
 
   private selectGrade(index: number, useThumbDeck: boolean, hooks: CoopQuizHooks): boolean {
     const st = this.active;
-    if (!st || st.stage !== 'grade' || st.age < COOP_GRADE_GRACE_SEC || !GRADE_BANDS[index]) return false;
+    if (!st || st.stage !== 'grade' || st.age < COOP_GRADE_GRACE_SEC || st.age >= COOP_GRADE_PICK_SEC) return false;
+    if (!GRADE_BANDS[index]) return false;
     const band = index as GradeBand;
     this.setGrade(band, hooks.setExternalGrade);
     hooks.play('power');

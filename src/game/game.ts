@@ -1712,6 +1712,8 @@ export class Game {
     this.shots = this.shots.filter((s) => !s.dead);
     this.pickups = this.pickups.filter((p) => !p.dead);
     this.mines = this.mines.filter((m) => !m.dead);
+    // Everything has moved and every hit is settled: the squad's snapshot can go out.
+    coop.endHostFrame(this.coopAdapter);
   }
 
   /** A capsule's question is open, which is when the world runs in slow motion and the cannons hold their fire. */

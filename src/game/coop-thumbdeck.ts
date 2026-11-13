@@ -773,9 +773,11 @@ export class CoopThumbDeck {
         traceText(ctx, title, cx, padRect.y + 8, titleSz, 'center');
       });
       const sub =
-        card.timeLeft !== undefined
-          ? `SETS YOUR QUESTION LEVEL - NEVER SAVED - CLOSES IN ${Math.max(0, Math.ceil(card.timeLeft))}`
-          : 'SETS YOUR QUESTION LEVEL - NEVER SAVED';
+        card.timeLeft !== undefined && card.timeLeft <= 0
+          ? 'NO LEVEL PICKED - NOTHING LOST'
+          : card.timeLeft !== undefined
+            ? `SETS YOUR QUESTION LEVEL - NEVER SAVED - CLOSES IN ${Math.max(0, Math.ceil(card.timeLeft))}`
+            : 'SETS YOUR QUESTION LEVEL - NEVER SAVED';
       const subSz = fitTo(sub, 6.5, padRect.w - 20);
       ink(ctx, SAND, 0.72, 1.1, () => {
         traceText(ctx, sub, cx, padRect.y + 22, subSz, 'center');

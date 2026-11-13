@@ -985,3 +985,120 @@ test('Round 13 (4.1, 4.4, Sec 5): straight shots extrapolate to present, extrapo
   assert.equal(consumed, recorded, `zero duplicate or dropped FX across 600ms stall + 3s pause (${consumed} vs ${recorded})`);
   assert.ok(maxResumeStep < 8.5, `post-unpause enemy step stays smooth: max=${maxResumeStep.toFixed(2)}px`);
 });
+
+test('Round 15 follow-up (b2 15): after a long host frame, the bullet lead floor follows the newest snapshots, not the slow arrival clock', () => {
+  // Host and guest clocks run together; snapshots go out every 55 ms and take 50 ms to arrive; the guest's inputs
+  // take 60 ms to be used. At 2.0 s the host has one 300 ms frame that it runs as 50 ms: its clock falls 250 ms behind.
+  const it = new SnapshotInterpolator();
+  const snapAt = (tick: number, hostMs: number): CoopWorldSnapshot => ({
+    tick,
+    hostElapsedMs: hostMs,
+    wave: 1,
+    banner: 0,
+    teamScore: 0,
+    freed: 0,
+    energy: 1,
+    paused: false,
+    parked: false,
+    gameOver: false,
+    ships: [],
+    enemies: [],
+    boss: null,
+    tanker: null,
+    field: null,
+    // One straight bullet that left y = 0 at host time 0, at 300 px/s.
+    shots: [{ kind: 'enemy', color: NEON.red, heavy: false, x: 100, y: (300 * hostMs) / 1000, vx: 0, vy: 300, beamLife: 0 }],
+    items: [],
+    fx: [],
+  });
+  const hostAt = (sendMs: number) => (sendMs < 2000 ? sendMs : sendMs - 250);
+  const sends: number[] = [];
+  for (let t = 0; t < 2000; t += 55) sends.push(t);
+  for (let t = 2300; t < 3200; t += 55) sends.push(t);
+  let next = 0;
+  let tick = 0;
+  const worst: Array<{ t: number; aheadMs: number }> = [];
+  for (let now = 0; now < 3200; now += 1000 / 60) {
+    while (next < sends.length && sends[next]! + 50 <= now) {
+      const sent = sends[next]!;
+      it.push(snapAt(++tick, hostAt(sent)), sent + 50);
+      // The input this snapshot acknowledges was sent 60 ms before the host used it.
+      it.setAckHostOffset(hostAt(sent) - (sent - 60));
+      next += 1;
+    }
+    const out = it.sample(now);
+    const shot = out?.shots[0];
+    if (!shot || now < 2300 + 200) continue; // the first ~0.2 s after the frame: the lead itself is still re-learning
+    // Where the bullet belongs: at the host time when an input sent now gets used.
+    const wantHostMs = hostAt(now) + 60;
+    worst.push({ t: Math.round(now), aheadMs: ((shot.y - (300 * wantHostMs) / 1000) / 300) * 1000 });
+  }
+  const bad = worst.filter((w) => Math.abs(w.aheadMs) > 20);
+  assert.ok(worst.length > 30);
+  assert.deepEqual(bad.slice(0, 4), [], `${bad.length} frames off by more than 20 ms`);
+});
+
+test('Round 15 follow-up (b2 16): the held-up snapshots arriving after a long download stall never pull a young bullet back', () => {
+  // Host and guest clocks run together; snapshots go out every 55 ms and take 50 ms to arrive, except that everything
+  // sent from 2.0 to 2.7 s is held up and arrives oldest first between 2.75 and 2.8 s. Three bullets at 300 px/s: one
+  // fired before the stall, two during it (the guest first hears of those in the held-up batch).
+  const it = new SnapshotInterpolator();
+  const bullets = [
+    { x: 100, born: 1700 },
+    { x: 120, born: 2100 },
+    { x: 140, born: 2400 },
+  ];
+  const snapAt = (tick: number, hostMs: number): CoopWorldSnapshot => ({
+    tick,
+    hostElapsedMs: hostMs,
+    wave: 1,
+    banner: 0,
+    teamScore: 0,
+    freed: 0,
+    energy: 1,
+    paused: false,
+    parked: false,
+    gameOver: false,
+    ships: [],
+    enemies: [],
+    boss: null,
+    tanker: null,
+    field: null,
+    shots: bullets
+      .filter((b) => hostMs >= b.born)
+      .map((b) => ({ kind: 'enemy' as const, color: NEON.red, heavy: false, x: b.x, y: (300 * (hostMs - b.born)) / 1000, vx: 0, vy: 300, beamLife: 0 })),
+    items: [],
+    fx: [],
+  });
+  const sends: Array<{ sent: number; arrives: number }> = [];
+  let held = 0;
+  for (let t = 0; t < 3600; t += 55) {
+    const isHeld = t >= 2000 && t < 2700;
+    sends.push({ sent: t, arrives: isHeld ? 2750 + 4 * held++ : t + 50 });
+  }
+  let next = 0;
+  let tick = 0;
+  const prevY = new Map<number, number>();
+  const problems: string[] = [];
+  for (let now = 0; now < 3600; now += 1000 / 60) {
+    while (next < sends.length && sends[next]!.arrives <= now) {
+      const { sent } = sends[next]!;
+      it.push(snapAt(++tick, sent), sends[next]!.arrives);
+      it.setAckHostOffset(60);
+      next += 1;
+    }
+    const out = it.sample(now);
+    if (!out) continue;
+    for (const b of bullets) {
+      const drawn = out.shots.find((sh) => sh.x === b.x);
+      const before = prevY.get(b.x);
+      if (before !== undefined && !drawn) problems.push(`${Math.round(now)} ms: bullet ${b.x} vanished`);
+      if (before !== undefined && drawn && drawn.y < before - 0.01) {
+        problems.push(`${Math.round(now)} ms: bullet ${b.x} went back ${(before - drawn.y).toFixed(1)} px`);
+      }
+      if (drawn) prevY.set(b.x, drawn.y);
+    }
+  }
+  assert.equal(prevY.size, bullets.length, 'every bullet was drawn');
+  assert.deepEqual(problems.slice(0, 4), [], `${problems.length} problems`);
+});
