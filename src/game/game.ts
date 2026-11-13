@@ -1090,7 +1090,9 @@ export class Game {
         this.coop.recordHostFx('spark', x, y, color);
       }
     },
-    problem: () => makeProblem(sumLevel(this.wave, (this.coop ? this.coop.grade : this.grade) ?? 1)),
+    // In co-op the whole squad sees the boss's sums, so they cannot follow one pilot's private grade band (it would
+    // show the others which band the host picked): the squad gets the youngest band's sums.
+    problem: () => makeProblem(sumLevel(this.wave, this.coop ? 0 : (this.grade ?? 1))),
   };
 
   private bossEnv(): BossEnv {

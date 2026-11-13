@@ -642,7 +642,7 @@ export class CoopThumbDeck {
       });
       const sub =
         card.timeLeft !== undefined
-          ? `SETS YOUR QUESTION LEVEL - NEVER SAVED - ${Math.max(0, Math.ceil(card.timeLeft))}`
+          ? `SETS YOUR QUESTION LEVEL - NEVER SAVED - CLOSES IN ${Math.max(0, Math.ceil(card.timeLeft))}`
           : 'SETS YOUR QUESTION LEVEL - NEVER SAVED';
       const subSz = fitTo(sub, 6.5, padRect.w - 20);
       ink(ctx, SAND, 0.72, 1.1, () => {
