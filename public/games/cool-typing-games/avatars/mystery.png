@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<!-- Google Analytics & GTM — production only -->
+		<script>
+			(function(){
+				var h = window.location.hostname;
+				var gaId = null;
+				var gtmId = null;
+
+				if (h === 'cooltypinggames.com' || h === 'www.cooltypinggames.com')
+				{
+					gaId = 'G-XFDPRX7WN3';
+					gtmId = 'GTM-5K2J3PVV';
+				}
+				else if (h === 'cookiesforfish.com' || h === 'www.cookiesforfish.com')
+				{
+					gaId = 'G-2X2YC8K237';
+				}
+
+				if (gaId)
+				{
+					var g = document.createElement('script');
+					g.async = true;
+					g.src = 'https://www.googletagmanager.com/gtag/js?id=' + gaId;
+					document.head.appendChild(g);
+
+					window.dataLayer = window.dataLayer || [];
+					function gtag(){dataLayer.push(arguments);}
+					gtag('js', new Date());
+					gtag('config', gaId);
+				}
+
+				if (gtmId)
+				{
+					(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+					new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+					j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+					'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+					})(window,document,'script','dataLayer',gtmId);
+				}
+			})();
+		</script>
+		<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+		<!-- Icons. Root-relative on purpose: these are served from the deploy root (vite.config
+		     copies public/themes/<mode>/* there), and a bare "favicon.ico" would resolve against
+		     the CURRENT path - so a reload on /account/select-avatar asked for
+		     /account/select-avatar/favicon.ico, which the SPA fallback answers with the HTML
+		     document. The icon then only worked on the root URL. Both themes ship these same
+		     filenames, so one set of tags covers them.
+
+		     The .ico stays for legacy and for the tab; the PNGs are what modern browsers
+		     actually pick, and apple-touch-icon is what iOS uses when a page is added to the
+		     home screen. -->
+		<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+		<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+		<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+		<link rel="shortcut icon" href="/favicon.ico" />
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<!-- Rajdhani is the display face for the account forms - condensed and squared
+		     to sit with the logo. Roboto stays the body face. One request for both. -->
+		<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Roboto:wght@300;400;500;700&display=swap" />
+		<meta name="theme-color" content="#000000" />
+		<!-- Root-relative for the same reason as the icons above. The icon paths INSIDE
+		     manifest.json resolve against the manifest's own URL, so they were always fine. -->
+		<link rel="manifest" href="/manifest.json" />
+		<title>Cool Typing Games</title>
+		<meta name="description" content="Multiplayer typing games for kids and classrooms. Race, battle and tug-of-war your way to faster typing." />
+		<meta property="og:type" content="website" />
+		<meta property="og:site_name" content="Cool Typing Games" />
+		<meta property="og:title" content="Cool Typing Games" />
+		<meta property="og:description" content="Multiplayer typing games for kids and classrooms. Race, battle and tug-of-war your way to faster typing." />
+		<meta property="og:url" content="https://cooltypinggames.com/" />
+		<meta property="og:image" content="https://cooltypinggames.com/share.png" />
+		<meta property="og:image:width" content="1200" />
+		<meta property="og:image:height" content="630" />
+		<meta property="og:image:alt" content="Cool Typing Games" />
+		<meta name="twitter:card" content="summary_large_image" />
+		<script type="module" crossorigin src="/assets/index-AyprZfHJ.js"></script>
+		<link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-C0FnF6B9.js">
+		<link rel="modulepreload" crossorigin href="/assets/preload-helper-F7n4DqII.js">
+		<link rel="modulepreload" crossorigin href="/assets/DataTypes-DI-HE7xP.js">
+		<link rel="modulepreload" crossorigin href="/assets/ClientDataTypes-DxjcGvM6.js">
+		<link rel="modulepreload" crossorigin href="/assets/Networking-B3ntEwPv.js">
+		<link rel="modulepreload" crossorigin href="/assets/avatarColorStore-5DHQmInB.js">
+		<link rel="stylesheet" crossorigin href="/assets/index-CgCRMXFP.css">
+	</head>
+	<body>
+		<noscript>You need to enable JavaScript to run this app....</noscript>
+		<div id="root"></div>
+	</body>
+</html>
