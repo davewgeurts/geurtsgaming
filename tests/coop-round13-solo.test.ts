@@ -354,3 +354,43 @@ test('Round 13 (Sec 5): Co-op Space on focused button never triggers game behind
   assert.equal(renderedError, 'Could not launch squad flight. Check your connection and try again.');
   lobbyCtrl.dispose();
 });
+
+test('Round 15 (5.5): a phone host keeps AUTO-FIRE on through a pause and a hidden tab', () => {
+  const seats = [
+    { seat: 0 as const, callsign: 'ACE', ready: true, isHost: true, connected: true },
+    { seat: 1 as const, callsign: 'NOVA', ready: true, isHost: false, connected: true },
+  ];
+  const client = new CoopClient({ code: 'FIRE15', role: 'host', callsign: 'ACE', storage: null });
+  Object.assign(client, { seat: 0, seats });
+  client.sendBinary = () => true;
+  client.sendEvent = () => true;
+  client.sendHostPaused = () => true;
+  const director = new CoopFlightDirector({ client, initialSeats: seats, storage: null, now: () => 5000 });
+  media.coarse = true;
+  const canvas = makeStubCanvas(390, 844);
+  const game = new Game(canvas as unknown as HTMLCanvasElement, {
+    multiplayer: makeFakeMultiplayer() as never,
+    coop: { director },
+    onExit() {},
+    onStatus() {},
+    onPause() {},
+  }) as unknown as Record<string, any>;
+  media.coarse = false;
+  game.state = 'playing';
+  const btn = director.layout.autoFireBtnRect;
+  director.deck.onPointerDown(director.layout, 31, btn.x + btn.w / 2, btn.y + btn.h / 2, false);
+  director.deck.onPointerUp(31);
+  assert.equal(director.deck.state().autoFireLatch, true, 'AUTO-FIRE is on');
+  game.togglePause();
+  game.togglePause();
+  assert.equal(game.isPaused, false);
+  assert.equal(director.deck.state().autoFireLatch, true, 'still on after a pause and resume');
+  docTarget.hidden = true;
+  docTarget.dispatchEvent(new Event('visibilitychange'));
+  docTarget.hidden = false;
+  docTarget.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(director.deck.state().autoFireLatch, true, 'still on after the tab was hidden');
+  game.destroy();
+  director.dispose();
+  client.dispose();
+});

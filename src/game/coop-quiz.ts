@@ -839,7 +839,7 @@ export class CoopLocalQuizController {
     const c = st.challenge;
     return {
       kind: 'choice',
-      title: `CHARGE FOR WAVE ${st.wave} (${st.total - st.left}/${st.total})`,
+      title: `CHARGE FOR WAVE ${st.wave} - ${st.total - st.left}/${st.total}`,
       titleColor: NEON.cyan,
       question: c.question,
       options: c.options,
@@ -1454,7 +1454,7 @@ export function renderSquadMissionSummary(
       traceText(ctx, 'SQUAD UPGRADES: NONE EQUIPPED THIS RUN', cx, upgY + 6, 8.5, 'center');
     }, false);
   } else {
-    const label = `SQUAD UPGRADES (${earnedList.length}):`;
+    const label = `SQUAD UPGRADES - ${earnedList.length}:`;
     const iconSpan = earnedList.length * 24;
     const startX = cx - (textWidth(label, 8.5) + 14 + iconSpan) / 2;
     ink(NEON.lime, 0.9 * alpha, 1.3, () => {

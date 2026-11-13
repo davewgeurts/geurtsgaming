@@ -5,8 +5,12 @@
  * - On portrait phones (`isCoarse && viewportW < 600 && viewportH > viewportW * 1.08`), the bottom ~38%
  *   of the screen is reserved as a dedicated Thumb Steering Deck so the player's thumb never covers
  *   low-flying hazards, wingmen, or the shared `3:4` arena above it.
- * - On laptops, tablets (`>= 600px` wide), and landscape screens, `deckHeight = 0` and the `3:4` arena
- *   centers cleanly at full viewport height with side HUD rails.
+ * - On a touch screen held sideways (coarse pointer, landscape, under 900 px tall: phones and most tablets), the
+ *   arena fits the height on the left and the deck takes the free space on its right, which the arena could not
+ *   use anyway. Questions get full-size cards there (inside the arena they would be 35 x 18 px on a phone and
+ *   70 x 37 px on a 1024 x 768 tablet), and the thumb steers from the deck.
+ * - On laptops, big tablets and portrait tablets, `deckHeight = 0` and the `3:4` arena centers cleanly at full
+ *   viewport height with side HUD rails.
  */
 
 import {
@@ -38,8 +42,10 @@ export interface ScreenBox {
 export interface CoopViewportLayout {
   viewportW: number;
   viewportH: number;
-  /** True on portrait phones where the bottom 38% Thumb Steering Deck is active. */
+  /** True on phones, where the Thumb Steering Deck is active (below the arena, or beside it when sideways). */
   useThumbDeck: boolean;
+  /** Where the deck sits: below the arena (portrait phone), beside it (phone held sideways), or none. */
+  deckSide: 'bottom' | 'right' | 'none';
   /** Screen-space box where the `768 x 1024` (`3:4`) arena is rendered (`w / h === 0.75`). */
   arenaRect: ScreenBox;
   /** Uniform scale mapping `768 x 1024` world units to CSS pixels (`arenaRect.w / 768`). */
@@ -68,6 +74,7 @@ export function computeCoopViewportLayout(
 ): CoopViewportLayout {
   const vw = Math.max(240, viewportW);
   const vh = Math.max(320, viewportH);
+  if (isCoarse && vw > vh && vh < 900) return sideDeckLayout(vw, vh, insets);
   const useThumbDeck = isCoarse && vw < 600 && vh > vw * 1.08;
 
   const deckHeight = useThumbDeck
@@ -121,6 +128,7 @@ export function computeCoopViewportLayout(
     viewportW: vw,
     viewportH: vh,
     useThumbDeck,
+    deckSide: useThumbDeck ? 'bottom' : 'none',
     arenaRect: { x: arenaX, y: arenaY, w: arenaW, h: arenaH },
     arenaScale: scale,
     deckHeight,
@@ -128,6 +136,102 @@ export function computeCoopViewportLayout(
     padRect,
     autoFireBtnRect,
   };
+}
+
+/**
+ * A touch screen held sideways: the arena fits the height on the left, and the deck takes the rest of the width.
+ * The deck's header leaves the top right free for the page's own buttons (sound, exit); AUTO-FIRE sits below them.
+ */
+function sideDeckLayout(vw: number, vh: number, insets: SafeInsets): CoopViewportLayout {
+  const topPad = Math.max(insets.top, 6);
+  const bottomPad = Math.max(insets.bottom, 6);
+  const leftPad = Math.max(insets.left, 6);
+  const rightPad = Math.max(insets.right, 0);
+  const availH = vh - topPad - bottomPad;
+  const minDeckW = 220;
+  const scale = Math.min(availH / COOP_ARENA_HEIGHT, (vw - leftPad - rightPad - minDeckW - 8) / COOP_ARENA_WIDTH);
+  const arenaW = COOP_ARENA_WIDTH * scale;
+  const arenaH = COOP_ARENA_HEIGHT * scale;
+  const arenaX = leftPad;
+  const arenaY = topPad + (availH - arenaH) / 2;
+
+  const deckX = Math.round(arenaX + arenaW + 8);
+  const deckRect: ScreenBox = { x: deckX, y: 0, w: vw - deckX - rightPad, h: vh };
+  const margin = clamp(Math.round(deckRect.w * 0.04), 10, 18);
+  const btnW = Math.min(142, Math.round(deckRect.w * 0.37));
+  const autoFireBtnRect: ScreenBox = { x: deckRect.x + deckRect.w - margin - btnW, y: 62, w: btnW, h: 44 };
+  const padTop = autoFireBtnRect.y + autoFireBtnRect.h + 8;
+  const padRect: ScreenBox = {
+    x: deckRect.x + margin,
+    y: padTop,
+    w: Math.max(140, deckRect.w - margin * 2),
+    h: Math.max(92, vh - padTop - Math.max(10, bottomPad + 4)),
+  };
+
+  return {
+    viewportW: vw,
+    viewportH: vh,
+    useThumbDeck: true,
+    deckSide: 'right',
+    arenaRect: { x: arenaX, y: arenaY, w: arenaW, h: arenaH },
+    arenaScale: scale,
+    deckHeight: 0,
+    deckRect,
+    padRect,
+    autoFireBtnRect,
+  };
+}
+
+/** The squad's mission summary, for the deck at game over. */
+export interface CoopDeckSummary {
+  score: number;
+  wave: number;
+  freed: number;
+  isHost: boolean;
+  /** Present pilots: callsign, colour, right answers and rescues. */
+  pilots: ReadonlyArray<{ seat: CoopSeatIndex; callsign: string; color: string; questionsRight: number; revives: number }>;
+}
+
+/**
+ * The mission summary in screen space on the deck, where a phone can read it (in the arena it would be 3 to 5 px
+ * tall on a phone).
+ */
+function renderDeckSummary(ctx: CanvasRenderingContext2D, pad: ScreenBox, s: CoopDeckSummary): void {
+  const cx = pad.x + pad.w / 2;
+  const innerW = pad.w - 24;
+  let y = pad.y + 10;
+  const title = 'SQUAD MISSION SUMMARY';
+  const titleSz = fitTo(title, 11, innerW);
+  ink(ctx, NEON.cyan, 0.96, 1.5, () => traceText(ctx, title, cx, y, titleSz, 'center'));
+  y += titleSz + 12;
+
+  const stats = `SCORE ${String(Math.max(0, Math.round(s.score))).padStart(6, '0')} - WAVE ${s.wave} - FREED ${s.freed}`;
+  const statsSz = fitTo(stats, 10, innerW);
+  ink(ctx, NEON.yellow, 0.95, 1.4, () => traceText(ctx, stats, cx, y, statsSz, 'center'));
+  y += statsSz + 12;
+
+  const footerSz = 8;
+  const rowSz = clamp(Math.floor((pad.y + pad.h - footerSz - 18 - y) / Math.max(1, s.pilots.length)) - 9, 6.5, 9);
+  for (const p of s.pilots) {
+    const left = `P${p.seat + 1} ${p.callsign}`;
+    const right = `QUIZZES ${p.questionsRight} - RESCUES ${p.revives}`;
+    const leftSz = fitTo(left, rowSz, innerW * 0.45);
+    const rightSz = fitTo(right, rowSz, innerW * 0.52);
+    ink(ctx, p.color, 0.95, 1.3, () => traceText(ctx, left, pad.x + 12, y, leftSz, 'left'));
+    ink(ctx, SAND, 0.85, 1.2, () => traceText(ctx, right, pad.x + pad.w - 12, y, rightSz, 'right'), false);
+    y += rowSz + 9;
+  }
+
+  const footer = s.isHost ? 'TAP TO RELAUNCH THE SQUAD' : 'WAITING FOR THE HOST TO RELAUNCH';
+  const fSz = fitTo(footer, footerSz, innerW);
+  ink(ctx, NEON.lime, 0.85, 1.2, () => traceText(ctx, footer, cx, pad.y + pad.h - fSz - 8, fSz, 'center'), false);
+}
+
+/** True when the screen point lies inside the deck (below the arena, or beside it). */
+export function pointInDeck(layout: CoopViewportLayout, x: number, y: number, slop = 4): boolean {
+  if (!layout.useThumbDeck) return false;
+  const d = layout.deckRect;
+  return x >= d.x - slop && x <= d.x + d.w + slop && y >= d.y - slop && y <= d.y + d.h + slop;
 }
 
 /** Map a screen pointer `(clientX, clientY)` into `768 x 1024` logical world coordinates. */
@@ -203,37 +307,44 @@ export type CoopDeckCardView =
       color: string;
     };
 
-/** Compute interactive button boxes inside `layout.padRect` for an active portrait-phone deck card. */
+/** Rows of a list card (grade picker, upgrade offer): title space above them, and the gap between them. */
+const LIST_CARD_TITLE = { grade: 38, offer: 30 } as const;
+const LIST_ROW_GAP = 6;
+const MIN_TARGET = 44;
+
+/**
+ * The area a deck card uses: the trackpad. On a short deck (a small phone) a list card would not fit three rows of
+ * at least 44 px there, so it takes the deck from its top instead, over the header (which waits behind the card).
+ */
+export function deckCardArea(layout: CoopViewportLayout, card: CoopDeckCardView): ScreenBox {
+  const { padRect, deckRect } = layout;
+  if (card.kind !== 'grade' && card.kind !== 'offer') return padRect;
+  const count = card.kind === 'grade' ? GRADE_BANDS.length : card.upgrades.length;
+  const need = LIST_CARD_TITLE[card.kind] + count * MIN_TARGET + (count - 1) * LIST_ROW_GAP + 8;
+  if (padRect.h >= need || layout.deckSide !== 'bottom') return padRect;
+  const top = deckRect.y + 4;
+  return { x: padRect.x, y: top, w: padRect.w, h: padRect.y + padRect.h - top };
+}
+
+/** Compute interactive button boxes for an active deck card (inside `deckCardArea`). */
 export function deckCardBoxes(layout: CoopViewportLayout, card: CoopDeckCardView): ScreenBox[] {
   const { padRect } = layout;
   if (!layout.useThumbDeck || padRect.w <= 0 || padRect.h <= 0) return [];
-  const innerX = padRect.x + 10;
-  const innerW = Math.max(100, padRect.w - 20);
+  const area = deckCardArea(layout, card);
+  const innerX = area.x + 10;
+  const innerW = Math.max(100, area.w - 20);
 
-  if (card.kind === 'grade') {
-    const count = GRADE_BANDS.length;
-    const topY = padRect.y + 38;
-    const availH = Math.max(132, padRect.h - 46);
-    const gap = 6;
-    const rowH = clamp(Math.floor((availH - gap * (count - 1)) / count), 40, 56);
-    return Array.from({ length: count }, (_, i) => ({
-      x: innerX,
-      y: topY + i * (rowH + gap),
-      w: innerW,
-      h: rowH,
-    }));
-  }
-
-  if (card.kind === 'offer') {
-    const count = card.upgrades.length;
+  if (card.kind === 'grade' || card.kind === 'offer') {
+    const count = card.kind === 'grade' ? GRADE_BANDS.length : card.upgrades.length;
     if (count === 0) return [];
-    const topY = padRect.y + 30;
-    const availH = Math.max(132, padRect.h - 38);
-    const gap = 6;
-    const rowH = clamp(Math.floor((availH - gap * (count - 1)) / count), 40, 58);
+    const title = LIST_CARD_TITLE[card.kind];
+    const topY = area.y + title;
+    // Rows fill what is left, never past the bottom of the area: up to 56 (58 for upgrades) px each.
+    const fit = Math.floor((area.h - title - 8 - LIST_ROW_GAP * (count - 1)) / count);
+    const rowH = Math.max(24, Math.min(card.kind === 'grade' ? 56 : 58, fit));
     return Array.from({ length: count }, (_, i) => ({
       x: innerX,
-      y: topY + i * (rowH + gap),
+      y: topY + i * (rowH + LIST_ROW_GAP),
       w: innerW,
       h: rowH,
     }));
@@ -360,7 +471,7 @@ export class CoopThumbDeck {
       return true;
     }
 
-    if (clientY >= layout.deckRect.y - 4) {
+    if (pointInDeck(layout, clientX, clientY)) {
       if (this.activePointerId === null) {
         this.activePointerId = pointerId;
         this.originClientX = clamp(
@@ -443,6 +554,8 @@ export class CoopThumbDeck {
       respawnSec: number;
       answering?: boolean;
       gameOver?: boolean;
+      /** At game over: the squad's mission summary, drawn on the deck where a phone can read it. */
+      summary?: CoopDeckSummary | null;
       card?: CoopDeckCardView | null;
       wingmen?: ReadonlyArray<{
         seat: CoopSeatIndex;
@@ -462,10 +575,15 @@ export class CoopThumbDeck {
     ctx.fillStyle = 'rgba(3, 8, 30, 0.92)';
     ctx.fillRect(deckRect.x, deckRect.y, deckRect.w, deckRect.h);
 
-    // Top divider beam separating the 3:4 arena from the thumb deck
+    // Divider beam separating the 3:4 arena from the thumb deck (its top edge, or its left edge when sideways)
     ink(ctx, seatColor, 0.7, 1.5, () => {
-      ctx.moveTo(0, deckRect.y + 0.5);
-      ctx.lineTo(deckRect.w, deckRect.y + 0.5);
+      if (layout.deckSide === 'right') {
+        ctx.moveTo(deckRect.x + 0.5, deckRect.y);
+        ctx.lineTo(deckRect.x + 0.5, deckRect.y + deckRect.h);
+      } else {
+        ctx.moveTo(0, deckRect.y + 0.5);
+        ctx.lineTo(deckRect.w, deckRect.y + 0.5);
+      }
     });
 
     // Pilot seat badge + hull pips + compact squadmate tags on left of header
@@ -551,6 +669,12 @@ export class CoopThumbDeck {
       return;
     }
 
+    if (info.gameOver && info.summary) {
+      renderDeckSummary(ctx, padRect, info.summary);
+      ctx.restore();
+      return;
+    }
+
     ink(
       ctx,
       seatColor,
@@ -631,7 +755,15 @@ export class CoopThumbDeck {
     layout: CoopViewportLayout,
     card: CoopDeckCardView,
   ): void {
-    const { padRect } = layout;
+    const padRect = deckCardArea(layout, card);
+    if (padRect !== layout.padRect) {
+      // A short deck: the card covers the header too.
+      ctx.fillStyle = 'rgba(3, 8, 30, 0.97)';
+      ctx.fillRect(padRect.x - 6, padRect.y - 2, padRect.w + 12, padRect.h + 4);
+      ink(ctx, NEON.yellow, 0.88, 1.5, () => {
+        ctx.rect(padRect.x, padRect.y, padRect.w, padRect.h);
+      });
+    }
     const cx = padRect.x + padRect.w / 2;
 
     if (card.kind === 'grade') {

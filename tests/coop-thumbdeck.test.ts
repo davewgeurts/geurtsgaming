@@ -8,6 +8,8 @@ import {
   clientToArenaPoint,
   computeCoopViewportLayout,
 } from '../src/game/coop-thumbdeck';
+
+const thumbDeckR15 = await import('../src/game/coop-thumbdeck');
 import { COOP_ARENA_HEIGHT, COOP_ARENA_WIDTH, type CoopPublicSeat } from '../src/game/coop-types';
 import { NEON, type Ink } from '../src/game/core';
 import { textWidth } from '../src/game/font';
@@ -39,10 +41,13 @@ test('computeCoopViewportLayout reserves bottom 38% on portrait phones and full 
   assert.ok(Math.abs(ipad.arenaRect.w / ipad.arenaRect.h - 0.75) < 1e-6);
   assert.ok(ipad.arenaRect.w > 750);
 
-  // Landscape phone (844 x 390) & Laptop (1440 x 900)
+  // Landscape phone (844 x 390): the deck moves beside the arena (Round 15, 4.4). Laptop (1440 x 900): no deck.
   const landscape = computeCoopViewportLayout(844, 390, true);
-  assert.equal(landscape.useThumbDeck, false);
+  assert.equal(landscape.useThumbDeck, true);
+  assert.equal(landscape.deckSide, 'right');
   assert.equal(landscape.deckHeight, 0);
+  assert.ok(landscape.arenaRect.x + landscape.arenaRect.w <= landscape.deckRect.x, 'the deck sits beside the arena');
+  assert.ok(Math.abs(landscape.arenaRect.w / landscape.arenaRect.h - 0.75) < 1e-6);
 
   const laptop = computeCoopViewportLayout(1440, 900, false);
   assert.equal(laptop.useThumbDeck, false);
@@ -130,9 +135,10 @@ test('Portrait-phone Host lets 100% of touches pass through on Game Over or Paus
   assert.equal(dir.handlePointerDown(2, padX, padY, true), true);
   assert.equal(dir.deck.state().touching, true);
 
-  // 2. Rotate phone to landscape (`844 x 390`) mid-touch, lift finger, and rotate back (`390 x 844`)
+  // 2. Rotate phone to landscape (`844 x 390`) mid-touch, lift finger, and rotate back (`390 x 844`). Since Round 15
+  // (4.4) the deck moves beside the arena instead of going away; the held thumb is still let go.
   const landscape = dir.setViewport(844, 390, undefined, true);
-  assert.equal(landscape.useThumbDeck, false);
+  assert.equal(landscape.deckSide, 'right');
   assert.equal(dir.deck.state().touching, false, 'viewport switch immediately releases captured thumb pointer');
   dir.handlePointerUp(2);
   dir.setViewport(390, 844, undefined, true);
@@ -496,4 +502,105 @@ test('Round 13 (Sec 5): Guest Game Over shows host-relaunch notice without Top 1
 
   dir.dispose();
   client.dispose();
+});
+
+test('Round 15 (4.4): a phone or tablet held sideways gets full-size question cards beside the arena', () => {
+  const { deckCardBoxes } = thumbDeckR15;
+  const cards = [
+    { kind: 'grade', interactive: true },
+    { kind: 'offer', upgrades: UPGRADES.slice(0, 3), interactive: true },
+    {
+      kind: 'choice',
+      title: 'SOLVE TO DEFUSE',
+      titleColor: NEON.red,
+      question: '7 + 5',
+      options: [11, 12, 13],
+      correctIndex: 1,
+      pickedIndex: null,
+      done: false,
+      interactive: true,
+      timeLeft: 10,
+      timeLimit: 16,
+      note: '',
+      noteColor: NEON.cyan,
+    },
+  ] as const;
+  for (const [w, h] of [
+    [844, 390],
+    [740, 360],
+    [1024, 768],
+    [1180, 820],
+  ] as const) {
+    const layout = computeCoopViewportLayout(w, h, true);
+    assert.equal(layout.useThumbDeck, true, `${w}x${h} uses the deck`);
+    assert.equal(layout.deckSide, 'right');
+    const arena = layout.arenaRect;
+    assert.ok(arena.h >= h - 16, `${w}x${h}: the arena still uses the full height (${arena.h.toFixed(0)} px)`);
+    for (const card of cards) {
+      const boxes = deckCardBoxes(layout, card as never);
+      assert.ok(boxes.length > 0, `${w}x${h} ${card.kind}`);
+      for (const b of boxes) {
+        assert.ok(b.w >= 44 && b.h >= 44, `${w}x${h} ${card.kind}: target ${b.w.toFixed(0)}x${b.h.toFixed(0)} px`);
+        assert.ok(b.x >= arena.x + arena.w && b.x + b.w <= w && b.y >= 0 && b.y + b.h <= h, `${w}x${h} ${card.kind}: on screen, beside the arena`);
+      }
+    }
+  }
+  // A laptop's mouse and a portrait tablet's finger still play in the full-size arena.
+  assert.equal(computeCoopViewportLayout(1440, 900, false).useThumbDeck, false);
+  assert.equal(computeCoopViewportLayout(820, 1180, true).useThumbDeck, false);
+});
+
+test('Round 15 (5.11): on small phones every grade and upgrade row is at least 44 px and fully on screen', () => {
+  const { deckCardBoxes } = thumbDeckR15;
+  const grade = { kind: 'grade', interactive: true } as const;
+  const offer = { kind: 'offer', upgrades: UPGRADES.slice(0, 3), interactive: true } as const;
+  for (const [w, h] of [
+    [320, 568],
+    [360, 640],
+    [375, 667],
+    [390, 844],
+  ] as const) {
+    const layout = computeCoopViewportLayout(w, h, true);
+    assert.equal(layout.deckSide, 'bottom');
+    for (const card of [grade, offer]) {
+      const boxes = deckCardBoxes(layout, card as never);
+      assert.equal(boxes.length, 3);
+      for (const b of boxes) {
+        assert.ok(b.h >= 44 && b.w >= 44, `${w}x${h} ${card.kind}: row ${b.w.toFixed(0)}x${b.h.toFixed(0)} px`);
+        assert.ok(b.y >= layout.deckRect.y && b.y + b.h <= h, `${w}x${h} ${card.kind}: row ends at y ${(b.y + b.h).toFixed(0)}`);
+      }
+    }
+  }
+});
+
+test('Round 15 (6): wreck labels never overprint, and deck card titles use only letters the font can draw', async () => {
+  const { placeWreckLabel } = await import('../src/game/coop-flight');
+  const { hasGlyph } = await import('../src/game/font');
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+  for (let run = 0; run < 200; run++) {
+    const drawn: Array<{ x: number; top: number; bottom: number }> = [];
+    const count = 2 + Math.floor(rnd() * 3);
+    for (let i = 0; i < count; i++) {
+      const x = 300 + rnd() * 120;
+      const y = 800 + rnd() * 40;
+      placeWreckLabel(drawn, x, y + 22, rnd() < 0.5 ? 18 : 9, 2);
+    }
+    for (let a = 0; a < drawn.length; a++) {
+      for (let b = a + 1; b < drawn.length; b++) {
+        const A = drawn[a]!;
+        const B = drawn[b]!;
+        const overlap = Math.abs(A.x - B.x) < 84 && A.top < B.bottom && B.top < A.bottom;
+        assert.equal(overlap, false, `run ${run}: labels ${a} and ${b} overprint`);
+      }
+    }
+  }
+  const { CoopLocalQuizController } = await import('../src/game/coop-quiz');
+  const hooks = { play() {}, announce() {}, onChallengeSettled() {}, onUpgradeChosen() {} };
+  const c = new CoopLocalQuizController({ isolatedGrade: true, initialGrade: 1, initialInputMode: 'touch' });
+  c.openChallenge(600, 'break', 12, true, hooks);
+  const card = c.deckCard(true);
+  assert.ok(card && card.kind === 'choice');
+  const blanks = [...card.title].filter((ch) => !hasGlyph(ch));
+  assert.deepEqual(blanks, [], `"${card.title}" draws blanks for ${blanks.join(' ')}`);
 });

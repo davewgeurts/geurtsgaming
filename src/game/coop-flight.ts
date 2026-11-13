@@ -69,8 +69,11 @@ import {
   CoopThumbDeck,
   clientToArenaPoint,
   computeCoopViewportLayout,
+  deckCardBoxes,
   hitTestDeckCard,
+  pointInDeck,
   type CoopDeckCardView,
+  type ScreenBox,
   type SafeInsets,
   type CoopViewportLayout,
 } from './coop-thumbdeck';
@@ -140,6 +143,39 @@ const CHALLENGE_ID_BLOCK = 1_000_000;
 const upgradeIndexOf = (id: UpgradeId | null): number => (id ? UPGRADES.findIndex((u) => u.id === id) : -1);
 const offerIdsOf = (indices: readonly number[]): UpgradeId[] =>
   indices.map((i) => UPGRADES[i]?.id).filter((id): id is UpgradeId => id !== undefined);
+/**
+ * Where a wreck's label block (`blockH` tall, about 84 wide) goes: at `top`, or below any label already in `drawn`
+ * that it would overprint. The block is added to `drawn`.
+ */
+export function placeWreckLabel(
+  drawn: Array<{ x: number; top: number; bottom: number }>,
+  x: number,
+  top: number,
+  blockH: number,
+  gap: number,
+): number {
+  let y = top;
+  for (let moved = true, guard = 0; moved && guard < 8; guard++) {
+    moved = false;
+    for (const prev of drawn) {
+      if (Math.abs(prev.x - x) < 84 && y < prev.bottom && y + blockH > prev.top) {
+        y = prev.bottom + gap;
+        moved = true;
+      }
+    }
+  }
+  drawn.push({ x, top: y, bottom: y + blockH });
+  return y;
+}
+
+/** A deck card row is picked by a tap: released on the same row within this long of touching it. */
+export const COOP_CARD_TAP_MAX_MS = 700;
+/** Which card a deck tap started on, so a tap that ends on a different card (the next question) picks nothing. */
+function deckCardKey(card: CoopDeckCardView): string {
+  if (card.kind === 'choice') return `choice:${card.title}:${card.question}:${card.options.join(',')}`;
+  if (card.kind === 'offer') return `offer:${card.upgrades.map((u) => u.id).join(',')}`;
+  return card.kind;
+}
 /** How many sent answers a guest keeps, to re-send one the host lost. */
 const ANSWER_CACHE_SIZE = 64;
 /** Fastest the host moves a guest's ship while following it (the pointer-plus-keys top speed). */
@@ -388,6 +424,8 @@ export class CoopFlightDirector {
   private readonly staleHeldSec: [number, number, number, number] = [0, 0, 0, 0];
   /** Host: whether the host's own link was up last step (open questions are sent again when it comes back). */
   private hostLinkUp = true;
+  /** A press on a deck card's row, picked if it is released on that row soon enough (a tap, not a landing thumb). */
+  private cardTap: { pointerId: number; index: number; card: string; atMs: number; box: ScreenBox } | null = null;
   /** Guest: the wall clock at the last quiz step (the question clock follows the wall clock, see quizStepSec). */
   private lastQuizWallMs: number | null = null;
   /** Guest: the last answer sent, until the host shows it arrived (it is sent again if the host still waits). */
@@ -581,9 +619,10 @@ export class CoopFlightDirector {
     this.activeWorld = null;
   }
 
-  /** Update viewport layout (`arenaRect` + portrait-phone Bottom 38% `deckRect`) on window resize. */
+  /** Update viewport layout (`arenaRect`, and the deck below or beside it) on window resize or rotation. */
   setViewport(viewW: number, viewH: number, insets?: Partial<SafeInsets>, coarsePointer = true): CoopViewportLayout {
     const prevUseDeck = this.layout.useThumbDeck;
+    const prevSide = this.layout.deckSide;
     const fullInsets: SafeInsets = {
       top: insets?.top ?? 0,
       right: insets?.right ?? 0,
@@ -594,7 +633,8 @@ export class CoopFlightDirector {
     if (this.layout.useThumbDeck) {
       this.quiz.setInputMode('touch');
     }
-    if (!this.layout.useThumbDeck || prevUseDeck !== this.layout.useThumbDeck) {
+    // A held thumb was measured against the old pad: let it go when the deck goes, comes or moves (a rotation).
+    if (!this.layout.useThumbDeck || prevUseDeck !== this.layout.useThumbDeck || prevSide !== this.layout.deckSide) {
       this.deck.releasePointer(false);
     }
     return this.layout;
@@ -622,10 +662,12 @@ export class CoopFlightDirector {
       this.deck.releasePointer(false);
       const hit = hitTestDeckCard(this.layout, card, x, y);
       if (hit !== null) {
-        this.quiz.pickDeckCard(hit, true, this.quizHooks(w));
+        // Picked on the tap's release (handlePointerUp): a thumb that lands on a row to steer again is not a pick.
+        const box = deckCardBoxes(this.layout, card)[hit]!;
+        this.cardTap = { pointerId, index: hit, card: deckCardKey(card), atMs: this.nowFn(), box };
         return true;
       }
-      if (!this.quiz.isInteractive() && !this.isSquadParked && touch && y >= this.layout.deckRect.y - 4) {
+      if (!this.quiz.isInteractive() && !this.isSquadParked && touch && pointInDeck(this.layout, x, y)) {
         this.quiz.dismissCard();
       } else {
         return touch;
@@ -648,14 +690,30 @@ export class CoopFlightDirector {
 
   handlePointerMove(pointerId: number, x: number, y: number): boolean {
     if (!this.layout.useThumbDeck) return false;
+    const tap = this.cardTap;
+    if (tap && tap.pointerId === pointerId) {
+      const b = tap.box;
+      if (x < b.x - 8 || x > b.x + b.w + 8 || y < b.y - 8 || y > b.y + b.h + 8) this.cardTap = null;
+      return true;
+    }
     return this.deck.onPointerMove(this.layout, pointerId, x, y);
   }
 
   handlePointerUp(pointerId: number): boolean {
+    const tap = this.cardTap;
+    if (tap && tap.pointerId === pointerId) {
+      this.cardTap = null;
+      const card = this.quiz.deckCard(true);
+      if (card && deckCardKey(card) === tap.card && this.nowFn() - tap.atMs <= COOP_CARD_TAP_MAX_MS) {
+        this.quiz.pickDeckCard(tap.index, true, this.quizHooks(this.activeWorld));
+      }
+      return true;
+    }
     return this.deck.onPointerUp(pointerId);
   }
 
   releasePointers(clearAutoFire = false): void {
+    this.cardTap = null;
     this.deck.releasePointer(clearAutoFire);
   }
 
@@ -1388,7 +1446,8 @@ export class CoopFlightDirector {
     const hasGuard = upgrades.has('guardian');
     const isGameOver = Boolean(this.activeWorld?.gameOver);
     const hasLivingRescuer = this.pilots.some((o) => o.present && o.connected && o.alive);
-    const drawnWrecks: Array<{ x: number; y: number }> = [];
+    // Wreck labels already drawn: each new one goes below any it would overprint.
+    const drawnLabels: Array<{ x: number; top: number; bottom: number }> = [];
 
     for (const p of this.pilots) {
       if (!p.present) continue;
@@ -1396,13 +1455,9 @@ export class CoopFlightDirector {
 
       if (!p.alive) {
         if (!isGameOver && p.connected && p.respawnSec > 0) {
-          let stackIdx = 0;
-          for (const prev of drawnWrecks) {
-            if (Math.abs(prev.x - p.x) < 84 && Math.abs(prev.y - p.y) < 22) {
-              stackIdx += 1;
-            }
-          }
-          drawnWrecks.push({ x: p.x, y: p.y });
+          // A wreck says when it reboots and, while a squadmate can reach it, that flying over it revives it now.
+          const blockH = (hasLivingRescuer ? 18 : 9) * scale;
+          const top = placeWreckLabel(drawnLabels, p.x, p.y + 22 * scale, blockH, 2 * scale);
           if (hasLivingRescuer) {
             const podR = (COOP_WRECK_REVIVE_RADIUS - 6 + 2 * Math.sin(time * 5 + p.seat)) * scale;
             ink(NEON.lime, 0.34 + 0.14 * Math.sin(time * 5 + p.seat), 1.1, () => {
@@ -1413,8 +1468,11 @@ export class CoopFlightDirector {
           const ghostAlpha = 0.25 + 0.12 * Math.sin(time * 6);
           ink(p.color, ghostAlpha, 1.2, () => {
             trace(ctx, SHIP, p.x, p.y, shipScale * 0.85, 0);
-            traceText(ctx, `REBOOT ${Math.ceil(p.respawnSec)} SEC`, p.x, p.y + (22 + 10 * stackIdx) * scale, 7, 'center');
+            traceText(ctx, `REBOOT ${Math.ceil(p.respawnSec)} SEC`, p.x, top, 7, 'center');
           }, false);
+          if (hasLivingRescuer) {
+            ink(NEON.lime, 0.72, 1.1, () => traceText(ctx, 'FLY OVER TO REVIVE', p.x, top + 10 * scale, 5.5, 'center'), false);
+          }
         }
         continue;
       }
@@ -1444,7 +1502,8 @@ export class CoopFlightDirector {
           : p.answering
             ? `P${p.seat + 1} QUIZ`
             : `P${p.seat + 1} ${p.callsign}`;
-        traceText(ctx, label, p.x, p.y + 24 * shipScale, 6.5, 'center');
+        // Below the amber quiz ring while answering, so the ring does not cut through the label.
+        traceText(ctx, label, p.x, p.y + (p.answering ? 31 : 24) * shipScale, 6.5, 'center');
       }, false);
 
       if (p.answering) {
@@ -1568,6 +1627,21 @@ export class CoopFlightDirector {
         respawnSec: me.respawnSec,
         answering: me.answering,
         gameOver: isGameOver,
+        summary: isGameOver
+          ? {
+              score: this.activeWorld?.score ?? 0,
+              wave: this.activeWorld?.wave ?? 1,
+              freed: this.activeWorld?.freed ?? 0,
+              isHost: this.isHost,
+              pilots: activePilots.map((p) => ({
+                seat: p.seat,
+                callsign: p.callsign,
+                color: p.color,
+                questionsRight: p.questionsRight,
+                revives: p.revives,
+              })),
+            }
+          : null,
         wingmen,
         card: isGameOver || isPaused ? null : this.quiz.deckCard(true),
       });
@@ -2051,8 +2125,8 @@ export class CoopFlightDirector {
       }
     } else if (msg.kind === 'revive') {
       if (typeof msg.seat === 'number' && Number.isInteger(msg.seat) && msg.seat >= 0 && msg.seat <= 3) {
-        const revived = this.pilots[msg.seat as CoopSeatIndex];
-        w.ring(revived.x, revived.y, NEON.lime, 105);
+        // The ring itself arrives with the snapshot's effects, where the pilot really comes back; this pilot's ship is
+        // still at its wreck here.
         w.play('shieldUp');
       }
     } else if (msg.kind === 'mission-ended') {

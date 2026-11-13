@@ -1953,3 +1953,86 @@ test('Round 15 follow-up (6): a question asked again after a reconnect shows onl
   assert.ok(st!.challenge!.timeLeft <= 5.0001, `the card shows ${st!.challenge!.timeLeft.toFixed(1)} s`);
   sq.cleanup();
 });
+
+test('Round 15 (4.3): a thumb that lands back on the deck just after a card appears picks nothing; a tap does', async () => {
+  setCoopTabGrade(null);
+  const sq = await createLiveSquad({ guestCount: 1 });
+  const gd = sq.guestDirs[0]!;
+  const p1 = sq.hostDir.pilots[1];
+  p1.invulnerable = 0;
+  sq.hostWorld.pickups.push({ reward: 'hull', x: p1.x, y: p1.y, anchorX: p1.x, phase: 0, age: 0, dead: false });
+  sq.hostDir.collideHostSquad(sq.hostWorld, 1);
+  await sq.tickSquad(20); // 0.33 s: the grade card has been up for its grace
+  const card = gd.currentDeckCard();
+  assert.ok(card && card.kind === 'grade');
+  const rows = deckCardBoxes(gd.layout, card);
+  const bottom = rows[rows.length - 1]!;
+  // The thumb lifts and lands again on the bottom row, where it rests, and goes on steering.
+  gd.handlePointerDown(81, bottom.x + bottom.w / 2, bottom.y + bottom.h / 2, true);
+  for (let i = 0; i < 50; i++) {
+    gd.handlePointerMove(81, bottom.x + bottom.w / 2 + i * 2, bottom.y + bottom.h / 2);
+    await sq.tickSquad(1);
+  }
+  gd.handlePointerUp(81);
+  await sq.tickSquad(2);
+  assert.equal(gd.grade, null, 'no grade was picked by the landing thumb');
+  assert.equal(quizOf(gd)?.stage, 'grade');
+  // A tap on the first row picks it.
+  const top = rows[0]!;
+  gd.handlePointerDown(82, top.x + 12, top.y + 12, true);
+  await sq.tickSquad(6);
+  gd.handlePointerUp(82);
+  await sq.tickSquad(2);
+  assert.equal(gd.grade, 0);
+  sq.cleanup();
+  setCoopTabGrade(null);
+});
+
+test("Round 15 (5.4): HOST AWAY's 3-2-1 is not skipped by a key or click, and hiding again during it waits again", async () => {
+  const sq = await createLiveSquad({ tvMode: false, guestCount: 1, nowFn: () => fakeNowMs });
+  media.coarse = false;
+  docTarget.hidden = false;
+  const hostGame = new Game(makeRecordingCanvas(1280, 800) as never, {
+    multiplayer: makeFakeMultiplayer() as never,
+    coop: { director: sq.hostDir },
+    onExit() {},
+  });
+  const G = hostGame as unknown as Record<string, any>;
+  const hide = async (ms: number) => {
+    docTarget.hidden = true;
+    docTarget.dispatchEvent(new Event('visibilitychange'));
+    advanceTimeMs(ms);
+    await flushMicrotasks();
+  };
+  const show = async () => {
+    docTarget.hidden = false;
+    docTarget.dispatchEvent(new Event('visibilitychange'));
+    await flushMicrotasks();
+  };
+  await hide(2300);
+  assert.equal(sq.hostDir.hostAway, true, 'HOST AWAY after 2 s hidden');
+  await show();
+  assert.equal(sq.hostDir.isResumeCountdownActive, true, 'the 3-2-1 started');
+
+  // The click that brings the window back, and Space, do not skip it.
+  G.press();
+  G.command('Space');
+  assert.equal(hostGame.isPaused, true, 'still counting down');
+  assert.equal(sq.hostDir.isResumeCountdownActive, true);
+
+  // Hidden again during the 3-2-1: the squad waits again, however long the host is gone.
+  await hide(5000);
+  assert.equal(hostGame.isPaused, true, 'the squad did not fly with nobody at the host');
+  assert.equal(sq.hostDir.hostAway, true);
+  await show();
+  assert.equal(sq.hostDir.isResumeCountdownActive, true, 'a fresh 3-2-1 on return');
+  const stepFrame = G.frame as (now: number) => void;
+  for (let i = 0; i < 65; i++) {
+    fakeNowMs += 50;
+    stepFrame(fakeNowMs);
+  }
+  await flushMicrotasks();
+  assert.equal(hostGame.isPaused, false, 'and then the squad flies');
+  hostGame.destroy();
+  sq.cleanup();
+});
