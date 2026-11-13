@@ -22,6 +22,7 @@ import {
   type CoopClientToRelayMessage,
   type CoopCreateRoomResponse,
   type CoopErrorMessage,
+  type CoopEventMessage,
   type CoopHostSeatIndex,
   type CoopLobbyState,
   type CoopPublicSeat,
@@ -275,6 +276,7 @@ export interface CoopClientCallbacks {
   onWelcome?: (msg: CoopWelcomeMessage) => void;
   onLobby?: (state: CoopLobbyState) => void;
   onStarted?: (seats: CoopPublicSeat[], code: string) => void;
+  onEvent?: (msg: CoopEventMessage) => void;
   onRefused?: (reason: CoopRefusalReason | 'invalid-code') => void;
   onRoomClosed?: (reason: CoopRoomClosedReason) => void;
   onHostReconnecting?: (graceMs: number) => void;
@@ -319,6 +321,7 @@ export class CoopClient {
   private readonly storage: StorageLike | null;
   private readonly clientId: string;
   private readonly callbacks: CoopClientCallbacks;
+  private readonly subscribers = new Set<CoopClientCallbacks>();
   private readonly customWsCtor: unknown;
   private readonly pingIntervalMs: number;
 
@@ -353,11 +356,31 @@ export class CoopClient {
     return this.welcomed;
   }
 
+  /** Attach an additional listener set (e.g. `CoopFlightDirector` once the squad launches) with an unsubscribe fn. */
+  subscribe(handlers: CoopClientCallbacks): () => void {
+    this.subscribers.add(handlers);
+    return () => {
+      this.subscribers.delete(handlers);
+    };
+  }
+
+  private emit<K extends keyof CoopClientCallbacks>(
+    key: K,
+    ...args: Parameters<NonNullable<CoopClientCallbacks[K]>>
+  ): void {
+    const primary = this.callbacks[key] as ((...a: unknown[]) => void) | undefined;
+    primary?.(...args);
+    for (const sub of this.subscribers) {
+      const fn = sub[key] as ((...a: unknown[]) => void) | undefined;
+      fn?.(...args);
+    }
+  }
+
   /** Open the reconnecting WebSocket (`false` immediately if the room code format is invalid). */
   connect(): boolean {
     if (!isValidCoopRoomCode(this.code)) {
       this.permanentlyStopped = true;
-      this.callbacks.onRefused?.('invalid-code');
+      this.emit('onRefused', 'invalid-code');
       return false;
     }
     if (this.socket || this.permanentlyStopped) return true;
@@ -389,7 +412,7 @@ export class CoopClient {
       ws.binaryType = 'arraybuffer';
       this.startKeepAlive();
       void this.acquireWakeLock();
-      this.callbacks.onConnectionChange?.(true);
+      this.emit('onConnectionChange', true);
     });
 
     ws.addEventListener('message', (ev) => {
@@ -398,15 +421,15 @@ export class CoopClient {
       if (typeof data === 'string') {
         this.handleTextFrame(data);
       } else if (data instanceof ArrayBuffer) {
-        this.callbacks.onBinary?.(new Uint8Array(data));
+        this.emit('onBinary', new Uint8Array(data));
       } else if (ArrayBuffer.isView(data)) {
-        this.callbacks.onBinary?.(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+        this.emit('onBinary', new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
       }
     });
 
     ws.addEventListener('close', (ev) => {
       this.stopKeepAlive();
-      this.callbacks.onConnectionChange?.(false);
+      this.emit('onConnectionChange', false);
       if (this.permanentlyStopped) return;
 
       // Close code 4001 ("Replaced by reconnect") is always final so two duplicated tabs sharing
@@ -415,7 +438,7 @@ export class CoopClient {
         clearStoredCoopToken(this.code, this.storage);
         this.token = '';
         this.stopSocket();
-        this.callbacks.onRefused?.('replaced');
+        this.emit('onRefused', 'replaced');
         return;
       }
 
@@ -423,7 +446,8 @@ export class CoopClient {
         this.preWelcomeFailures += 1;
         if (this.preWelcomeFailures >= MAX_PRE_WELCOME_ATTEMPTS) {
           this.stopSocket();
-          this.callbacks.onConnectionError?.(
+          this.emit(
+            'onConnectionError',
             'Could not reach the squad room. Check the 6-character room code and try again.',
           );
         }
@@ -458,7 +482,7 @@ export class CoopClient {
         const mySeat = msg.seats.find((s) => s.seat === msg.seat);
         if (mySeat) this.callsign = mySeat.callsign;
         setStoredCoopToken(this.code, msg.token, this.storage);
-        this.callbacks.onWelcome?.(msg);
+        this.emit('onWelcome', msg);
         break;
       }
       case 'lobby': {
@@ -467,7 +491,7 @@ export class CoopClient {
         this.seats = msg.seats;
         const mySeat = msg.seats.find((s) => s.seat === this.seat);
         if (mySeat) this.callsign = mySeat.callsign;
-        this.callbacks.onLobby?.({
+        this.emit('onLobby', {
           code: msg.code,
           formattedCode: msg.formattedCode,
           tvMode: msg.tvMode,
@@ -480,7 +504,11 @@ export class CoopClient {
       case 'started': {
         this.locked = true;
         this.seats = msg.seats;
-        this.callbacks.onStarted?.(msg.seats, msg.code);
+        this.emit('onStarted', msg.seats, msg.code);
+        break;
+      }
+      case 'event': {
+        this.emit('onEvent', msg);
         break;
       }
       case 'refused': {
@@ -488,37 +516,37 @@ export class CoopClient {
         clearStoredCoopToken(this.code, this.storage);
         this.token = '';
         this.stopSocket();
-        this.callbacks.onRefused?.(msg.reason);
+        this.emit('onRefused', msg.reason);
         break;
       }
       case 'room-closed': {
         clearStoredCoopToken(this.code, this.storage);
         this.token = '';
         this.stopSocket();
-        this.callbacks.onRoomClosed?.(msg.reason);
+        this.emit('onRoomClosed', msg.reason);
         break;
       }
       case 'host-reconnecting': {
-        this.callbacks.onHostReconnecting?.(msg.graceMs);
+        this.emit('onHostReconnecting', msg.graceMs);
         break;
       }
       case 'host-resumed': {
-        this.callbacks.onHostResumed?.();
+        this.emit('onHostResumed');
         break;
       }
       case 'host-paused': {
-        this.callbacks.onHostPaused?.(msg.paused);
+        this.emit('onHostPaused', msg.paused);
         break;
       }
       case 'error': {
-        this.callbacks.onRelayError?.(msg);
+        this.emit('onRelayError', msg);
         break;
       }
       default:
         break;
     }
 
-    this.callbacks.onMessage?.(msg);
+    this.emit('onMessage', msg);
   }
 
   sendJson(msg: CoopClientToRelayMessage): boolean {
@@ -566,6 +594,18 @@ export class CoopClient {
   startSquad(): void {
     if (this.role !== 'host') return;
     this.sendJson({ type: 'start' });
+  }
+
+  /** Broadcast or unicast (`to: seat`) a flat numeric/boolean Host event frame. */
+  sendEvent(event: Omit<CoopEventMessage, 'type'>): boolean {
+    if (this.role !== 'host') return false;
+    return this.sendJson({ type: 'event', ...event });
+  }
+
+  /** Broadcast Host pause/resume state to all Guests. */
+  sendHostPaused(paused: boolean): boolean {
+    if (this.role !== 'host') return false;
+    return this.sendJson({ type: 'host-paused', paused });
   }
 
   /**

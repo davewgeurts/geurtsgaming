@@ -51,10 +51,11 @@ export function fireVolley(
   pace: number,
   hasBoss: boolean,
   upgrades: ReadonlySet<UpgradeId>,
+  boltColor: string = SAND,
 ): void {
   const up = -680 * pace;
   const pierce = upgrades.has('pierce') ? 2 : 0;
-  const shoot = (dx: number, dy: number, vx: number, color: string = SAND, stray = false) =>
+  const shoot = (dx: number, dy: number, vx: number, color: string = boltColor, stray = false) =>
     shots.push({ x: shipX + dx * scale, y: shipY - dy * scale, vx, vy: up, hostile: false, dead: false, color, pierce, skip: null, stray });
 
   // Energy buys cannons: one from the nose, then one from each wing, then all three with the wings angled out.
@@ -71,8 +72,8 @@ export function fireVolley(
     shoot(8, 6, fan);
   }
   if (upgrades.has('wide')) {
-    shoot(-10, 4, -215 * scale, SAND, true);
-    shoot(10, 4, 215 * scale, SAND, true);
+    shoot(-10, 4, -215 * scale, boltColor, true);
+    shoot(10, 4, 215 * scale, boltColor, true);
   }
   // The wingmates fire with every other volley: a real help, without doing the pilot's job for them.
   if (upgrades.has('wingmates') && volley % 2 === 0) {

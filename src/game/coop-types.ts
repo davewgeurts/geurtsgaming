@@ -151,6 +151,8 @@ export interface CoopEventMessage {
   to?: CoopSeatIndex;
   wave?: number;
   seed?: number;
+  front?: number | null;
+  alert?: number | null;
   id?: number;
   seat?: CoopSeatIndex;
   score?: number;

@@ -24,6 +24,7 @@ export const ENEMY_COLORS = [PINK, LILAC, AMBER, ROSE] as const;
 export const GROUP_FROM: Record<Group, number> = { drifters: 1, mites: 1, weavers: 2, spinners: 3 };
 
 export interface Enemy {
+  id: number;
   kind: Kind;
   x: number; y: number; vx: number; vy: number; rot: number;
   hp: number; age: number; flash: number; dead: boolean;
@@ -144,8 +145,12 @@ export function buildWavePlan(
   };
 }
 
+let nextEnemyId = 0;
+
 export function makeEnemy(kind: Kind, x: number, y: number, phase = 0): Enemy {
+  nextEnemyId = (nextEnemyId % 65535) + 1;
   return {
+    id: nextEnemyId,
     kind,
     x, y, vx: 0, vy: 0, rot: 0,
     hp: KINDS[kind].hp, age: 0, flash: 0, dead: false,

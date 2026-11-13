@@ -726,7 +726,9 @@
 
 <script>
   import type { Game } from '../game/game';
+  import type { CoopClient } from '../game/coop-client';
   import type { CoopLobbyModal } from '../game/coop-lobby';
+  import type { CoopPublicSeat } from '../game/coop-types';
   import type { MultiplayerClient } from '../game/multiplayer';
 
   const launch = document.querySelector<HTMLButtonElement>('[data-game-launch]');
@@ -755,6 +757,7 @@
     let coopModal: CoopLobbyModal | null = null;
     let mp: MultiplayerClient | null = null;
     let opening = false;
+    let inCoopGame = false;
 
     const ensureMultiplayer = async (): Promise<MultiplayerClient> => {
       if (mp) return mp;
@@ -789,15 +792,26 @@
     const announce = (active: boolean) =>
       document.dispatchEvent(new CustomEvent('gg:game', { detail: { active } }));
 
-    const close = (viaBack = false) => {
+    const close = (viaBack = false, fromCoopServerClose = false) => {
       if (!game) return;
+      const wasCoop = inCoopGame;
+      inCoopGame = false;
       game.destroy();
       game = null;
+      if (ranks) ranks.hidden = false;
+      if (pause) pause.hidden = false;
+      if (wasCoop && !fromCoopServerClose) {
+        coopModal?.controller.leaveRoom();
+      }
       overlay.classList.remove('on');
       document.documentElement.classList.remove('game-active');
-      rest().forEach((el) => (el.inert = false));
+      if (!fromCoopServerClose) {
+        rest().forEach((el) => (el.inert = false));
+      }
       announce(false);
-      launch.focus({ preventScroll: true });
+      if (!fromCoopServerClose) {
+        (wasCoop ? (coopLaunch ?? launch) : launch).focus({ preventScroll: true });
+      }
       // Drop the history entry that open() added, unless the Back button has already done so.
       if (!viaBack && history.state?.ggGame) history.back();
       // Hide once the fade has finished, unless the game was reopened in the meantime.
@@ -806,7 +820,7 @@
       }, 600);
     };
 
-    const open = async () => {
+    const open = async (coopSession?: { client: CoopClient; seats: readonly CoopPublicSeat[] }) => {
       if (game || opening) return;
       opening = true;
       // Safari and iPhones only let a page speak if it first does so during a click or tap. The game itself
@@ -829,9 +843,28 @@
         document.documentElement.classList.add('game-active');
         rest().forEach((el) => (el.inert = true));
         announce(true);
+        if (ranks) ranks.hidden = Boolean(coopSession);
+        if (pause) pause.hidden = Boolean(coopSession && coopSession.client.role !== 'host');
         try {
+          inCoopGame = Boolean(coopSession);
           game = new Game(canvas, {
             multiplayer,
+            ...(coopSession
+              ? {
+                  coop: {
+                    client: coopSession.client,
+                    seats: coopSession.seats,
+                    onClosed: () => {
+                      close(false, true);
+                      if (coopOverlay) {
+                        coopOverlay.hidden = false;
+                        rest().forEach((el) => (el.inert = true));
+                        coopOverlay.focus({ preventScroll: true });
+                      }
+                    },
+                  },
+                }
+              : {}),
             onExit: () => close(),
             onStatus: (message) => {
               if (status) status.textContent = message;
@@ -850,6 +883,9 @@
           ranks?.setAttribute('aria-pressed', 'false');
         } catch (error) {
           // The game could not start (no canvas support, say): put the page back exactly as it was.
+          inCoopGame = false;
+          if (ranks) ranks.hidden = false;
+          if (pause) pause.hidden = false;
           overlay.hidden = true;
           document.documentElement.classList.remove('game-active');
           rest().forEach((el) => (el.inert = false));
@@ -869,7 +905,9 @@
       }
     };
 
-    launch.addEventListener('click', open);
+    launch.addEventListener('click', () => {
+      void open();
+    });
     exit.addEventListener('click', () => close());
     ranks?.addEventListener('click', () => {
       game?.toggleLeaderboard();
@@ -910,6 +948,11 @@
         onCloseModal: closeCoopModal,
         onCoopActiveChange: (active) => {
           multiplayer.setCoopActive(active);
+        },
+        onSquadLaunched: (client, seats) => {
+          if (game || opening) return;
+          if (coopOverlay) coopOverlay.hidden = true;
+          void open({ client, seats });
         },
       });
       return coopModal;

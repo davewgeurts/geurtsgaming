@@ -29,7 +29,7 @@ import {
   type CoopGuestInput,
   type CoopSeatIndex,
 } from './coop-types';
-import { NEON, PEBBLE, ROCK, SAND } from './core';
+import { AMBER, LILAC, NEON, PEBBLE, PINK, ROCK, ROSE, SAND } from './core';
 
 /** Shared logical `3:4` arena dimensions simulated identically across laptops, tablets, and phones. */
 export const COOP_WORLD_W = COOP_ARENA_WIDTH;
@@ -77,6 +77,10 @@ export const WIRE_COLOR_TABLE: readonly string[] = [
   NEON.orange,
   NEON.red,
   NEON.violet,
+  PINK,
+  LILAC,
+  AMBER,
+  ROSE,
   SAND,
   ROCK,
   PEBBLE,
@@ -138,7 +142,7 @@ export interface CoopSnapBossPod {
 
 export interface CoopSnapBoss {
   kind: 'arms' | 'sum';
-  state: 'enter' | 'fight' | 'flee';
+  state: 'enter' | 'fight' | 'dying' | 'flee';
   open: boolean;
   flash: boolean;
   clang: boolean;
@@ -346,7 +350,7 @@ export function decodeGuestInput(bytes: Uint8Array): CoopGuestInput | null {
   };
 }
 
-const BOSS_STATES = ['enter', 'fight', 'flee'] as const;
+const BOSS_STATES = ['enter', 'fight', 'dying', 'flee'] as const;
 const TANKER_STATES = ['in', 'fly', 'out', 'gone'] as const;
 const SHOT_KINDS: readonly CoopSnapShotKind[] = ['bolt', 'rocket', 'enemy', 'beam'];
 const ITEM_KINDS: readonly CoopSnapItemKind[] = ['boost', 'upgrade', 'shield', 'hull', 'bomb'];
@@ -451,12 +455,12 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
 
   for (const e of enemies) {
     const kindIdx = encodeEnemyKind(e.kind) & 0x0f;
-    const colorIdx = encodeWireColor(e.color) & 0x0f;
-    const hpByte = (clampNum(Math.round(e.hp), 0, 127) & 0x7f) | (e.flash ? 0x80 : 0);
+    const colorIdx = encodeWireColor(e.color) & 0x1f;
+    const hpByte = (clampNum(Math.round(e.hp), 0, 63) & 0x3f) | (e.flash ? 0x80 : 0) | ((colorIdx & 0x10) << 2);
 
     view.setUint16(off, e.id & 0xffff, true);
     off += 2;
-    view.setUint8(off++, kindIdx | (colorIdx << 4));
+    view.setUint8(off++, kindIdx | ((colorIdx & 0x0f) << 4));
     view.setUint8(off++, hpByte);
     view.setUint8(off++, encodeAngle(e.rot));
     view.setUint16(off, encodeCoord(e.x), true);
@@ -553,7 +557,7 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
 
   for (const sh of shots) {
     const kindIdx = Math.max(0, SHOT_KINDS.indexOf(sh.kind)) & 0x03;
-    const colorIdx = encodeWireColor(sh.color) & 0x0f;
+    const colorIdx = encodeWireColor(sh.color) & 0x1f;
     const header = kindIdx | (colorIdx << 2) | (sh.heavy ? 0x80 : 0);
     view.setUint8(off++, header);
     view.setUint16(off, encodeCoord(sh.x), true);
@@ -580,17 +584,16 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
   }
 
   for (const event of fx) {
-    const fxIdx = Math.max(0, FX_KINDS.indexOf(event.kind));
+    const fxIdx = Math.max(0, FX_KINDS.indexOf(event.kind)) & 0x07;
+    const colorIdx = encodeWireColor(event.color) & 0x1f;
     let param = 0;
     if (event.kind === 'enemy-burst') {
-      param = (encodeEnemyKind(event.enemyKind) & 0x0f) | ((encodeWireColor(event.color) & 0x0f) << 4);
+      param = encodeEnemyKind(event.enemyKind) & 0x0f;
     } else if (event.kind === 'rock-break') {
       param = event.toughRock ? 1 : 0;
-    } else {
-      param = encodeWireColor(event.color) & 0x0f;
     }
     view.setUint8(off++, event.seq & 0xff);
-    view.setUint8(off++, fxIdx);
+    view.setUint8(off++, fxIdx | (colorIdx << 3));
     view.setUint8(off++, param);
     view.setUint16(off, encodeCoord(event.x), true);
     off += 2;
@@ -696,11 +699,12 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
     off += 2;
     const y = decodeCoord(view.getUint16(off, true));
     off += 2;
+    const colorIdx = ((kc >> 4) & 0x0f) | ((hpByte & 0x40) >> 2);
     enemies.push({
       id,
       kind: decodeEnemyKind(kc & 0x0f),
-      color: decodeWireColor((kc >> 4) & 0x0f),
-      hp: hpByte & 0x7f,
+      color: decodeWireColor(colorIdx),
+      hp: hpByte & 0x3f,
       flash: (hpByte & 0x80) !== 0,
       rot,
       x,
@@ -840,7 +844,7 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
   for (let i = 0; i < shotCount; i++) {
     const header = view.getUint8(off++);
     const kind = SHOT_KINDS[header & 0x03] ?? 'bolt';
-    const color = decodeWireColor((header >> 2) & 0x0f);
+    const color = decodeWireColor((header >> 2) & 0x1f);
     const heavy = (header & 0x80) !== 0;
     const x = decodeCoord(view.getUint16(off, true));
     off += 2;
@@ -890,19 +894,20 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
   if (off + fxCount * 7 > len) return null;
   for (let i = 0; i < fxCount; i++) {
     const seq = view.getUint8(off++);
-    const fxIdx = view.getUint8(off++);
+    const fxHeader = view.getUint8(off++);
     const param = view.getUint8(off++);
     const x = decodeCoord(view.getUint16(off, true));
     off += 2;
     const y = decodeCoord(view.getUint16(off, true));
     off += 2;
-    const kind = FX_KINDS[fxIdx] ?? 'spark';
+    const kind = FX_KINDS[fxHeader & 0x07] ?? 'spark';
+    const color = decodeWireColor((fxHeader >> 3) & 0x1f);
     if (kind === 'enemy-burst') {
       fx.push({
         seq,
         kind,
         enemyKind: decodeEnemyKind(param & 0x0f),
-        color: decodeWireColor((param >> 4) & 0x0f),
+        color,
         toughRock: false,
         x,
         y,
@@ -912,7 +917,7 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
         seq,
         kind,
         enemyKind: 'drifter',
-        color: NEON.cyan,
+        color,
         toughRock: param !== 0,
         x,
         y,
@@ -922,7 +927,7 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
         seq,
         kind,
         enemyKind: 'drifter',
-        color: decodeWireColor(param & 0x0f),
+        color,
         toughRock: false,
         x,
         y,
