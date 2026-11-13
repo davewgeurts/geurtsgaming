@@ -12,7 +12,7 @@ import type { Box } from './hud';
 const GAME_KEYS = new Set([
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
   'KeyW', 'KeyA', 'KeyS', 'KeyD',
-  'Space', 'Enter', 'KeyP', 'KeyL', 'KeyC',
+  'Space', 'Enter', 'KeyP', 'KeyL', 'KeyC', 'KeyH',
 ]);
 
 /** Keys that would scroll the page behind the game; swallowed while it is open. */
