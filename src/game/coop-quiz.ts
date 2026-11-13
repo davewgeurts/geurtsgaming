@@ -688,14 +688,22 @@ export class CoopLocalQuizController {
     const st = this.active;
     if (!st) return false;
 
+    // In the short grace before a pick counts (so a key still held from the last answer cannot pick), a key gets the
+    // wrong-key sound instead of nothing: the card is not ready yet, and silence looks broken.
     if (st.stage === 'grade') {
-      const idx = Number(key) - 1;
-      return this.selectGrade(idx, useThumbDeck, hooks);
+      if (st.age < COOP_GRADE_GRACE_SEC) {
+        hooks.play('slip');
+        return true;
+      }
+      return this.selectGrade(Number(key) - 1, useThumbDeck, hooks);
     }
 
     if (st.stage === 'offer') {
-      const idx = Number(key) - 1;
-      return this.selectUpgrade(idx, useThumbDeck, hooks);
+      if (st.age < OFFER_GRACE) {
+        hooks.play('slip');
+        return true;
+      }
+      return this.selectUpgrade(Number(key) - 1, useThumbDeck, hooks);
     }
 
     const c = this.activeChallenge;

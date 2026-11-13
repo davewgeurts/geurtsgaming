@@ -2295,3 +2295,28 @@ test('Round 15 (6): an answer that reaches a paused host changes nothing until p
   assert.equal(p1.alive, true, 'the bomb was defused, not set off');
   sq.cleanup();
 });
+
+test('Round 15 (5.11): a number key pressed before a grade or upgrade can be picked sounds, and picks nothing', () => {
+  const { CoopLocalQuizController, COOP_GRADE_GRACE_SEC } = quizR15b;
+  const { OFFER_GRACE } = questionsR15;
+  const played: string[] = [];
+  const hooks = { play: (s: string) => played.push(s), announce() {}, onChallengeSettled() {}, onUpgradeChosen() {} };
+  const q = new CoopLocalQuizController({ isolatedGrade: true, initialInputMode: 'keys' });
+  q.openChallenge(20, 'hull', 2, false, hooks);
+  assert.equal(q.stage, 'grade');
+  q.step(COOP_GRADE_GRACE_SEC / 2, false, false, hooks);
+  assert.equal(q.typeKey('2', false, hooks), true);
+  assert.deepEqual(played, ['slip'], 'the early key is heard');
+  assert.equal(q.stage, 'grade', 'and picks nothing');
+  q.step(COOP_GRADE_GRACE_SEC, false, false, hooks);
+  assert.equal(q.typeKey('2', false, hooks), true);
+  assert.equal(q.getGrade(), 1, 'after the grace the key picks');
+
+  played.length = 0;
+  const offerQ = new CoopLocalQuizController({ isolatedGrade: true, initialGrade: 1, initialInputMode: 'keys' });
+  assert.equal(offerQ.openUpgradeOffer(30, [0, 1, 2], hooks), true);
+  offerQ.step(OFFER_GRACE / 2, false, false, hooks);
+  assert.equal(offerQ.typeKey('1', false, hooks), true);
+  assert.deepEqual(played, ['slip']);
+  assert.equal(offerQ.stage, 'offer');
+});
