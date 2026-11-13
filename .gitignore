@@ -25,3 +25,18 @@ pnpm-debug.log*
 
 # Playwright MCP snapshots and screenshots
 .playwright-mcp/
+
+# Cloudflare Wrangler local state & secrets
+.wrangler/
+.dev.vars*
+
+# Inter-agent working notes & local agent rules (never committed to public repo)
+feedbackforagy.md
+lettertoclaude.md
+notesforclaude.md
+samepage.md
+CLAUDE.md
+.agent/
+
+
+

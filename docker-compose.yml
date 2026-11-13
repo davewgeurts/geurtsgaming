@@ -1,3 +1,10 @@
+# Permanent local home for geurtsgaming.com at http://localhost:84 (and http://geurtsgaming.localdev:84).
+# Never run `npm run dev`, `npm test`, or `npm run build` on the host OS — use Docker Compose:
+#   docker compose up -d --build
+#   docker compose restart client api relay
+#   docker compose run --rm test
+#   docker compose run --rm build
+
 networks:
   gg-network:
     ipam:
@@ -10,21 +17,29 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: geurtsgaming-client
+    restart: unless-stopped
     networks:
       gg-network:
         ipv4_address: 172.37.0.2
-    ports:
-      - "4321:4321"
     volumes:
       - ./src:/app/src
       - ./public:/app/public
       - ./tests:/app/tests
+      - ./lambda:/app/lambda
+      - ./relay:/app/relay
       - ./astro.config.mjs:/app/astro.config.mjs
       - ./tsconfig.json:/app/tsconfig.json
+      - ./package.json:/app/package.json
     environment:
       - NODE_ENV=development
       - ASTRO_TELEMETRY_DISABLED=1
-      - PUBLIC_API_URL=http://localhost:4322
+      - CHOKIDAR_USEPOLLING=true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:4321/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     stdin_open: true
     tty: true
 
@@ -33,31 +48,112 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: geurtsgaming-api
+    restart: unless-stopped
     command: ["node", "--watch", "lambda/dev-server.mjs"]
     networks:
       gg-network:
         ipv4_address: 172.37.0.3
     ports:
-      - "4322:4322"
+      - "127.0.0.1:4322:4322"
     volumes:
       - ./lambda:/app/lambda
     environment:
       - NODE_ENV=development
       - PORT=4322
+      - HOST=0.0.0.0
       - DEFAULT_SITE=geurtsgaming
+      - DYNAMODB_TABLE=
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:4322/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    stdin_open: true
+    tty: true
+
+  relay:
+    build:
+      context: .
+      dockerfile: relay/Dockerfile
+    container_name: geurtsgaming-relay
+    restart: unless-stopped
+    networks:
+      gg-network:
+        ipv4_address: 172.37.0.5
+    ports:
+      - "127.0.0.1:4323:4323"
+    volumes:
+      - ./relay:/app/relay
+    environment:
+      - WRANGLER_SEND_METRICS=false
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:4323/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
     stdin_open: true
     tty: true
 
   nginx:
     image: nginx:alpine
     container_name: geurtsgaming-nginx
+    restart: unless-stopped
+    # Bound to 127.0.0.1 by default; change to "84:80" temporarily when scanning QR codes from phones on home Wi-Fi.
     ports:
-      - "84:80"
+      - "127.0.0.1:84:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - client
       - api
+      - relay
     networks:
       gg-network:
         ipv4_address: 172.37.0.4
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/api/health >/dev/null 2>&1 && wget -qO- http://127.0.0.1:80/relay/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["tools"]
+    command: ["npm", "test"]
+    volumes:
+      - ./src:/app/src:ro
+      - ./public:/app/public:ro
+      - ./tests:/app/tests:ro
+      - ./lambda:/app/lambda:ro
+      - ./relay:/app/relay:ro
+      - ./astro.config.mjs:/app/astro.config.mjs:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./package.json:/app/package.json:ro
+    environment:
+      - NODE_ENV=test
+      - ASTRO_TELEMETRY_DISABLED=1
+
+  build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["tools"]
+    command: ["npm", "run", "build"]
+    volumes:
+      - ./src:/app/src:ro
+      - ./public:/app/public:ro
+      - ./tests:/app/tests:ro
+      - ./lambda:/app/lambda:ro
+      - ./relay:/app/relay:ro
+      - ./astro.config.mjs:/app/astro.config.mjs:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./package.json:/app/package.json:ro
+      - ./dist:/app/dist
+    environment:
+      - NODE_ENV=production
+      - ASTRO_TELEMETRY_DISABLED=1
