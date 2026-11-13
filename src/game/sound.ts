@@ -52,7 +52,10 @@ export class Sound {
   private last = new Map<Sfx, number>();
   private on = true;
 
-  constructor(private readonly storeKey: string | null = STORE_KEY) {
+  private readonly storeKey: string | null;
+
+  constructor(storeKey: string | null = STORE_KEY) {
+    this.storeKey = storeKey;
     if (storeKey && typeof localStorage !== 'undefined') {
       try {
         this.on = localStorage.getItem(storeKey) !== 'off';
