@@ -165,6 +165,7 @@ export interface CoopSnapShip {
   hull: number;
   maxHull: number;
   invulnerable: boolean;
+  answering?: boolean;
   shielded: boolean;
   firing: boolean;
   spread: boolean;
@@ -565,7 +566,7 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
 
     view.setUint8(off++, s.seat & 0x03);
     view.setUint8(off++, clampNum(Math.round(s.hull), 0, 255));
-    view.setUint8(off++, clampNum(Math.round(s.maxHull), 1, 255));
+    view.setUint8(off++, (clampNum(Math.round(s.maxHull), 1, 127) & 0x7f) | (s.answering ? 0x80 : 0));
     view.setUint8(off++, status);
     view.setUint16(off, encodeCoord(s.x), true);
     off += 2;
@@ -801,7 +802,9 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
     const seatRaw = view.getUint8(off++);
     if (seatRaw > 3) return null;
     const hull = view.getUint8(off++);
-    const maxHull = Math.max(1, view.getUint8(off++));
+    const maxHullByte = view.getUint8(off++);
+    const answering = (maxHullByte & 0x80) !== 0;
+    const maxHull = Math.max(1, maxHullByte & 0x7f);
     const status = view.getUint8(off++);
     const x = decodeCoord(view.getUint16(off, true));
     off += 2;
@@ -818,6 +821,7 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
       hull,
       maxHull,
       invulnerable: (status & 0x04) !== 0,
+      answering,
       shielded: (status & 0x08) !== 0,
       firing: (status & 0x10) !== 0,
       spread: (status & 0x20) !== 0,

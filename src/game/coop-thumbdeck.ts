@@ -15,8 +15,11 @@ import {
   COOP_SEAT_COLORS,
   type CoopSeatIndex,
 } from './coop-types';
-import { NEON, SAND, clamp, strokeInk as ink } from './core';
+import { NEON, PINK, SAND, clamp, strokeInk as ink } from './core';
 import { fitTo, traceText } from './font';
+import { GRADE_BANDS } from './questions';
+import { trace } from './shapes';
+import type { Upgrade } from './upgrades';
 
 export interface SafeInsets {
   top: number;
@@ -165,6 +168,109 @@ function pointInRect(r: ScreenBox, x: number, y: number, pad = 0): boolean {
   return x >= r.x - pad && x <= r.x + r.w + pad && y >= r.y - pad && y <= r.y + r.h + pad;
 }
 
+export type CoopDeckCardView =
+  | {
+      kind: 'grade';
+      interactive: boolean;
+    }
+  | {
+      kind: 'choice';
+      title: string;
+      titleColor: string;
+      question: string;
+      options: readonly string[];
+      correctIndex: number;
+      pickedIndex: number | null;
+      done: boolean;
+      interactive: boolean;
+      timeLeft: number;
+      timeLimit: number;
+      note: string;
+      noteColor: string;
+    }
+  | {
+      kind: 'offer';
+      upgrades: readonly Upgrade[];
+      interactive: boolean;
+    }
+  | {
+      kind: 'result';
+      headline: string;
+      subline: string;
+      color: string;
+    };
+
+/** Compute interactive button boxes inside `layout.padRect` for an active portrait-phone deck card. */
+export function deckCardBoxes(layout: CoopViewportLayout, card: CoopDeckCardView): ScreenBox[] {
+  const { padRect } = layout;
+  if (!layout.useThumbDeck || padRect.w <= 0 || padRect.h <= 0) return [];
+  const innerX = padRect.x + 10;
+  const innerW = Math.max(100, padRect.w - 20);
+
+  if (card.kind === 'grade') {
+    const count = GRADE_BANDS.length;
+    const topY = padRect.y + 38;
+    const availH = Math.max(132, padRect.h - 46);
+    const gap = 6;
+    const rowH = clamp(Math.floor((availH - gap * (count - 1)) / count), 40, 56);
+    return Array.from({ length: count }, (_, i) => ({
+      x: innerX,
+      y: topY + i * (rowH + gap),
+      w: innerW,
+      h: rowH,
+    }));
+  }
+
+  if (card.kind === 'offer') {
+    const count = card.upgrades.length;
+    if (count === 0) return [];
+    const topY = padRect.y + 30;
+    const availH = Math.max(132, padRect.h - 38);
+    const gap = 6;
+    const rowH = clamp(Math.floor((availH - gap * (count - 1)) / count), 40, 58);
+    return Array.from({ length: count }, (_, i) => ({
+      x: innerX,
+      y: topY + i * (rowH + gap),
+      w: innerW,
+      h: rowH,
+    }));
+  }
+
+  if (card.kind === 'choice') {
+    const count = card.options.length;
+    if (count === 0) return [];
+    const gap = 8;
+    const bw = Math.max(54, Math.floor((innerW - gap * (count - 1)) / count));
+    const totalW = bw * count + gap * (count - 1);
+    const x0 = padRect.x + (padRect.w - totalW) / 2;
+    const boxH = clamp(Math.round(padRect.h * 0.34), 48, 68);
+    const boxY = padRect.y + Math.round(padRect.h * 0.38);
+    return Array.from({ length: count }, (_, i) => ({
+      x: x0 + i * (bw + gap),
+      y: boxY,
+      w: bw,
+      h: boxH,
+    }));
+  }
+
+  return [];
+}
+
+/** Return the tapped option/row index (`0..n-1`) if `(clientX, clientY)` hits an interactive deck card button. */
+export function hitTestDeckCard(
+  layout: CoopViewportLayout,
+  card: CoopDeckCardView | null,
+  clientX: number,
+  clientY: number,
+): number | null {
+  if (!card || card.kind === 'result' || !card.interactive) return null;
+  const boxes = deckCardBoxes(layout, card);
+  for (let i = 0; i < boxes.length; i++) {
+    if (pointInRect(boxes[i]!, clientX, clientY, 2)) return i;
+  }
+  return null;
+}
+
 export interface ThumbDeckState {
   /** Desired world X (`18..750`) in the shared `768 x 1024` arena. */
   targetX: number;
@@ -214,9 +320,7 @@ export class CoopThumbDeck {
 
   releasePointer(clearAutoFire = false): void {
     this.activePointerId = null;
-    if (clearAutoFire) {
-      this.autoFireLatch = false;
-    }
+    if (clearAutoFire) this.autoFireLatch = false;
   }
 
   consumeArenaTap(): { x: number; y: number } | null {
@@ -334,12 +438,15 @@ export class CoopThumbDeck {
       maxHull: number;
       alive: boolean;
       respawnSec: number;
+      answering?: boolean;
       gameOver?: boolean;
+      card?: CoopDeckCardView | null;
       wingmen?: ReadonlyArray<{
         seat: CoopSeatIndex;
         connected: boolean;
         alive: boolean;
         hull: number;
+        answering?: boolean;
       }>;
     },
   ): void {
@@ -385,8 +492,14 @@ export class CoopThumbDeck {
     if (info.wingmen && info.wingmen.length > 0) {
       const tagW = Math.min(64, leftAvailW / info.wingmen.length);
       info.wingmen.forEach((w, idx) => {
-        const wColor = COOP_SEAT_COLORS[w.seat] ?? SAND;
-        const wTag = !w.connected ? `P${w.seat + 1} WAIT` : !w.alive ? `P${w.seat + 1} OUT` : `P${w.seat + 1} ${w.hull}HP`;
+        const wColor = w.answering ? NEON.yellow : (COOP_SEAT_COLORS[w.seat] ?? SAND);
+        const wTag = !w.connected
+          ? `P${w.seat + 1} WAIT`
+          : !w.alive
+            ? `P${w.seat + 1} OUT`
+            : w.answering
+              ? `P${w.seat + 1} QUIZ`
+              : `P${w.seat + 1} ${w.hull}HP`;
         ink(ctx, wColor, w.connected ? 0.88 : 0.45, 1.15, () => {
           traceText(ctx, wTag, padRect.x + idx * tagW, deckRect.y + 34, 5.8, 'left');
         }, false);
@@ -420,12 +533,20 @@ export class CoopThumbDeck {
       false,
     );
 
-    // Trackpad frame + subtle cyber grid
-    ctx.fillStyle = 'rgba(7, 17, 54, 0.72)';
+    // Trackpad frame + subtle cyber grid (or active Question / Grade / Upgrade Card!)
+    const activeCard = !info.gameOver ? (info.card ?? null) : null;
+    ctx.fillStyle = activeCard ? 'rgba(6, 14, 48, 0.94)' : 'rgba(7, 17, 54, 0.72)';
     ctx.fillRect(padRect.x, padRect.y, padRect.w, padRect.h);
-    ink(ctx, seatColor, this.activePointerId !== null ? 0.85 : 0.42, 1.5, () => {
+    const frameStroke = activeCard ? NEON.yellow : seatColor;
+    ink(ctx, frameStroke, activeCard || this.activePointerId !== null ? 0.88 : 0.42, 1.5, () => {
       ctx.rect(padRect.x, padRect.y, padRect.w, padRect.h);
     });
+
+    if (activeCard) {
+      this.renderDeckCard(ctx, layout, activeCard);
+      ctx.restore();
+      return;
+    }
 
     ink(
       ctx,
@@ -500,5 +621,153 @@ export class CoopThumbDeck {
     }
 
     ctx.restore();
+  }
+
+  private renderDeckCard(
+    ctx: CanvasRenderingContext2D,
+    layout: CoopViewportLayout,
+    card: CoopDeckCardView,
+  ): void {
+    const { padRect } = layout;
+    const cx = padRect.x + padRect.w / 2;
+
+    if (card.kind === 'grade') {
+      const title = 'WHAT GRADE ARE YOU IN, PILOT?';
+      const titleSz = fitTo(title, 9.5, padRect.w - 20);
+      ink(ctx, NEON.cyan, 0.96, 1.5, () => {
+        traceText(ctx, title, cx, padRect.y + 8, titleSz, 'center');
+      });
+      const sub = 'SETS YOUR QUESTION LEVEL - NEVER SAVED';
+      const subSz = fitTo(sub, 6.5, padRect.w - 20);
+      ink(ctx, SAND, 0.72, 1.1, () => {
+        traceText(ctx, sub, cx, padRect.y + 22, subSz, 'center');
+      }, false);
+
+      const boxes = deckCardBoxes(layout, card);
+      boxes.forEach((b, i) => {
+        const band = GRADE_BANDS[i]!;
+        ctx.fillStyle = 'rgba(56, 189, 248, 0.08)';
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+        ink(ctx, NEON.cyan, 0.85, 1.4, () => {
+          ctx.rect(b.x, b.y, b.w, b.h);
+        });
+        const labelSz = fitTo(band.label, 10.5, b.w * 0.62);
+        ink(ctx, SAND, 0.96, 1.5, () => {
+          traceText(ctx, band.label, b.x + 12, b.y + (b.h - labelSz) / 2, labelSz, 'left');
+        });
+        const ageSz = fitTo(band.ages, 7.5, b.w * 0.3);
+        ink(ctx, NEON.cyan, 0.9, 1.2, () => {
+          traceText(ctx, band.ages, b.x + b.w - 12, b.y + (b.h - ageSz) / 2, ageSz, 'right');
+        }, false);
+      });
+      return;
+    }
+
+    if (card.kind === 'offer') {
+      const title = 'CORRECT - TAP AN UPGRADE FOR SQUAD';
+      const titleSz = fitTo(title, 9, padRect.w - 20);
+      ink(ctx, NEON.lime, 0.96, 1.5, () => {
+        traceText(ctx, title, cx, padRect.y + 9, titleSz, 'center');
+      });
+      const boxes = deckCardBoxes(layout, card);
+      boxes.forEach((b, i) => {
+        const u = card.upgrades[i]!;
+        ctx.fillStyle = 'rgba(155, 255, 77, 0.08)';
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+        ink(ctx, NEON.lime, 0.85, 1.4, () => {
+          ctx.rect(b.x, b.y, b.w, b.h);
+          trace(ctx, u.icon, b.x + 4 + b.h / 2, b.y + b.h / 2, b.h / 42, 0);
+        });
+        const textX = b.x + b.h + 8;
+        const availW = Math.max(60, b.w - b.h - 16);
+        const nameSz = fitTo(u.name, 9.5, availW);
+        const blurbSz = fitTo(u.blurb, 6.8, availW);
+        ink(ctx, NEON.lime, 0.96, 1.4, () => {
+          traceText(ctx, u.name, textX, b.y + b.h * 0.24, nameSz, 'left');
+        });
+        ink(ctx, SAND, 0.82, 1.1, () => {
+          traceText(ctx, u.blurb, textX, b.y + b.h * 0.62, blurbSz, 'left');
+        }, false);
+      });
+      return;
+    }
+
+    if (card.kind === 'result') {
+      const hSz = fitTo(card.headline, 13, padRect.w - 24);
+      ink(ctx, card.color, 0.96, 1.7, () => {
+        traceText(ctx, card.headline, cx, padRect.y + padRect.h * 0.36 - hSz / 2, hSz, 'center');
+      });
+      if (card.subline) {
+        const sSz = fitTo(card.subline, 8.5, padRect.w - 24);
+        ink(ctx, SAND, 0.85, 1.2, () => {
+          traceText(ctx, sSz > 0 ? card.subline : '', cx, padRect.y + padRect.h * 0.58, sSz, 'center');
+        }, false);
+      }
+      return;
+    }
+
+    // `card.kind === 'choice'`
+    const titleSz = fitTo(card.title, 8.5, padRect.w - 20);
+    ink(ctx, card.titleColor, 0.95, 1.4, () => {
+      traceText(ctx, card.title, cx, padRect.y + 10, titleSz, 'center');
+    });
+
+    const eq = `${card.question} = ?`;
+    const eqSz = fitTo(eq, 17, padRect.w - 24);
+    ink(ctx, SAND, 0.98, 1.8, () => {
+      traceText(ctx, eq, cx, padRect.y + Math.round(padRect.h * 0.17), eqSz, 'center');
+    });
+
+    const boxes = deckCardBoxes(layout, card);
+    boxes.forEach((b, i) => {
+      const isCorrect = card.done && i === card.correctIndex;
+      const isWrong = card.done && card.pickedIndex === i && i !== card.correctIndex;
+      const stroke = isCorrect ? PINK : isWrong ? NEON.red : NEON.cyan;
+      const alpha = card.done && !isCorrect && !isWrong ? 0.35 : 0.95;
+      ctx.fillStyle = isCorrect
+        ? 'rgba(255, 94, 168, 0.16)'
+        : 'rgba(56, 189, 248, 0.08)';
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+      ink(ctx, stroke, alpha, isCorrect ? 2.2 : 1.5, () => {
+        ctx.rect(b.x, b.y, b.w, b.h);
+        if (isWrong) {
+          ctx.moveTo(b.x + 4, b.y + 4);
+          ctx.lineTo(b.x + b.w - 4, b.y + b.h - 4);
+          ctx.moveTo(b.x + b.w - 4, b.y + 4);
+          ctx.lineTo(b.x + 4, b.y + b.h - 4);
+        }
+      });
+      const optLabel = card.options[i]!;
+      const optSz = fitTo(optLabel, 14, b.w - 10);
+      ink(ctx, isCorrect ? PINK : SAND, alpha, 1.7, () => {
+        traceText(ctx, optLabel, b.x + b.w / 2, b.y + (b.h - optSz) / 2, optSz, 'center');
+      });
+    });
+
+    const barY = padRect.y + padRect.h - 20;
+    const barW = Math.min(220, padRect.w - 64);
+    const barX = cx - barW / 2 - 10;
+    const share = clamp(card.timeLeft / Math.max(0.1, card.timeLimit), 0, 1);
+    const barColor = share > 0.5 ? NEON.lime : share > 0.25 ? NEON.yellow : NEON.red;
+    ink(ctx, SAND, 0.28, 1, () => {
+      ctx.rect(barX, barY - 4, barW, 8);
+    }, false);
+    if (share > 0) {
+      ink(ctx, barColor, card.done ? 0.45 : 0.95, 4, () => {
+        ctx.moveTo(barX + 2, barY);
+        ctx.lineTo(barX + 2 + (barW - 4) * share, barY);
+      });
+    }
+    const secLeft = String(Math.max(0, Math.ceil(card.timeLeft)));
+    ink(ctx, barColor, card.done ? 0.5 : 0.95, 1.4, () => {
+      traceText(ctx, secLeft, barX + barW + 8, barY - 5, 9, 'left');
+    }, false);
+
+    if (card.note) {
+      const noteSz = fitTo(card.note, 8.5, padRect.w - 20);
+      ink(ctx, card.noteColor, 0.95, 1.4, () => {
+        traceText(ctx, card.note, cx, barY - 22, noteSz, 'center');
+      });
+    }
   }
 }

@@ -47,14 +47,26 @@ import {
   type CoopWorldSnapshot,
 } from './coop-protocol';
 import {
+  CoopLocalQuizController,
+  decodeStakeCode,
+  encodeStakeCode,
+  getCoopTabGrade,
+  renderSquadMissionSummary,
+  setCoopTabGrade,
+  type CoopQuizHooks,
+} from './coop-quiz';
+import {
   CoopThumbDeck,
   clientToArenaPoint,
   computeCoopViewportLayout,
+  hitTestDeckCard,
+  type CoopDeckCardView,
   type SafeInsets,
   type CoopViewportLayout,
 } from './coop-thumbdeck';
 import {
   COOP_SEAT_COLORS,
+  type CoopAnswerMessage,
   type CoopEventMessage,
   type CoopGuestInput,
   type CoopLobbyState,
@@ -65,23 +77,58 @@ import {
 } from './coop-types';
 import { NEON, PEBBLE, PINK, ROCK, clamp, rand, type Ink } from './core';
 import { KINDS, makeEnemy, type Enemy, type Kind as EnemyKind } from './enemies';
+import type { Grade } from './fireworks';
 import { textWidth, traceText } from './font';
-import type { Reward } from './questions';
+import {
+  ALL_OWNED_POINTS,
+  DEFUSE_POINTS,
+  FULL_HULL_BONUS,
+  JAM_SECONDS,
+  POWER_GAIN,
+  type GradeBand,
+  type Reward,
+  type Stake,
+} from './questions';
 import type { SetPieceEnv, SetPieces } from './setpieces';
 import { BOSS_CORE, FRIEND, SHIP, trace, type Shape } from './shapes';
 import type { Sfx } from './sound';
 import { createTanker, tankerTail, type Tanker } from './tanker';
-import type { UpgradeId } from './upgrades';
+import { UPGRADES, offerUpgrades, type UpgradeId } from './upgrades';
 import { ORBIT, SHIELD_SECONDS, WING, fireVolley, type Beam, type Ring, type Rocket, type Shot } from './weapons';
+
+export { getCoopTabGrade, setCoopTabGrade };
 
 export const COOP_SNAP_INTERVAL_SEC = 1 / 18;
 export const COOP_INPUT_INTERVAL_SEC = 1 / 20;
 export const COOP_WINGMAN_RESPAWN_SEC = 6.0;
+export const COOP_WRECK_REVIVE_RADIUS = 34;
 export const COOP_STALE_INPUT_SEC = 0.15;
 export const COOP_ACK_DEADBAND_PX = 24;
+export const COOP_QUIZ_TIMEOUT_SEC = 26.0;
+export const COOP_OFFER_TIMEOUT_SEC = 16.0;
+export const COOP_BREAK_TIMEOUT_SEC = 18.0;
+export const COOP_RESUME_COUNTDOWN_SEC = 3.0;
+export const COOP_HOST_AWAY_MAGIC = 901;
 const HOST_STATE_PREFIX = 'gg_coop_host_state_';
 const FX_RETENTION_SEC = 0.24;
 const ARM_COLORS = [NEON.lime, NEON.yellow, NEON.orange, NEON.violet] as const;
+
+interface HostSeatChallengeState {
+  mode: 'stake' | 'offer';
+  id: number;
+  stake: Stake;
+  wave: number;
+  offerIndices?: number[];
+  expiresAtSec: number;
+  scale: number;
+}
+
+interface HostSquadBreakState {
+  id: number;
+  nextWave: number;
+  answered: Map<CoopSeatIndex, { verdict: Grade; quality: number }>;
+  expiresAtSec: number;
+}
 
 export interface CoopPilotShip {
   seat: CoopSeatIndex;
@@ -99,6 +146,10 @@ export interface CoopPilotShip {
   alive: boolean;
   respawnSec: number;
   invulnerable: number;
+  answering: boolean;
+  jamSec: number;
+  revives: number;
+  questionsRight: number;
   cooldown: number;
   volley: number;
   firing: boolean;
@@ -175,6 +226,11 @@ export interface CoopWorldAdapter {
   triggerSquadGameOver(): void;
   resumeSquadNewRun?(): void;
   setHostPausedFromWire?(paused: boolean): void;
+  startWave?(wave: number): void;
+  celebrate?(grade: Grade, big: boolean): void;
+  say?(message: string): void;
+  getGrade?(): GradeBand | null;
+  setGrade?(grade: GradeBand): void;
 }
 
 export interface CoopFlightOptions {
@@ -182,6 +238,8 @@ export interface CoopFlightOptions {
   initialSeats?: readonly CoopPublicSeat[];
   storage?: StorageLike | null;
   now?: () => number;
+  initialGrade?: GradeBand | null;
+  initialInputMode?: 'keys' | 'touch';
   onClosed?: (reason: CoopRoomClosedReason | CoopRefusalReason | 'invalid-code') => void;
   onVersionMismatch?: (message: string) => void;
   onStatus?: (message: string) => void;
@@ -221,11 +279,15 @@ export class CoopFlightDirector {
   readonly pilots: [CoopPilotShip, CoopPilotShip, CoopPilotShip, CoopPilotShip];
   readonly deck: CoopThumbDeck;
   readonly interpolator = new SnapshotInterpolator();
+  readonly quiz: CoopLocalQuizController;
   layout: CoopViewportLayout;
 
   hostReconnecting = false;
   hostReconnectDeadlineMs = 0;
   hostPaused = false;
+  hostAway = false;
+  resumeCountdownSec = 0;
+  squadBreakActive = false;
   versionMismatch = false;
   private versionMismatchDir: 'older' | 'newer' = 'newer';
   hookedSeat: CoopSeatIndex = 0;
@@ -243,6 +305,7 @@ export class CoopFlightDirector {
   private readonly lastInputAtSec: [number, number, number, number] = [0, 0, 0, 0];
   private readonly awaitingRespawnSync: [boolean, boolean, boolean, boolean] = [false, false, false, false];
   private readonly respawnSyncDeadlineSec: [number, number, number, number] = [0, 0, 0, 0];
+  private readonly downedAtSec: [number, number, number, number] = [-10, -10, -10, -10];
   private hadAnyPilotInRun = false;
   private readonly hostSessionId: number;
   private activeWorld: CoopWorldAdapter | null = null;
@@ -254,6 +317,15 @@ export class CoopFlightDirector {
   private snapTick = 0;
   private inputSeq = 0;
   private fxSeq = 0;
+  private nextChallengeId = 4;
+  private readonly hostSeatChallenge: [
+    HostSeatChallengeState | null,
+    HostSeatChallengeState | null,
+    HostSeatChallengeState | null,
+    HostSeatChallengeState | null,
+  ] = [null, null, null, null];
+  private hostBreak: HostSquadBreakState | null = null;
+  private guestParked = false;
   private mismatchCount = 0;
   private lastSentDiscreteMask = -1;
   private lastSeenAckSeq: number | null = null;
@@ -283,6 +355,11 @@ export class CoopFlightDirector {
     this.onStatus = opts.onStatus;
     this.hostSessionId = 1 + Math.floor(Math.random() * 255);
     this.predHistory = Array.from({ length: 256 }, () => ({ seq: 0, x: 0, y: 0, sentAtMs: 0, valid: false }));
+    this.quiz = new CoopLocalQuizController({
+      isolatedGrade: opts.storage !== undefined || opts.initialGrade !== undefined,
+      initialGrade: opts.initialGrade,
+      initialInputMode: opts.initialInputMode,
+    });
 
     this.layout = computeCoopViewportLayout(COOP_WORLD_W, COOP_WORLD_H, false);
     const myInitialPos =
@@ -311,6 +388,10 @@ export class CoopFlightDirector {
         alive: false,
         respawnSec: 0,
         invulnerable: 1.2,
+        answering: false,
+        jamSec: 0,
+        revives: 0,
+        questionsRight: 0,
         cooldown: 0,
         volley: 0,
         firing: false,
@@ -330,6 +411,7 @@ export class CoopFlightDirector {
       onLobby: (lobby: CoopLobbyState) => this.handleLobbyUpdate(lobby),
       onBinary: (bytes: Uint8Array) => this.handleBinaryFrame(bytes),
       onEvent: (msg: CoopEventMessage) => this.handleHostEvent(msg),
+      onAnswer: (msg: CoopAnswerMessage) => this.handleWireAnswer(msg),
       onHostReconnecting: (graceMs: number) => {
         this.hostReconnecting = true;
         this.hostReconnectDeadlineMs = this.nowFn() + graceMs;
@@ -343,6 +425,10 @@ export class CoopFlightDirector {
       },
       onHostPaused: (paused: boolean) => {
         this.hostPaused = paused;
+        if (!paused) {
+          this.hostAway = false;
+          this.resumeCountdownSec = 0;
+        }
         this.activeWorld?.setHostPausedFromWire?.(paused);
       },
       onRoomClosed: (reason: CoopRoomClosedReason) => {
@@ -365,6 +451,22 @@ export class CoopFlightDirector {
     return this.client.seat;
   }
 
+  get isSquadParked(): boolean {
+    return this.isHost ? this.squadBreakActive : this.guestParked;
+  }
+
+  get isResumeCountdownActive(): boolean {
+    return this.resumeCountdownSec > 0;
+  }
+
+  get grade(): GradeBand | null {
+    return this.quiz.getGrade(this.activeWorld?.getGrade);
+  }
+
+  setGrade(grade: GradeBand | null): void {
+    this.quiz.setGrade(grade, this.activeWorld?.setGrade);
+  }
+
   bindWorld(world: CoopWorldAdapter): void {
     this.activeWorld = world;
   }
@@ -372,6 +474,7 @@ export class CoopFlightDirector {
   dispose(): void {
     this.unsubscribe();
     this.deck.reset();
+    this.quiz.clearActive(true);
     this.guestLocalBolts.length = 0;
     this.activeWorld = null;
   }
@@ -386,8 +489,11 @@ export class CoopFlightDirector {
       left: insets?.left ?? 0,
     };
     this.layout = computeCoopViewportLayout(viewW, viewH, coarsePointer, fullInsets);
+    if (this.layout.useThumbDeck) {
+      this.quiz.setInputMode('touch');
+    }
     if (!this.layout.useThumbDeck || prevUseDeck !== this.layout.useThumbDeck) {
-      this.deck.releasePointer();
+      this.deck.releasePointer(false);
     }
     return this.layout;
   }
@@ -403,10 +509,31 @@ export class CoopFlightDirector {
 
   /** Route pointer events through `CoopThumbDeck` when on a portrait phone (`layout.useThumbDeck`). */
   handlePointerDown(pointerId: number, x: number, y: number, touch: boolean): boolean {
-    if (!touch || !this.layout.useThumbDeck || this.client.seat < 0) return false;
+    if (!this.layout.useThumbDeck || this.client.seat < 0) return false;
     const w = this.activeWorld;
     if (w && (w.gameOver || w.paused)) {
-      this.deck.releasePointer();
+      this.deck.releasePointer(false);
+      return false;
+    }
+    const card = this.quiz.deckCard(true);
+    if (card) {
+      this.deck.releasePointer(false);
+      const hit = hitTestDeckCard(this.layout, card, x, y);
+      if (hit !== null) {
+        this.quiz.pickDeckCard(hit, true, this.quizHooks(w));
+        return true;
+      }
+      if (!this.quiz.isInteractive() && !this.isSquadParked && touch && y >= this.layout.deckRect.y - 4) {
+        this.quiz.clearActive();
+      } else {
+        return touch;
+      }
+    }
+    if (!touch) {
+      const btn = this.layout.autoFireBtnRect;
+      if (x >= btn.x - 4 && x <= btn.x + btn.w + 4 && y >= btn.y - 4 && y <= btn.y + btn.h + 4) {
+        return this.deck.onPointerDown(this.layout, pointerId, x, y, false);
+      }
       return false;
     }
     const allowArenaTap = Boolean(
@@ -436,6 +563,168 @@ export class CoopFlightDirector {
     const el = target as { hasAttribute?: (name: string) => boolean };
     if (typeof el.hasAttribute !== 'function') return false;
     return el.hasAttribute('data-coop-stay') || el.hasAttribute('data-coop-confirm-leave');
+  }
+
+  wantsKey(key: string): boolean {
+    if (this.client.seat < 0 || this.activeWorld?.gameOver) return false;
+    return this.quiz.wantsKey(key);
+  }
+
+  typeKey(key: string, world?: CoopWorldAdapter): boolean {
+    if (this.client.seat < 0) return false;
+    return this.quiz.typeKey(key, this.layout.useThumbDeck, this.quizHooks(world ?? this.activeWorld));
+  }
+
+  onTouchInput(world?: CoopWorldAdapter): void {
+    if (this.client.seat < 0) return;
+    this.quiz.onTouchDetected(this.layout.useThumbDeck, this.quizHooks(world ?? this.activeWorld));
+  }
+
+  pickArenaOverlay(arenaX: number, arenaY: number, world?: CoopWorldAdapter): boolean {
+    if (this.client.seat < 0) return false;
+    return this.quiz.pickArena(arenaX, arenaY, this.layout.useThumbDeck, this.quizHooks(world ?? this.activeWorld));
+  }
+
+  currentDeckCard(): CoopDeckCardView | null {
+    return this.quiz.deckCard(this.layout.useThumbDeck);
+  }
+
+  suppressStandardMessages(state: 'ready' | 'playing' | 'over', paused: boolean): boolean {
+    if (state === 'over') return true;
+    if (paused && this.resumeCountdownSec > 0) return true;
+    if (!paused && state === 'playing' && !this.layout.useThumbDeck && this.quiz.isOpen()) return true;
+    return false;
+  }
+
+  renderArenaOverlays(
+    ctx: CanvasRenderingContext2D,
+    ink: Ink,
+    opts: {
+      time: number;
+      state: 'ready' | 'playing' | 'over';
+      stateTime: number;
+      paused: boolean;
+      reduceMotion: boolean;
+      coarse: boolean;
+      soulsInFlight?: number;
+    },
+  ): void {
+    const w = this.activeWorld;
+    if (!w) return;
+    if (opts.state === 'over' || w.gameOver) {
+      const roster = this.pilots
+        .filter((p) => p.present)
+        .map((p) => ({
+          seat: p.seat,
+          callsign: p.callsign,
+          color: p.color,
+          questionsRight: p.questionsRight,
+          revives: p.revives,
+        }));
+      renderSquadMissionSummary(ctx, ink, {
+        formattedCode: this.client.formattedCode || this.client.code || 'SQUAD',
+        isHost: this.isHost,
+        coarse: opts.coarse,
+        time: opts.time,
+        stateTime: opts.stateTime,
+        score: w.score,
+        wave: w.wave,
+        totalFreed: w.freed + (opts.soulsInFlight ?? 0),
+        upgrades: w.upgrades,
+        pilots: roster,
+      });
+      return;
+    }
+    if (!opts.paused && opts.state === 'playing' && this.client.seat >= 0) {
+      this.quiz.renderArenaQuiz(ctx, ink, opts.time, opts.reduceMotion, this.layout.useThumbDeck);
+    }
+  }
+
+  /** Engage `HOST AWAY` auto-pause when a piloting Host hides their tab for `>= 2.0 s`. */
+  engageHostAway(world?: CoopWorldAdapter): void {
+    if (!this.isHost || this.client.tvMode) return;
+    const w = world ?? this.activeWorld;
+    this.hostAway = true;
+    this.resumeCountdownSec = 0;
+    if (w) {
+      this.client.sendEvent({
+        kind: 'wave-sync',
+        wave: w.wave,
+        score: w.score,
+        freed: w.freed,
+        values: [COOP_HOST_AWAY_MAGIC, 1, 0],
+      });
+    }
+    this.onStatus?.('Host tab hidden. Squad paused until you return.');
+  }
+
+  /** Start the synced `3-2-1` countdown when a piloting Host returns from `HOST AWAY`. */
+  beginHostAwayResumeCountdown(world?: CoopWorldAdapter): void {
+    if (!this.isHost || !this.hostAway) return;
+    const w = world ?? this.activeWorld;
+    this.hostAway = false;
+    this.resumeCountdownSec = COOP_RESUME_COUNTDOWN_SEC;
+    if (w) {
+      this.client.sendEvent({
+        kind: 'wave-sync',
+        wave: w.wave,
+        score: w.score,
+        freed: w.freed,
+        values: [COOP_HOST_AWAY_MAGIC, 2, Math.round(COOP_RESUME_COUNTDOWN_SEC * 10)],
+      });
+    }
+    this.onStatus?.('Welcome back. Resuming squad flight in 3 seconds.');
+  }
+
+  /** Cancel any pending `HOST AWAY` / `3-2-1` state when manually resumed. */
+  cancelHostAwayCountdown(world?: CoopWorldAdapter): void {
+    if (!this.hostAway && this.resumeCountdownSec <= 0) return;
+    this.hostAway = false;
+    this.resumeCountdownSec = 0;
+    if (this.isHost) {
+      const w = world ?? this.activeWorld;
+      if (w) {
+        this.client.sendEvent({
+          kind: 'wave-sync',
+          wave: w.wave,
+          score: w.score,
+          freed: w.freed,
+          values: [COOP_HOST_AWAY_MAGIC, 0, 0],
+        });
+      }
+    }
+  }
+
+  /**
+   * Tick paused timers (such as the `3-2-1` `HOST AWAY` resume countdown).
+   * Returns `true` on Host when the countdown reaches `0` and `Game` should unpause.
+   */
+  tickPaused(dt: number, world?: CoopWorldAdapter): boolean {
+    if (this.resumeCountdownSec <= 0) return false;
+    const w = world ?? this.activeWorld;
+    if (!this.isHost) {
+      this.resumeCountdownSec = Math.max(0.05, this.resumeCountdownSec - dt);
+      return false;
+    }
+    const before = Math.ceil(this.resumeCountdownSec);
+    this.resumeCountdownSec = Math.max(0, this.resumeCountdownSec - dt);
+    const after = Math.ceil(this.resumeCountdownSec);
+    if (after > 0 && after < before) {
+      w?.play('tick');
+    }
+    if (this.resumeCountdownSec <= 0) {
+      if (w) {
+        this.client.sendEvent({
+          kind: 'wave-sync',
+          wave: w.wave,
+          score: w.score,
+          freed: w.freed,
+          values: [COOP_HOST_AWAY_MAGIC, 0, 0],
+        });
+      }
+      return true;
+    }
+    return false;
   }
 
   /** Queue an arena tap (e.g. clicking/tapping a Sum Boss pod on Guest or Host). */
@@ -501,6 +790,17 @@ export class CoopFlightDirector {
     this.guestLocalBolts.length = 0;
     this.guestSendTimesMs.length = 0;
     this.guestSuppressedBullets.length = 0;
+    this.quiz.clearActive();
+    this.hostAway = false;
+    this.resumeCountdownSec = 0;
+    this.squadBreakActive = false;
+    this.guestParked = false;
+    this.hostBreak = null;
+    this.hostSeatChallenge[0] = null;
+    this.hostSeatChallenge[1] = null;
+    this.hostSeatChallenge[2] = null;
+    this.hostSeatChallenge[3] = null;
+    this.downedAtSec.fill(-10);
     this.invalidatePredHistory();
     this.hasSentAnyInput = false;
     this.wasAliveOnWire = true;
@@ -519,6 +819,10 @@ export class CoopFlightDirector {
     for (const p of this.pilots) {
       p.latestInput = null;
       p.pendingTap = null;
+      p.answering = false;
+      p.jamSec = 0;
+      p.revives = 0;
+      p.questionsRight = 0;
       if (!p.present) continue;
       const pos = formationSpawnForSeat(p.seat);
       p.x = pos.x;
@@ -575,6 +879,60 @@ export class CoopFlightDirector {
     if (!this.isHost) return;
     this.saveHostProgress(wave, score, freed);
     this.client.sendEvent({ kind: 'wave-sync', wave, score, freed });
+  }
+
+  /**
+   * Park the squad between waves (`Wave 2+`) and open a per-device Pre-Wave Squad Break
+   * at each pilot's own in-memory `GradeBand`.
+   */
+  beginSquadWaveBreak(nextWave: number, world: CoopWorldAdapter): void {
+    if (!this.isHost || world.gameOver || this.squadBreakActive) return;
+    const presentPilots = this.pilots.filter((p) => p.present);
+    if (presentPilots.length === 0) {
+      world.startWave?.(nextWave);
+      return;
+    }
+
+    this.hostSeatChallenge[0] = null;
+    this.hostSeatChallenge[1] = null;
+    this.hostSeatChallenge[2] = null;
+    this.hostSeatChallenge[3] = null;
+    for (const p of this.pilots) {
+      p.answering = false;
+      p.firing = false;
+    }
+
+    world.shots.length = 0;
+    world.rockets.length = 0;
+    world.beams.length = 0;
+    world.pickups.length = 0;
+    world.mines.length = 0;
+
+    this.squadBreakActive = true;
+    world.parked = true;
+    const breakId = this.allocateChallengeIds(1);
+    this.hostBreak = {
+      id: breakId,
+      nextWave,
+      answered: new Map(),
+      expiresAtSec: this.elapsedSec + COOP_BREAK_TIMEOUT_SEC,
+    };
+
+    for (const p of presentPilots) {
+      if (p.seat === this.client.seat) {
+        this.quiz.openChallenge(breakId, 'break', nextWave, this.layout.useThumbDeck, this.quizHooks(world));
+      } else {
+        this.client.sendEvent({
+          kind: 'challenge',
+          to: p.seat,
+          id: breakId,
+          wave: nextWave,
+          values: [encodeStakeCode('break')],
+        });
+      }
+    }
+
+    this.broadcastSnapshotNow(world);
   }
 
   notifyHostTankerStart(wave: number): void {
@@ -648,6 +1006,12 @@ export class CoopFlightDirector {
   step(simDt: number, realDt: number, world: CoopWorldAdapter, localCtrl: CoopLocalControlInput): void {
     this.activeWorld = world;
     this.elapsedSec += realDt;
+
+    if (world.gameOver) {
+      this.quiz.clearActive();
+    } else if (!world.paused && !this.hostReconnecting && this.client.seat >= 0) {
+      this.quiz.step(realDt, this.layout.useThumbDeck, this.isSquadParked, this.quizHooks(world));
+    }
 
     const deckTap = this.deck.consumeArenaTap();
     if (deckTap) {
@@ -723,7 +1087,7 @@ export class CoopFlightDirector {
       if (s.dead) continue;
       if (s.hostile) {
         for (const p of this.pilots) {
-          if (!p.present || !p.connected || !p.alive || p.invulnerable > 0) continue;
+          if (!p.present || !p.connected || !p.alive || p.invulnerable > 0 || p.answering) continue;
           const hp = this.hostPilotHitPos(p);
           if (Math.hypot(s.x - hp.x, s.y - hp.y) < shipRadius + 3) {
             s.dead = true;
@@ -785,30 +1149,56 @@ export class CoopFlightDirector {
       }
     }
 
-    // Body collisions, pickups, and mines for each living connected pilot
+    // Body collisions, rescue-pod revives, pickups, and mines for each living connected pilot
     const pickupReach = (13 + 9) * scale;
     const mineReach = (10 + 9) * scale;
     for (const p of this.pilots) {
       if (!p.present || !p.connected || !p.alive) continue;
 
-      for (const item of world.pickups) {
-        if (item.dead || Math.hypot(item.x - p.x, item.y - p.y) >= pickupReach) continue;
-        item.dead = true;
-        this.applySquadPickup(p, item.reward, world, scale);
+      if (!p.answering) {
+        for (const other of this.pilots) {
+          if (
+            other.seat === p.seat ||
+            !other.present ||
+            !other.connected ||
+            other.alive ||
+            other.respawnSec <= 0 ||
+            this.elapsedSec - this.downedAtSec[other.seat]! < 0.35
+          ) {
+            continue;
+          }
+          if (Math.hypot(other.x - p.x, other.y - p.y) <= COOP_WRECK_REVIVE_RADIUS * scale) {
+            this.reviveSingleWingman(
+              other,
+              p.seat,
+              clampArenaShipX(other.x),
+              clampArenaShipY(other.y),
+              world,
+              scale,
+            );
+            world.score += 150;
+          }
+        }
+
+        for (const item of world.pickups) {
+          if (item.dead || Math.hypot(item.x - p.x, item.y - p.y) >= pickupReach) continue;
+          item.dead = true;
+          this.startHostPilotChallenge(p, item.reward, world, scale);
+          break;
+        }
       }
 
-      if (p.invulnerable > 0) continue;
+      if (p.invulnerable > 0 || p.answering) continue;
 
       for (const m of world.mines) {
         if (m.dead || Math.hypot(m.x - p.x, m.y - p.y) >= mineReach) continue;
         m.dead = true;
         world.spark(m.x, m.y, NEON.red);
         this.recordHostFx('spark', m.x, m.y, NEON.red);
-        this.damagePilot(p, world, scale);
-        if (world.gameOver) return;
+        this.startHostPilotChallenge(p, 'defuse', world, scale);
         break;
       }
-      if (!p.alive || p.invulnerable > 0) continue;
+      if (!p.alive || p.invulnerable > 0 || p.answering) continue;
 
       if (world.boss && (world.boss.state === 'fight' || world.boss.state === 'enter')) {
         if (Math.hypot(p.x - world.boss.x, p.y - world.boss.y) < 35 * 1.3 * scale + shipRadius) {
@@ -861,6 +1251,7 @@ export class CoopFlightDirector {
     const hasWing = upgrades.has('wingmates');
     const hasGuard = upgrades.has('guardian');
     const isGameOver = Boolean(this.activeWorld?.gameOver);
+    const hasLivingRescuer = this.pilots.some((o) => o.present && o.connected && o.alive);
     const drawnWrecks: Array<{ x: number; y: number }> = [];
 
     for (const p of this.pilots) {
@@ -876,6 +1267,13 @@ export class CoopFlightDirector {
             }
           }
           drawnWrecks.push({ x: p.x, y: p.y });
+          if (hasLivingRescuer) {
+            const podR = (COOP_WRECK_REVIVE_RADIUS - 6 + 2 * Math.sin(time * 5 + p.seat)) * scale;
+            ink(NEON.lime, 0.34 + 0.14 * Math.sin(time * 5 + p.seat), 1.1, () => {
+              ctx.moveTo(p.x + podR, p.y);
+              ctx.arc(p.x, p.y, podR, 0, Math.PI * 2);
+            }, false);
+          }
           const ghostAlpha = 0.25 + 0.12 * Math.sin(time * 6);
           ink(p.color, ghostAlpha, 1.2, () => {
             trace(ctx, SHIP, p.x, p.y, shipScale * 0.85, 0);
@@ -904,10 +1302,24 @@ export class CoopFlightDirector {
       }
 
       // Compact callsign tag beneath wingmen (and local P-badge) so squadmates can spot each other instantly
-      ink(p.color, p.connected ? 0.82 : 0.45, 1.1, () => {
-        const label = p.connected ? `P${p.seat + 1} ${p.callsign}` : `P${p.seat + 1} OFFLINE`;
+      ink(p.answering ? NEON.yellow : p.color, p.connected ? 0.86 : 0.45, 1.1, () => {
+        const label = !p.connected
+          ? `P${p.seat + 1} OFFLINE`
+          : p.answering
+            ? `P${p.seat + 1} QUIZ`
+            : `P${p.seat + 1} ${p.callsign}`;
         traceText(ctx, label, p.x, p.y + 24 * shipScale, 6.5, 'center');
       }, false);
+
+      if (p.answering) {
+        const pulseR = (25 + 2.2 * Math.sin(time * 7 + p.seat)) * shipScale;
+        ink(NEON.yellow, 0.78 + 0.18 * Math.sin(time * 7 + p.seat), 1.6, () => {
+          ctx.moveTo(p.x + pulseR, p.y);
+          ctx.arc(p.x, p.y, pulseR, 0, Math.PI * 2);
+          ctx.moveTo(p.x + pulseR * 0.82, p.y);
+          ctx.arc(p.x, p.y, pulseR * 0.82, 0, Math.PI * 2);
+        });
+      }
 
       if (p.shieldReady) {
         ink(NEON.cyan, 0.48 + 0.2 * Math.sin(time * 4 + p.seat), 1.3, () => {
@@ -937,7 +1349,7 @@ export class CoopFlightDirector {
    * - Subtle neon `3:4` arena frame
    * - Squad status strip (`P1..P4` hull bars / reboot state)
    * - Portrait-phone Bottom 38% Thumb Steering Deck (`CoopThumbDeck`)
-   * - Resilience banners (`HOST RECONNECTING` / `PAUSED BY HOST`)
+   * - Resilience banners (`HOST RECONNECTING` / `HOST AWAY` / `PAUSED BY HOST`)
    */
   renderViewportChrome(ctx: CanvasRenderingContext2D, ink: Ink, _time: number): void {
     const { arenaRect, viewportW, useThumbDeck } = this.layout;
@@ -965,8 +1377,10 @@ export class CoopFlightDirector {
             ? isGameOver
               ? 'HULL DOWN'
               : `REBOOT ${Math.ceil(p.respawnSec)} SEC`
-            : `HULL ${p.hull}/${p.maxHull}`;
-        ink(p.color, p.connected ? 0.92 : 0.45, 1.3, () => {
+            : p.answering
+              ? 'IN QUIZ'
+              : `HULL ${p.hull}/${p.maxHull}`;
+        ink(p.answering && p.connected && p.alive ? NEON.yellow : p.color, p.connected ? 0.92 : 0.45, 1.3, () => {
           traceText(ctx, `P${p.seat + 1} ${p.callsign}`, rx, ry, 7.5, 'left');
           traceText(ctx, status, rx, ry + 11, 6.5, 'left');
         }, false);
@@ -979,8 +1393,14 @@ export class CoopFlightDirector {
       const fontSize = Math.max(5.5, 6.2 * sc);
       activePilots.forEach((p, idx) => {
         const cx = arenaRect.x + 12 * sc + slotW * (idx + 0.5);
-        const tag = !p.connected ? `P${p.seat + 1} WAIT` : !p.alive ? `P${p.seat + 1} OUT` : `P${p.seat + 1} ${p.hull}HP`;
-        ink(p.color, p.connected ? 0.85 : 0.45, 1.15, () => {
+        const tag = !p.connected
+          ? `P${p.seat + 1} WAIT`
+          : !p.alive
+            ? `P${p.seat + 1} OUT`
+            : p.answering
+              ? `P${p.seat + 1} QUIZ`
+              : `P${p.seat + 1} ${p.hull}HP`;
+        ink(p.answering && p.connected && p.alive ? NEON.yellow : p.color, p.connected ? 0.85 : 0.45, 1.15, () => {
           traceText(ctx, tag, cx, topY, fontSize, 'center');
         }, false);
       });
@@ -989,6 +1409,7 @@ export class CoopFlightDirector {
     // 3. Portrait-phone Bottom 38% Thumb Steering Deck
     if (useThumbDeck && this.client.seat >= 0) {
       const me = this.pilots[this.client.seat as CoopSeatIndex];
+      const isPaused = Boolean(this.activeWorld?.paused);
       const wingmen = activePilots
         .filter((p) => p.seat !== me.seat)
         .map((p) => ({
@@ -1000,6 +1421,7 @@ export class CoopFlightDirector {
           alive: p.alive,
           connected: p.connected,
           respawnSec: p.respawnSec,
+          answering: p.answering,
         }));
       this.deck.render(ctx, this.layout, {
         seat: me.seat,
@@ -1008,12 +1430,14 @@ export class CoopFlightDirector {
         maxHull: me.maxHull,
         alive: me.alive,
         respawnSec: me.respawnSec,
+        answering: me.answering,
         gameOver: isGameOver,
         wingmen,
+        card: isGameOver || isPaused ? null : this.quiz.deckCard(true),
       });
     }
 
-    // 4. Resilience banners (`THIS GAME WAS UPDATED` / `HOST GAME IS OUT OF DATE`, `HOST RECONNECTING`, or `PAUSED BY HOST`)
+    // 4. Resilience banners (`THIS GAME WAS UPDATED` / `HOST GAME IS OUT OF DATE`, `HOST RECONNECTING`, `RESUMING IN 3..1`, `HOST AWAY`, or `PAUSED BY HOST`)
     if (this.versionMismatch) {
       const bx = arenaRect.x + arenaRect.w / 2;
       const by = arenaRect.y + arenaRect.h * 0.44;
@@ -1039,17 +1463,40 @@ export class CoopFlightDirector {
         traceText(ctx, 'HOST RECONNECTING', bx, by - 14, 10, 'center');
         traceText(ctx, `HOLDING FORMATION - ${secLeft} SEC`, bx, by + 6, 7.5, 'center');
       });
+    } else if (this.resumeCountdownSec > 0) {
+      const countNum = Math.max(1, Math.ceil(this.resumeCountdownSec));
+      const bx = arenaRect.x + arenaRect.w / 2;
+      const by = arenaRect.y + arenaRect.h * 0.44;
+      const bw = Math.min(arenaRect.w - 24, 300);
+      ctx.fillStyle = 'rgba(3, 7, 26, 0.85)';
+      ctx.fillRect(bx - bw / 2, by - 28, bw, 58);
+      ink(NEON.lime, 0.95, 1.7, () => {
+        ctx.rect(bx - bw / 2, by - 28, bw, 58);
+        traceText(ctx, `RESUMING IN ${countNum}`, bx, by - 14, 11, 'center');
+        traceText(ctx, 'HANDS ON CONTROLS, SQUAD', bx, by + 7, 7.5, 'center');
+      });
     } else if (!this.isHost && this.hostPaused) {
       const bx = arenaRect.x + arenaRect.w / 2;
       const by = arenaRect.y + arenaRect.h * 0.44;
-      const label = 'PAUSED BY HOST';
-      const bw = Math.min(viewportW - 24, Math.max(190, textWidth(label, 11) + 36));
-      ctx.fillStyle = 'rgba(3, 7, 26, 0.82)';
-      ctx.fillRect(bx - bw / 2, by - 22, bw, 44);
-      ink(NEON.cyan, 0.92, 1.6, () => {
-        ctx.rect(bx - bw / 2, by - 22, bw, 44);
-        traceText(ctx, label, bx, by - 5, 10.5, 'center');
-      });
+      if (this.hostAway) {
+        const bw = Math.min(arenaRect.w - 24, 320);
+        ctx.fillStyle = 'rgba(3, 7, 26, 0.85)';
+        ctx.fillRect(bx - bw / 2, by - 28, bw, 58);
+        ink(NEON.yellow, 0.95, 1.6, () => {
+          ctx.rect(bx - bw / 2, by - 28, bw, 58);
+          traceText(ctx, 'HOST AWAY', bx, by - 14, 11, 'center');
+          traceText(ctx, 'PAUSED UNTIL HOST RETURNS', bx, by + 7, 7.5, 'center');
+        });
+      } else {
+        const label = 'PAUSED BY HOST';
+        const bw = Math.min(viewportW - 24, Math.max(190, textWidth(label, 11) + 36));
+        ctx.fillStyle = 'rgba(3, 7, 26, 0.82)';
+        ctx.fillRect(bx - bw / 2, by - 22, bw, 44);
+        ink(NEON.cyan, 0.92, 1.6, () => {
+          ctx.rect(bx - bw / 2, by - 22, bw, 44);
+          traceText(ctx, label, bx, by - 5, 10.5, 'center');
+        });
+      }
     }
   }
 
@@ -1163,8 +1610,7 @@ export class CoopFlightDirector {
     // End the run when no PRESENT pilot is alive (including TV mode when the last guest leaves or is pruned at 30s).
     const anyPresentAlive = this.pilots.some((p) => p.present && p.alive);
     if (!anyPresentAlive) {
-      this.clearSavedHostProgress();
-      world.triggerSquadGameOver();
+      this.endSquadMission(world);
       return true;
     }
     return false;
@@ -1195,10 +1641,16 @@ export class CoopFlightDirector {
       this.broadcastSnapshotNow(this.activeWorld);
     }
 
-    // Round 9 #3 + Round 12 3.3: Targeted reconnect resync (`to: seat`) so a rejoining Guest immediately regains
-    // wave context, seeded asteroid belt + full broken-rock bitmap, and authoritative Host pause state.
+    // Round 9 #3 + Round 12 3.3 + Phase 3: Targeted reconnect resync (`to: seat`) so a rejoining Guest immediately
+    // regains wave context, HOST AWAY / countdown state, seeded asteroid belt, active tanker, and any open prompt.
     if (this.isHost && this.activeWorld && reconnectedGuests.length > 0) {
       const w = this.activeWorld;
+      const hostAwayValues = this.hostAway
+        ? [COOP_HOST_AWAY_MAGIC, 1, 0]
+        : this.resumeCountdownSec > 0
+          ? [COOP_HOST_AWAY_MAGIC, 2, Math.max(1, Math.round(this.resumeCountdownSec * 10))]
+          : undefined;
+
       for (const seat of reconnectedGuests) {
         this.client.sendEvent({
           kind: 'wave-sync',
@@ -1206,6 +1658,7 @@ export class CoopFlightDirector {
           wave: w.wave,
           score: w.score,
           freed: w.freed,
+          ...(hostAwayValues ? { values: hostAwayValues } : {}),
         });
         if (w.sets.fieldSeed !== null && (w.sets.field !== null || w.sets.alert !== null)) {
           this.client.sendEvent({
@@ -1217,6 +1670,59 @@ export class CoopFlightDirector {
             alert: w.sets.alert === null ? null : Math.round(w.sets.alert * 100) / 100,
             values: w.sets.brokenRockIds.slice(-16),
             bitmap: packBrokenRockWords(w.sets.brokenRockIds),
+          });
+        }
+        if (w.sets.tanker !== null && w.sets.tanker.state !== 'gone') {
+          this.client.sendEvent({
+            kind: 'tanker-start',
+            to: seat,
+            wave: w.wave,
+          });
+        }
+        const activeCh = this.hostSeatChallenge[seat];
+        if (activeCh) {
+          if (activeCh.mode === 'offer' && activeCh.offerIndices) {
+            this.client.sendEvent({
+              kind: 'upgrade-offer',
+              to: seat,
+              id: activeCh.id,
+              values: activeCh.offerIndices,
+            });
+          } else {
+            this.client.sendEvent({
+              kind: 'challenge',
+              to: seat,
+              id: activeCh.id,
+              wave: activeCh.wave,
+              values: [encodeStakeCode(activeCh.stake)],
+            });
+          }
+        } else if (this.hostBreak && !this.hostBreak.answered.has(seat)) {
+          this.client.sendEvent({
+            kind: 'challenge',
+            to: seat,
+            id: this.hostBreak.id,
+            wave: this.hostBreak.nextWave,
+            values: [encodeStakeCode('break')],
+          });
+        }
+        if (w.gameOver) {
+          this.client.sendEvent({
+            kind: 'mission-ended',
+            to: seat,
+            wave: w.wave,
+            score: w.score,
+            freed: w.freed,
+            values: [
+              this.pilots[0].revives,
+              this.pilots[1].revives,
+              this.pilots[2].revives,
+              this.pilots[3].revives,
+              this.pilots[0].questionsRight,
+              this.pilots[1].questionsRight,
+              this.pilots[2].questionsRight,
+              this.pilots[3].questionsRight,
+            ],
           });
         }
       }
@@ -1317,6 +1823,10 @@ export class CoopFlightDirector {
     }
     if (snap.paused !== this.hostPaused || (this.activeWorld && snap.paused !== this.activeWorld.paused)) {
       this.hostPaused = snap.paused;
+      if (!snap.paused) {
+        this.hostAway = false;
+        this.resumeCountdownSec = 0;
+      }
       this.activeWorld?.setHostPausedFromWire?.(snap.paused);
     }
   }
@@ -1328,12 +1838,29 @@ export class CoopFlightDirector {
     if (!w) return;
 
     if (msg.kind === 'wave-sync') {
-      if (typeof msg.wave === 'number' && msg.wave >= 1 && msg.wave !== w.wave) {
+      if (typeof msg.wave === 'number' && Number.isFinite(msg.wave) && msg.wave >= 1 && msg.wave !== w.wave) {
         w.wave = msg.wave;
         w.banner = 2.0;
       }
-      if (typeof msg.score === 'number') w.score = msg.score;
-      if (typeof msg.freed === 'number') w.freed = msg.freed;
+      if (typeof msg.score === 'number' && Number.isFinite(msg.score)) w.score = msg.score;
+      if (typeof msg.freed === 'number' && Number.isFinite(msg.freed)) w.freed = msg.freed;
+      if (Array.isArray(msg.values) && msg.values[0] === COOP_HOST_AWAY_MAGIC) {
+        const mode = msg.values[1];
+        if (mode === 1) {
+          this.hostAway = true;
+          this.resumeCountdownSec = 0;
+        } else if (mode === 2) {
+          this.hostAway = false;
+          const tenths =
+            typeof msg.values[2] === 'number' && Number.isFinite(msg.values[2])
+              ? clamp(msg.values[2], 1, 90)
+              : Math.round(COOP_RESUME_COUNTDOWN_SEC * 10);
+          this.resumeCountdownSec = tenths / 10;
+        } else if (mode === 0) {
+          this.hostAway = false;
+          this.resumeCountdownSec = 0;
+        }
+      }
     } else if (msg.kind === 'asteroid-field' && typeof msg.seed === 'number') {
       const brokenIds = Array.isArray(msg.bitmap)
         ? unpackBrokenRockWords(msg.bitmap)
@@ -1349,6 +1876,53 @@ export class CoopFlightDirector {
       }
     } else if (msg.kind === 'tanker-start') {
       w.play('tanker');
+    } else if (msg.kind === 'challenge') {
+      if (this.client.seat < 0) return;
+      const rawCode = Array.isArray(msg.values) && typeof msg.values[0] === 'number' ? msg.values[0] : undefined;
+      const stakeKind = decodeStakeCode(rawCode);
+      if (stakeKind && typeof msg.id === 'number' && Number.isInteger(msg.id) && msg.id > 0) {
+        const safeWave =
+          typeof msg.wave === 'number' && Number.isFinite(msg.wave)
+            ? clamp(Math.round(msg.wave), 1, 99)
+            : clamp(Math.round(w.wave || 1), 1, 99);
+        this.quiz.openChallenge(msg.id, stakeKind, safeWave, this.layout.useThumbDeck, this.quizHooks(w));
+      }
+    } else if (msg.kind === 'upgrade-offer') {
+      if (this.client.seat < 0) return;
+      if (typeof msg.id === 'number' && Number.isInteger(msg.id) && msg.id > 0 && Array.isArray(msg.values)) {
+        const indices = msg.values.filter(
+          (v): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < UPGRADES.length,
+        );
+        this.quiz.openUpgradeOffer(msg.id, indices, this.quizHooks(w));
+      }
+    } else if (msg.kind === 'revive') {
+      if (typeof msg.seat === 'number' && Number.isInteger(msg.seat) && msg.seat >= 0 && msg.seat <= 3) {
+        const revived = this.pilots[msg.seat as CoopSeatIndex];
+        w.ring(revived.x, revived.y, NEON.lime, 105);
+        w.play('shieldUp');
+      }
+    } else if (msg.kind === 'mission-ended') {
+      if (typeof msg.wave === 'number' && Number.isFinite(msg.wave) && msg.wave >= 1) {
+        w.wave = Math.round(msg.wave);
+      }
+      if (typeof msg.score === 'number' && Number.isFinite(msg.score)) {
+        w.score = Math.max(0, Math.round(msg.score));
+      }
+      if (typeof msg.freed === 'number' && Number.isFinite(msg.freed)) {
+        w.freed = Math.max(0, Math.round(msg.freed));
+      }
+      if (Array.isArray(msg.values) && msg.values.length >= 8) {
+        for (let i = 0; i < 4; i++) {
+          const r = msg.values[i];
+          const q = msg.values[i + 4];
+          if (typeof r === 'number' && Number.isFinite(r) && r >= 0) this.pilots[i]!.revives = Math.round(r);
+          if (typeof q === 'number' && Number.isFinite(q) && q >= 0) this.pilots[i]!.questionsRight = Math.round(q);
+        }
+      }
+      this.quiz.clearActive();
+      if (!w.gameOver) {
+        w.triggerSquadGameOver();
+      }
     }
   }
 
@@ -1369,14 +1943,25 @@ export class CoopFlightDirector {
       return;
     }
 
+    if (!world.gameOver && !world.paused) {
+      this.checkHostQuizTimeouts(world);
+      if (world.gameOver) {
+        this.broadcastSnapshotNow(world);
+        return;
+      }
+    }
+
     const anyOtherLiving = this.pilots.some((p) => p.present && p.alive);
     const tankerHooked = Boolean(world.sets.tanker?.hooked);
+    const squadParked = world.parked || this.squadBreakActive;
 
     for (const p of this.pilots) {
       if (!p.present) continue;
 
       if (!p.alive) {
         p.firing = false;
+        p.answering = false;
+        p.jamSec = 0;
         p.latestInput = null;
         p.pendingTap = null;
         if (anyOtherLiving && !world.gameOver) {
@@ -1401,6 +1986,7 @@ export class CoopFlightDirector {
 
       p.invulnerable = Math.max(0, p.invulnerable - simDt);
       p.cooldown = Math.max(0, p.cooldown - simDt);
+      p.jamSec = Math.max(0, p.jamSec - simDt);
       this.guardCoolBySeat[p.seat] = Math.max(0, this.guardCoolBySeat[p.seat]! - simDt);
       if (world.upgrades.has('shield') && !p.shieldReady) {
         p.shieldRecharge -= simDt;
@@ -1413,6 +1999,7 @@ export class CoopFlightDirector {
       }
 
       const isHookedPilot = tankerHooked && this.hookedSeat === p.seat;
+      const fireBlocked = squadParked || isHookedPilot || p.answering || p.jamSec > 0;
 
       if (p.seat !== this.client.seat && p.connected && p.pendingTap) {
         const tap = p.pendingTap;
@@ -1420,12 +2007,18 @@ export class CoopFlightDirector {
         world.strikeBoss(tap.x, tap.y, true, true);
       }
 
-      if (p.seat === this.client.seat) {
+      if (this.squadBreakActive) {
+        const home = formationSpawnForSeat(p.seat);
+        const k = 1 - Math.exp(-simDt * 4);
+        p.x = clampArenaShipX(p.x + (home.x - p.x) * k);
+        p.y = clampArenaShipY(p.y + (home.y - p.y) * k);
+        p.firing = false;
+      } else if (p.seat === this.client.seat) {
         this.movePilotWithLocalControl(p, simDt, localCtrl);
         const deckState = this.deck.state();
         const keyFiring = localCtrl.firing && !localCtrl.touching;
-        const wantsFire = (this.layout.useThumbDeck ? deckState.firing || keyFiring : localCtrl.firing) && !world.parked;
-        p.firing = wantsFire && !isHookedPilot;
+        const wantsFire = this.layout.useThumbDeck ? deckState.firing || keyFiring : localCtrl.firing;
+        p.firing = wantsFire && !fireBlocked;
       } else if (p.connected && p.latestInput) {
         const inp = p.latestInput;
         const age = Math.max(0, this.elapsedSec - this.lastInputAtSec[p.seat]!);
@@ -1504,7 +2097,7 @@ export class CoopFlightDirector {
           p.x = clampArenaShipX(p.x);
           p.y = clampArenaShipY(p.y);
         }
-        p.firing = age <= 0.35 && inp.firing && !world.parked && !isHookedPilot;
+        p.firing = age <= 0.35 && inp.firing && !fireBlocked;
       } else {
         p.firing = false;
       }
@@ -1555,7 +2148,17 @@ export class CoopFlightDirector {
     // 1. 0ms predicted local movement + immediate local cosmetic bolts + cannon audio feedback
     if (me.present && me.alive && !this.hostReconnecting && !this.hostPaused && !world.gameOver) {
       me.cooldown = Math.max(0, me.cooldown - simDt);
-      this.movePilotWithLocalControl(me, simDt, localCtrl);
+      me.jamSec = Math.max(0, me.jamSec - simDt);
+      const parkedNow = this.guestParked;
+      if (parkedNow) {
+        const home = formationSpawnForSeat(mySeat);
+        const k = 1 - Math.exp(-simDt * 4);
+        me.x = clampArenaShipX(me.x + (home.x - me.x) * k);
+        me.y = clampArenaShipY(me.y + (home.y - me.y) * k);
+        if (this.layout.useThumbDeck) this.deck.syncTarget(me.x, me.y);
+      } else {
+        this.movePilotWithLocalControl(me, simDt, localCtrl);
+      }
       const vx = (me.x - me.lastX) / Math.max(realDt, 0.001);
       me.lastX = me.x;
       me.lean += (clamp(vx / 380, -1, 1) - me.lean) * (1 - Math.exp(-realDt * 8));
@@ -1563,8 +2166,9 @@ export class CoopFlightDirector {
       const isHooked = Boolean(world.sets.tanker?.hooked) && this.hookedSeat === mySeat;
       const deckState = this.deck.state();
       const keyFiring = localCtrl.firing && !localCtrl.touching;
-      const wantsFire = (this.layout.useThumbDeck ? deckState.firing || keyFiring : localCtrl.firing) && !world.parked;
-      me.firing = wantsFire && !isHooked;
+      const wantsFire = this.layout.useThumbDeck ? deckState.firing || keyFiring : localCtrl.firing;
+      const fireBlocked = parkedNow || isHooked || me.answering || me.jamSec > 0 || this.quiz.isInteractive();
+      me.firing = wantsFire && !fireBlocked;
       if (me.firing && me.cooldown <= 0 && Number.isFinite(me.x) && Number.isFinite(me.y)) {
         me.cooldown = world.upgrades.has('rapid') ? 0.11 : 0.17;
         me.volley += 1;
@@ -1644,12 +2248,24 @@ export class CoopFlightDirector {
     world.score = sample.teamScore;
     world.freed = sample.freed;
     world.energy = sample.energy;
-    world.parked = sample.parked;
-    if (sample.gameOver && !world.gameOver) {
+    const isParkedNow = latestSnap ? latestSnap.parked : sample.parked;
+    const isOverNow = latestSnap ? latestSnap.gameOver : sample.gameOver;
+    this.guestParked = isParkedNow;
+    world.parked = isParkedNow;
+    if (isOverNow && !world.gameOver) {
+      this.quiz.clearActive();
       world.triggerSquadGameOver();
-    } else if (!sample.gameOver && world.gameOver) {
+    } else if (!isOverNow && world.gameOver) {
       this.guestLocalBolts.length = 0;
       this.guestSuppressedBullets.length = 0;
+      this.quiz.clearActive();
+      this.guestParked = false;
+      for (const p of this.pilots) {
+        p.answering = false;
+        p.jamSec = 0;
+        p.revives = 0;
+        p.questionsRight = 0;
+      }
       this.invalidatePredHistory();
       this.hasSentAnyInput = false;
       this.prevWireHull = 3;
@@ -1672,6 +2288,12 @@ export class CoopFlightDirector {
       p.shieldReady = s.shielded;
       p.orbit = s.orbit;
       p.ackSeq = s.ackSeq;
+      if (s.seat === mySeat) {
+        const wireAnswering = Boolean((authMe ?? s).answering);
+        p.answering = s.alive && (wireAnswering || (!this.guestParked && this.quiz.isInteractive()));
+      } else {
+        p.answering = s.alive && Boolean(s.answering);
+      }
       if (latestSnap?.upgradesMask === undefined) {
         if (s.wing) world.upgrades.add('wingmates');
         if (s.orbitUpgrade) world.upgrades.add('guardian');
@@ -1892,7 +2514,7 @@ export class CoopFlightDirector {
       }
     }
 
-    const canSuppressOnMe = me.present && me.alive && me.invulnerable <= 0;
+    const canSuppressOnMe = me.present && me.alive && me.invulnerable <= 0 && !me.answering;
     const nextShots: Shot[] = [];
     const nextRockets: Rocket[] = [];
     const nextBeams: Beam[] = [];
@@ -2112,6 +2734,13 @@ export class CoopFlightDirector {
 
     p.alive = false;
     p.firing = false;
+    p.answering = false;
+    p.jamSec = 0;
+    this.downedAtSec[p.seat] = this.elapsedSec;
+    this.hostSeatChallenge[p.seat] = null;
+    if (p.seat === this.client.seat) {
+      this.quiz.clearActive();
+    }
     p.latestInput = null;
     p.pendingTap = null;
     p.respawnSec = COOP_WINGMAN_RESPAWN_SEC;
@@ -2120,59 +2749,479 @@ export class CoopFlightDirector {
 
     const anyPresentPilotAlive = this.pilots.some((other) => other.present && other.alive);
     if (!anyPresentPilotAlive) {
-      this.clearSavedHostProgress();
-      world.triggerSquadGameOver();
+      this.endSquadMission(world);
     } else {
       world.play('boom');
       this.onStatus?.(`${p.callsign} hull down. Auto-reboot in ${COOP_WINGMAN_RESPAWN_SEC} seconds.`);
     }
   }
 
-  private applySquadPickup(collector: CoopPilotShip, reward: Reward, world: CoopWorldAdapter, scale: number): void {
-    if (reward === 'energy') {
-      world.energy = Math.min(1, world.energy + 0.45);
-      world.ring(collector.x, collector.y, NEON.cyan, 85 * scale);
-      this.recordHostFx('ring', collector.x, collector.y, NEON.cyan);
-      world.play('power');
+  private allocateChallengeIds(span = 1): number {
+    const base = this.nextChallengeId;
+    this.nextChallengeId += Math.max(1, span);
+    if (this.nextChallengeId > 1_000_000_000) this.nextChallengeId = 4;
+    return base;
+  }
+
+  private quizHooks(world: CoopWorldAdapter | null): CoopQuizHooks {
+    return {
+      play: (sfx) => world?.play(sfx),
+      announce: (msg) => {
+        if (world?.say) world.say(msg);
+        else this.onStatus?.(msg);
+      },
+      celebrate: (grade, big) => world?.celebrate?.(grade, big),
+      getExternalGrade: world?.getGrade,
+      setExternalGrade: world?.setGrade,
+      onChallengeSettled: (id, kind, verdict, quality) => {
+        if (this.client.seat < 0) return;
+        const mySeat = this.client.seat as CoopSeatIndex;
+        if (this.isHost) {
+          if (world) this.handlePilotAnswer(mySeat, id, verdict, quality, world);
+        } else {
+          if (verdict !== 'failed') {
+            this.pilots[mySeat].questionsRight += 1;
+          } else if (kind !== 'break' && kind !== 'defuse') {
+            this.pilots[mySeat].jamSec = JAM_SECONDS;
+          }
+          this.sendGuestAnswer(id, verdict, quality);
+        }
+      },
+      onUpgradeChosen: (baseId, slotIndex, _upgrade) => {
+        if (this.client.seat < 0) return;
+        const mySeat = this.client.seat as CoopSeatIndex;
+        const answerId = baseId + slotIndex;
+        if (this.isHost) {
+          if (world) this.handlePilotAnswer(mySeat, answerId, 'perfect', 1, world);
+        } else {
+          this.sendGuestAnswer(answerId, 'perfect', 1);
+        }
+      },
+    };
+  }
+
+  private sendGuestAnswer(id: number, verdict: Grade, quality: number): void {
+    if (typeof this.client.sendAnswer === 'function') {
+      this.client.sendAnswer(id, verdict, quality);
+    } else if (typeof (this.client as { sendJson?: (m: unknown) => void }).sendJson === 'function') {
+      (this.client as { sendJson: (m: unknown) => void }).sendJson({
+        type: 'answer',
+        id,
+        verdict,
+        quality,
+      });
+    }
+  }
+
+  private startHostPilotChallenge(
+    pilot: CoopPilotShip,
+    stake: Stake,
+    world: CoopWorldAdapter,
+    scale: number,
+  ): void {
+    if (!this.isHost || world.gameOver || pilot.answering) return;
+    const id = this.allocateChallengeIds(1);
+    const safeWave = Math.max(1, Math.round(world.wave || 1));
+    pilot.answering = true;
+    pilot.firing = false;
+    this.hostSeatChallenge[pilot.seat] = {
+      mode: 'stake',
+      id,
+      stake,
+      wave: safeWave,
+      expiresAtSec: this.elapsedSec + COOP_QUIZ_TIMEOUT_SEC,
+      scale,
+    };
+
+    if (pilot.seat === this.client.seat) {
+      this.quiz.openChallenge(id, stake, safeWave, this.layout.useThumbDeck, this.quizHooks(world));
+    } else {
+      this.client.sendEvent({
+        kind: 'challenge',
+        to: pilot.seat,
+        id,
+        wave: safeWave,
+        values: [encodeStakeCode(stake)],
+      });
+    }
+  }
+
+  private handleWireAnswer(msg: CoopAnswerMessage): void {
+    if (!this.isHost) return;
+    const w = this.activeWorld;
+    if (!w || w.gameOver) return;
+    if (typeof msg.seat !== 'number' || !Number.isInteger(msg.seat) || msg.seat < 0 || msg.seat > 3) return;
+    if (typeof msg.id !== 'number' || !Number.isInteger(msg.id) || msg.id <= 0) return;
+    const verdict: Grade =
+      msg.verdict === 'perfect' || msg.verdict === 'good' || msg.verdict === 'failed' ? msg.verdict : 'failed';
+    const quality = typeof msg.quality === 'number' && Number.isFinite(msg.quality) ? clamp(msg.quality, 0, 1) : 0;
+    this.handlePilotAnswer(msg.seat as CoopSeatIndex, msg.id, verdict, quality, w);
+  }
+
+  private handlePilotAnswer(
+    seat: CoopSeatIndex,
+    id: number,
+    verdict: Grade,
+    quality: number,
+    world: CoopWorldAdapter,
+  ): void {
+    if (!this.isHost || world.gameOver) return;
+    const p = this.pilots[seat];
+    if (!p.present) return;
+
+    // 1. Pre-Wave Squad Break answer
+    if (this.hostBreak && id === this.hostBreak.id) {
+      if (this.hostBreak.answered.has(seat)) return;
+      this.hostBreak.answered.set(seat, { verdict, quality });
+      if (verdict !== 'failed') {
+        p.questionsRight += 1;
+      }
+      const allConnectedDone = this.pilots.every(
+        (other) => !other.present || !other.connected || this.hostBreak!.answered.has(other.seat),
+      );
+      if (allConnectedDone) {
+        this.finishHostSquadBreak(world);
+      }
       return;
     }
-    if (reward === 'hull') {
-      for (const p of this.pilots) {
-        if (p.present && p.alive) {
-          p.hull = Math.min(p.maxHull, p.hull + 1);
+
+    // 2. Active mid-wave Stake or Upgrade Offer for `seat`
+    const ch = this.hostSeatChallenge[seat];
+    if (!ch || !p.alive) return;
+
+    if (ch.mode === 'offer') {
+      const offers = ch.offerIndices ?? [];
+      if (id < ch.id || id >= ch.id + offers.length) return;
+      const chosenIdx = offers[id - ch.id];
+      const chosen = chosenIdx !== undefined ? UPGRADES[chosenIdx] : undefined;
+      this.hostSeatChallenge[seat] = null;
+      p.answering = false;
+      p.invulnerable = Math.max(p.invulnerable, 1.0);
+      this.equipSquadUpgrade(chosen?.id ?? null, p, world, ch.scale);
+      this.broadcastSnapshotNow(world);
+      return;
+    }
+
+    if (id !== ch.id) return;
+
+    if (verdict === 'failed') {
+      this.hostSeatChallenge[seat] = null;
+      p.answering = false;
+      if (ch.stake === 'defuse') {
+        this.explodeBombOnPilot(p, world, ch.scale);
+      } else {
+        p.jamSec = JAM_SECONDS;
+        p.firing = false;
+        p.invulnerable = Math.max(p.invulnerable, 1.0);
+      }
+      this.broadcastSnapshotNow(world);
+      return;
+    }
+
+    // Right answer (`'good'` or `'perfect'`): increment quiz counter & trigger Wingman Rescue-Pod Revive!
+    p.questionsRight += 1;
+    this.reviveDownedWingmen(seat, world, ch.scale);
+
+    if (ch.stake === 'upgrade') {
+      const choices = offerUpgrades(world.upgrades);
+      const offerIndices = choices
+        .map((u) => UPGRADES.findIndex((item) => item.id === u.id))
+        .filter((idx) => idx >= 0);
+
+      if (offerIndices.length === 0) {
+        this.hostSeatChallenge[seat] = null;
+        p.answering = false;
+        p.invulnerable = Math.max(p.invulnerable, 1.0);
+        world.score += ALL_OWNED_POINTS;
+        world.energy = 1;
+        world.ring(p.x, p.y, NEON.lime, 105 * ch.scale);
+        this.recordHostFx('ring', p.x, p.y, NEON.lime);
+        world.play('power');
+      } else {
+        const offerBaseId = this.allocateChallengeIds(4);
+        this.hostSeatChallenge[seat] = {
+          mode: 'offer',
+          id: offerBaseId,
+          stake: 'upgrade',
+          wave: ch.wave,
+          offerIndices,
+          expiresAtSec: this.elapsedSec + COOP_OFFER_TIMEOUT_SEC,
+          scale: ch.scale,
+        };
+        if (seat === this.client.seat) {
+          this.quiz.openUpgradeOffer(offerBaseId, offerIndices, this.quizHooks(world));
+        } else {
+          this.client.sendEvent({
+            kind: 'upgrade-offer',
+            to: seat,
+            id: offerBaseId,
+            values: offerIndices,
+          });
         }
       }
-      world.ring(collector.x, collector.y, NEON.lime, 85 * scale);
-      this.recordHostFx('ring', collector.x, collector.y, NEON.lime);
+      this.broadcastSnapshotNow(world);
+      return;
+    }
+
+    this.hostSeatChallenge[seat] = null;
+    p.answering = false;
+    p.invulnerable = Math.max(p.invulnerable, ch.stake === 'defuse' ? 1.2 : 1.0);
+
+    if (ch.stake === 'energy') {
+      world.energy = Math.min(1, world.energy + POWER_GAIN * clamp(quality, 0.35, 1));
+      world.ring(p.x, p.y, NEON.cyan, 85 * ch.scale);
+      this.recordHostFx('ring', p.x, p.y, NEON.cyan);
       world.play('power');
-      return;
+    } else if (ch.stake === 'hull') {
+      let repaired = 0;
+      for (const other of this.pilots) {
+        if (other.present && other.alive && other.hull < other.maxHull) {
+          other.hull = Math.min(other.maxHull, other.hull + 1);
+          repaired += 1;
+        }
+      }
+      if (repaired === 0) {
+        world.score += FULL_HULL_BONUS;
+      }
+      world.ring(p.x, p.y, NEON.lime, 85 * ch.scale);
+      this.recordHostFx('ring', p.x, p.y, NEON.lime);
+      world.play('power');
+    } else if (ch.stake === 'blast') {
+      world.detonateScreen(p.x, p.y, p.color);
+      this.recordHostFx('ring', p.x, p.y, p.color);
+    } else if (ch.stake === 'defuse') {
+      world.score += DEFUSE_POINTS;
+      world.ring(p.x, p.y, NEON.lime, 80 * ch.scale);
+      this.recordHostFx('ring', p.x, p.y, NEON.lime);
+      world.play('power');
     }
-    if (reward === 'blast') {
-      world.detonateScreen(collector.x, collector.y, collector.color);
-      this.recordHostFx('ring', collector.x, collector.y, collector.color);
-      return;
+
+    this.broadcastSnapshotNow(world);
+  }
+
+  private reviveSingleWingman(
+    other: CoopPilotShip,
+    rescuerSeat: CoopSeatIndex | null,
+    spawnX: number,
+    spawnY: number,
+    world: CoopWorldAdapter,
+    scale: number,
+  ): void {
+    other.x = spawnX;
+    other.y = spawnY;
+    other.lastX = spawnX;
+    other.hull = Math.max(2, other.maxHull - 1);
+    other.alive = true;
+    other.respawnSec = 0;
+    other.invulnerable = 2.4;
+    other.answering = false;
+    other.jamSec = 0;
+    this.awaitingRespawnSync[other.seat] = true;
+    this.respawnSyncDeadlineSec[other.seat] = this.elapsedSec + 0.9;
+    world.ring(other.x, other.y, NEON.lime, 105 * scale);
+    this.recordHostFx('ring', other.x, other.y, NEON.lime);
+    world.play('shieldUp');
+    if (rescuerSeat !== null) {
+      this.pilots[rescuerSeat].revives += 1;
     }
-    const order: readonly UpgradeId[] = ['rapid', 'wide', 'shield', 'wingmates', 'pierce', 'guardian', 'rockets', 'lance', 'armour', 'nova'];
-    const next = order.find((id) => !world.upgrades.has(id));
-    if (next) {
-      world.equipUpgrade(next);
-      if (next === 'armour') {
+    this.client.sendEvent({
+      kind: 'revive',
+      seat: other.seat,
+      hp: other.hull,
+      ...(rescuerSeat !== null ? { revives: this.pilots[rescuerSeat].revives } : {}),
+    });
+  }
+
+  private reviveDownedWingmen(
+    rescuerSeat: CoopSeatIndex | null,
+    world: CoopWorldAdapter,
+    scale: number,
+  ): number {
+    let revivedCount = 0;
+    for (const other of this.pilots) {
+      if (!other.present || other.alive || !other.connected) continue;
+      const spawn = formationSpawnForSeat(other.seat);
+      this.reviveSingleWingman(other, rescuerSeat, spawn.x, spawn.y, world, scale);
+      revivedCount += 1;
+    }
+    return revivedCount;
+  }
+
+  private checkHostQuizTimeouts(world: CoopWorldAdapter): void {
+    for (let i = 0; i < 4; i++) {
+      const seat = i as CoopSeatIndex;
+      const ch = this.hostSeatChallenge[seat];
+      if (!ch) continue;
+      const p = this.pilots[seat];
+      if (!p.present || !p.alive) {
+        this.hostSeatChallenge[seat] = null;
+        p.answering = false;
+        if (seat === this.client.seat) this.quiz.clearActive();
+        continue;
+      }
+      if (this.elapsedSec < ch.expiresAtSec) continue;
+
+      if (ch.mode === 'offer') {
+        const firstIdx = ch.offerIndices?.[0];
+        const firstId = firstIdx !== undefined ? UPGRADES[firstIdx]?.id ?? null : null;
+        this.hostSeatChallenge[seat] = null;
+        p.answering = false;
+        p.invulnerable = Math.max(p.invulnerable, 1.0);
+        if (seat === this.client.seat) this.quiz.clearActive();
+        this.equipSquadUpgrade(firstId, p, world, ch.scale);
+      } else {
+        if (seat === this.client.seat) this.quiz.clearActive();
+        this.handlePilotAnswer(seat, ch.id, 'failed', 0, world);
+        if (world.gameOver) return;
+      }
+    }
+
+    if (this.hostBreak) {
+      const allConnectedDone =
+        this.hostBreak.answered.size > 0 &&
+        this.pilots.every((p) => !p.present || !p.connected || this.hostBreak!.answered.has(p.seat));
+      if (allConnectedDone || this.elapsedSec >= this.hostBreak.expiresAtSec) {
+        if (this.client.seat >= 0 && !this.hostBreak.answered.has(this.client.seat as CoopSeatIndex)) {
+          this.quiz.clearActive();
+        }
+        this.finishHostSquadBreak(world);
+      }
+    }
+  }
+
+  private finishHostSquadBreak(world: CoopWorldAdapter): void {
+    const brk = this.hostBreak;
+    if (!brk) return;
+    this.hostBreak = null;
+    this.squadBreakActive = false;
+    world.parked = false;
+
+    let totalQuality = 0;
+    let count = 0;
+    let anyPerfect = false;
+    for (const p of this.pilots) {
+      if (!p.present) continue;
+      const ans = brk.answered.get(p.seat);
+      if (ans) {
+        totalQuality += ans.quality;
+        count += 1;
+        if (ans.verdict === 'perfect') anyPerfect = true;
+      } else if (p.connected) {
+        count += 1;
+      }
+    }
+
+    const avgQuality = count > 0 ? clamp(totalQuality / count, 0, 1) : 0;
+    world.energy = clamp(Math.max(world.energy, avgQuality), 0.2, 1);
+
+    if (anyPerfect) {
+      let repaired = 0;
+      for (const p of this.pilots) {
+        if (p.present && p.alive && p.hull < p.maxHull) {
+          p.hull = Math.min(p.maxHull, p.hull + 1);
+          repaired += 1;
+        }
+      }
+      if (repaired === 0) {
+        world.score += FULL_HULL_BONUS;
+      }
+    }
+
+    this.reviveDownedWingmen(null, world, 1);
+    world.startWave?.(brk.nextWave);
+    this.broadcastSnapshotNow(world);
+  }
+
+  private explodeBombOnPilot(p: CoopPilotShip, world: CoopWorldAdapter, scale: number): void {
+    p.hull = 0;
+    p.shieldReady = false;
+    p.alive = false;
+    p.firing = false;
+    p.answering = false;
+    p.jamSec = 0;
+    this.downedAtSec[p.seat] = this.elapsedSec;
+    p.latestInput = null;
+    p.pendingTap = null;
+    p.respawnSec = COOP_WINGMAN_RESPAWN_SEC;
+    world.ring(p.x, p.y, NEON.red, 110 * scale);
+    world.ring(p.x, p.y, NEON.orange, 85 * scale);
+    world.burst(SHIP, p.x, p.y, 1.15 * scale, 0, p.color);
+    this.recordHostFx('ring', p.x, p.y, NEON.red);
+    world.play('blast');
+
+    const anyPresentPilotAlive = this.pilots.some((other) => other.present && other.alive);
+    if (!anyPresentPilotAlive) {
+      this.endSquadMission(world);
+    } else {
+      this.onStatus?.(`${p.callsign} hit by bomb blast. Auto-reboot in ${COOP_WINGMAN_RESPAWN_SEC} seconds.`);
+    }
+  }
+
+  private equipSquadUpgrade(
+    preferred: UpgradeId | null,
+    collector: CoopPilotShip,
+    world: CoopWorldAdapter,
+    scale: number,
+  ): void {
+    const chosenId =
+      preferred && !world.upgrades.has(preferred)
+        ? preferred
+        : UPGRADES.find((u) => !world.upgrades.has(u.id))?.id ?? null;
+
+    if (chosenId) {
+      world.equipUpgrade(chosenId);
+      if (chosenId === 'armour') {
         for (const p of this.pilots) {
           p.maxHull = 4;
           if (p.alive) p.hull = Math.min(4, p.hull + 1);
         }
-      } else if (next === 'shield') {
+      } else if (chosenId === 'shield') {
         for (const p of this.pilots) {
           p.shieldReady = true;
           p.shieldRecharge = 0;
         }
       }
     } else {
+      world.score += ALL_OWNED_POINTS;
       world.energy = 1;
     }
+
     world.ring(collector.x, collector.y, NEON.lime, 105 * scale);
     this.recordHostFx('ring', collector.x, collector.y, NEON.lime);
     world.play('power');
+  }
+
+  private endSquadMission(world: CoopWorldAdapter): void {
+    this.clearSavedHostProgress();
+    this.squadBreakActive = false;
+    this.hostBreak = null;
+    this.hostSeatChallenge[0] = null;
+    this.hostSeatChallenge[1] = null;
+    this.hostSeatChallenge[2] = null;
+    this.hostSeatChallenge[3] = null;
+    for (const other of this.pilots) {
+      other.answering = false;
+      other.firing = false;
+    }
+    this.quiz.clearActive();
+    world.triggerSquadGameOver();
+    this.broadcastSnapshotNow(world);
+    this.client.sendEvent({
+      kind: 'mission-ended',
+      wave: world.wave,
+      score: world.score,
+      freed: world.freed,
+      values: [
+        this.pilots[0].revives,
+        this.pilots[1].revives,
+        this.pilots[2].revives,
+        this.pilots[3].revives,
+        this.pilots[0].questionsRight,
+        this.pilots[1].questionsRight,
+        this.pilots[2].questionsRight,
+        this.pilots[3].questionsRight,
+      ],
+    });
   }
 
   private pruneRecentFx(): void {
@@ -2196,6 +3245,7 @@ export class CoopFlightDirector {
         hull: p.hull,
         maxHull: p.maxHull,
         invulnerable: p.invulnerable > 0,
+        answering: p.answering,
         shielded: p.shieldReady,
         firing: p.firing || this.firedSinceLastSnap[p.seat]!,
         spread: hasSpread,
@@ -2369,7 +3419,7 @@ export class CoopFlightDirector {
       freed: world.freed,
       energy: world.energy,
       paused: world.paused,
-      parked: world.parked,
+      parked: world.parked || this.squadBreakActive,
       gameOver: world.gameOver,
       ships,
       enemies,

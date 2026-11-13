@@ -32,7 +32,7 @@ import { choose } from './challenge';
 import type { CoopFlightDirector, CoopWorldAdapter } from './coop-flight';
 import { NEON, PEBBLE, PINK, ROCK, SAND, clamp, pick, rand, strokeInk, type Ink } from './core';
 import { KINDS, buildWavePlan, renderEnemies, spawnEnemy, spawnX, splitShards, updateEnemies, type Enemy, type Spawn } from './enemies';
-import { Fireworks, renderFireworks } from './fireworks';
+import { Fireworks, renderFireworks, type Grade } from './fireworks';
 import { textWidth, traceText } from './font';
 import {
   BOSS_CORNER,
@@ -234,6 +234,7 @@ export class Game {
   private readonly mp: MultiplayerClient;
   private readonly coop: CoopFlightDirector | null;
   private readonly coopAdapter: CoopWorldAdapter;
+  private coopHiddenSec = 0;
   private showLeaderboard = false;
 
   constructor(canvas: HTMLCanvasElement, opts: GameOptions) {
@@ -323,6 +324,16 @@ export class Game {
           self.opts.onPause?.(paused);
         }
       },
+      startWave: (wave) => self.startWave(wave),
+      celebrate: (grade: Grade, big: boolean) => {
+        if (self.reduceMotion) return;
+        self.fireworks.launch(grade, big, self.w / 2, self.h * 0.34, Math.min(self.room / 2, 300), self.scale);
+      },
+      say: (message: string) => self.opts.onStatus?.(message),
+      getGrade: () => self.grade,
+      setGrade: (grade: GradeBand) => {
+        self.grade = pickedGrade = grade;
+      },
     };
 
     this.coop = opts.coop?.director ?? null;
@@ -342,12 +353,26 @@ export class Game {
         this.voice.unlock();
       },
       exit: () => this.opts.onExit(),
-      wants: (key) => !this.coop && !this.paused && (this.picking ? key >= '1' && key <= String(GRADE_BANDS.length) : this.questions.wants(key)),
-      type: (key) => (this.picking ? this.chooseGrade(Number(key) - 1) : this.questions.type(key, this.quizEnv())),
+      wants: (key) =>
+        !this.paused &&
+        (this.coop
+          ? this.coop.wantsKey(key)
+          : this.picking
+            ? key >= '1' && key <= String(GRADE_BANDS.length)
+            : this.questions.wants(key)),
+      type: (key) => {
+        if (this.coop) {
+          this.coop.typeKey(key, this.coopAdapter);
+          return;
+        }
+        if (this.picking) this.chooseGrade(Number(key) - 1);
+        else this.questions.type(key, this.quizEnv());
+      },
       command: (code) => this.command(code),
       pick: (x, y) => this.pick(x, y),
       touched: () => {
-        if (!this.coop) this.questions.byTouch(this.quizEnv());
+        if (this.coop) this.coop.onTouchInput(this.coopAdapter);
+        else this.questions.byTouch(this.quizEnv());
       },
       press: () => this.press(),
       ...(this.coop
@@ -483,6 +508,7 @@ export class Game {
     if (on && !this.coop) this.mp.rest();
     if (on) this.voice.hush();
     if (this.coop?.isHost) {
+      if (!on) this.coop.cancelHostAwayCountdown(this.coopAdapter);
       this.coop.client.sendHostPaused(on);
       this.coop.broadcastSnapshotNow(this.coopAdapter);
     }
@@ -501,6 +527,12 @@ export class Game {
   }
 
   private get maxHull(): number {
+    if (this.coop) {
+      const seat = this.coop.localSeat;
+      if (seat !== -1) {
+        return this.coop.pilots[seat].maxHull;
+      }
+    }
     return MAX_HULL + (this.upgrades.has('armour') ? 1 : 0);
   }
 
@@ -687,6 +719,9 @@ export class Game {
   private pick(x: number, y: number): boolean {
     if (this.paused) return false;
     if (this.coop) {
+      if (this.state === 'playing' && this.coop.pickArenaOverlay(x, y, this.coopAdapter)) {
+        return true;
+      }
       if (
         this.state !== 'playing' ||
         !this.boss ||
@@ -756,20 +791,38 @@ export class Game {
       if (document.hidden) {
         this.voice.hush();
         this.input.drop();
+        this.coopHiddenSec = 0;
         this.last = performance.now();
         this.bgTimer = setInterval(() => {
+          const coop = this.coop;
+          if (!coop) return;
           const now = performance.now();
-          let elapsed = Math.min(1.0, Math.max(0, (now - this.last) / 1000));
+          const rawElapsed = Math.min(1.0, Math.max(0, (now - this.last) / 1000));
+          let elapsed = rawElapsed;
           this.last = now;
           if (!this.paused) {
+            if (coop.isHost && !coop.client.tvMode && this.state === 'playing') {
+              this.coopHiddenSec += rawElapsed;
+              if (this.coopHiddenSec >= 2.0) {
+                this.setPaused(true);
+                coop.engageHostAway(this.coopAdapter);
+                return;
+              }
+            }
             while (elapsed > 0.001) {
               const step = Math.min(0.05, elapsed);
               this.update(step);
               elapsed -= step;
             }
+          } else if (coop.tickPaused(rawElapsed, this.coopAdapter)) {
+            this.setPaused(false);
           }
         }, 50);
       } else {
+        this.coopHiddenSec = 0;
+        if (this.coop.isHost && this.coop.hostAway && this.paused && this.state === 'playing') {
+          this.coop.beginHostAwayResumeCountdown(this.coopAdapter);
+        }
         this.sound.unlock();
         this.last = performance.now();
         this.raf = requestAnimationFrame(this.frame);
@@ -971,7 +1024,7 @@ export class Game {
 
   /** The ship is parked and nothing is flying: a break is on, or the player is being asked their grade. */
   private get parked(): boolean {
-    return this.picking || this.questions.brk !== null;
+    return this.coop ? this.coop.isSquadParked : this.picking || this.questions.brk !== null;
   }
 
   private startWave(n: number): void {
@@ -1000,7 +1053,10 @@ export class Game {
   /** What an ordinary capsule holds: whatever helps most. Repairs when the hull is hurt, blasts once the waves get busy. */
   private pickReward(): Reward {
     const pool: Reward[] = ['energy'];
-    if (this.hull < this.maxHull) pool.push('hull', 'hull');
+    const anyHurt = this.coop
+      ? this.coop.pilots.some((p) => p.present && p.alive && p.hull < p.maxHull)
+      : this.hull < this.maxHull;
+    if (anyHurt) pool.push('hull', 'hull');
     if (this.wave >= 2) pool.push('blast');
     return pick(pool);
   }
@@ -1034,7 +1090,7 @@ export class Game {
         this.coop.recordHostFx('spark', x, y, color);
       }
     },
-    problem: () => makeProblem(sumLevel(this.wave, this.grade ?? 1)),
+    problem: () => makeProblem(sumLevel(this.wave, (this.coop ? this.coop.grade : this.grade) ?? 1)),
   };
 
   private bossEnv(): BossEnv {
@@ -1391,6 +1447,7 @@ export class Game {
     const dt = Math.min(0.05, Math.max(0, (now - this.last) / 1000));
     this.last = now;
     if (!this.paused) this.update(dt);
+    else if (this.coop && this.coop.tickPaused(dt, this.coopAdapter)) this.setPaused(false);
     this.render();
   };
 
@@ -1527,7 +1584,7 @@ export class Game {
       this.banner = Math.max(0, this.banner - sim);
     }
 
-    const flying = this.state === 'playing' && !coop.hostReconnecting && !coop.hostPaused;
+    const flying = this.state === 'playing' && !this.parked && !coop.hostReconnecting && !coop.hostPaused;
     const targetWarp = flying ? 3.2 : this.state === 'over' ? 0.6 : 1;
     this.warp += (targetWarp - this.warp) * (1 - Math.exp(-dt * 1.8));
     for (const star of this.stars) {
@@ -1565,6 +1622,7 @@ export class Game {
     this.ship.invulnerable = localPilot.invulnerable;
     this.lean = localPilot.lean;
     this.hull = localPilot.hull;
+    this.jam = localPilot.jamSec;
 
     const across = this.reduceMotion ? 0 : clamp(this.ship.x / (this.w || 1) - 0.5, -0.5, 0.5);
     this.drift += (across - this.drift) * (1 - Math.exp(-dt * 3));
@@ -1576,10 +1634,10 @@ export class Game {
     if (this.boss && this.state !== 'playing') this.updateBossFight(sim, dt);
     if (this.state !== 'playing') this.sets.coast(sim, dt, this.setEnv());
 
-    if (this.state === 'playing') {
+    if (this.state === 'playing' && !coop.isSquadParked) {
       if (this.intermission > 0) {
         this.intermission -= sim;
-        if (this.intermission <= 0) this.startWave(this.wave + 1);
+        if (this.intermission <= 0) coop.beginSquadWaveBreak(this.wave + 1, this.coopAdapter);
       } else if (this.boss) {
         this.updateBossFight(sim, dt);
       } else {
@@ -1632,7 +1690,7 @@ export class Game {
       },
     });
     this.updateShots(sim);
-    if (this.state === 'playing') {
+    if (this.state === 'playing' && !coop.isSquadParked) {
       coop.collideHostSquad(this.coopAdapter, this.scale);
     }
 
@@ -2225,7 +2283,12 @@ export class Game {
     renderHostileShots(ctx, this.ink, this.shots, this.tintsOf(this.shots, isHostile), sc);
 
     const hudCtx = this.hudContext();
-    if (tanker) renderTanker(hudCtx, tanker, this.sets.tankerEnv(this.setEnv()));
+    if (tanker) {
+      const tankerHud = coop
+        ? { ...hudCtx, shipX: coop.pilots[coop.hookedSeat].x, shipY: coop.pilots[coop.hookedSeat].y }
+        : hudCtx;
+      renderTanker(tankerHud, tanker, this.sets.tankerEnv(this.setEnv()));
+    }
 
     renderOwnShotsAndWeapons(ctx, this.ink, this.shots, this.tintsOf(this.shots, isOwn), this.rockets, this.beams, sc);
 
@@ -2312,7 +2375,20 @@ export class Game {
 
     renderFireworks(ctx, this.ink, this.fireworks);
     if (this.state !== 'ready') renderHud(hudCtx);
-    renderMessages(hudCtx);
+    if (!coop || !coop.suppressStandardMessages(this.state, this.paused)) {
+      renderMessages(hudCtx);
+    }
+    if (coop) {
+      coop.renderArenaOverlays(ctx, this.ink, {
+        time: this.time,
+        state: this.state,
+        stateTime: this.stateTime,
+        paused: this.paused,
+        reduceMotion: this.reduceMotion,
+        coarse: this.coarse,
+        soulsInFlight: this.souls.length,
+      });
+    }
     if (alert !== null && this.state === 'playing' && !this.paused) renderAlert(hudCtx, alert);
 
     if (coop) {

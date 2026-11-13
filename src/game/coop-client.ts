@@ -13,12 +13,14 @@
  *   while connected.
  */
 import { WebSocket as ReconnectingWebSocket } from 'partysocket';
+import type { Grade } from './fireworks';
 import {
   COOP_CALLSIGN_PREFIXES,
   VALID_COOP_CALLSIGN_RE,
   formatCoopRoomCode,
   isValidCoopRoomCode,
   normalizeCoopRoomCode,
+  type CoopAnswerMessage,
   type CoopClientToRelayMessage,
   type CoopCreateRoomResponse,
   type CoopErrorMessage,
@@ -278,6 +280,7 @@ export interface CoopClientCallbacks {
   onLobby?: (state: CoopLobbyState) => void;
   onStarted?: (seats: CoopPublicSeat[], code: string) => void;
   onEvent?: (msg: CoopEventMessage) => void;
+  onAnswer?: (msg: CoopAnswerMessage) => void;
   onRefused?: (reason: CoopRefusalReason | 'invalid-code') => void;
   onRoomClosed?: (reason: CoopRoomClosedReason) => void;
   onHostReconnecting?: (graceMs: number) => void;
@@ -512,6 +515,10 @@ export class CoopClient {
         this.emit('onEvent', msg);
         break;
       }
+      case 'answer': {
+        this.emit('onAnswer', msg);
+        break;
+      }
       case 'refused': {
         // Act immediately on `refused` without waiting for `onclose`, and clear stale room token!
         clearStoredCoopToken(this.code, this.storage);
@@ -607,6 +614,13 @@ export class CoopClient {
   sendHostPaused(paused: boolean): boolean {
     if (this.role !== 'host') return false;
     return this.sendJson({ type: 'host-paused', paused });
+  }
+
+  /** Send a Guest challenge verdict (`'perfect' | 'good' | 'failed'`) & normalized quality (`0..1`) to the Host. */
+  sendAnswer(id: number, verdict: Grade, quality: number): boolean {
+    if (this.role !== 'guest' || this.seat < 0) return false;
+    const safeQuality = Number.isFinite(quality) ? Math.max(0, Math.min(1, quality)) : 0;
+    return this.sendJson({ type: 'answer', id, verdict, quality: safeQuality });
   }
 
   /**
