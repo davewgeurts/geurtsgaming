@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { CoopClient } from '../src/game/coop-client';
+import { CoopFlightDirector } from '../src/game/coop-flight';
 import {
   CoopThumbDeck,
   arenaToClientPoint,
   clientToArenaPoint,
   computeCoopViewportLayout,
 } from '../src/game/coop-thumbdeck';
-import { COOP_ARENA_HEIGHT, COOP_ARENA_WIDTH } from '../src/game/coop-types';
+import { COOP_ARENA_HEIGHT, COOP_ARENA_WIDTH, type CoopPublicSeat } from '../src/game/coop-types';
 
 test('computeCoopViewportLayout reserves bottom 38% on portrait phones and full 3:4 arena on tablets/laptops', () => {
   // Portrait iPhone (390 x 844)
@@ -91,4 +93,68 @@ test('CoopThumbDeck drives relative trackpad steering, auto-fire latch, and inde
   assert.equal(deck.onPointerDown(layout, 9, btnX, btnY), true);
   assert.equal(deck.state().autoFireLatch, true);
   assert.equal(deck.state().firing, true);
+  assert.equal(layout.autoFireBtnRect.h, 44, 'AUTO-FIRE button meets 44px minimum touch height');
 });
+
+test('Portrait-phone Host lets 100% of touches pass through on Game Over or Pause, and rotating mid-touch releases steering cleanly', () => {
+  const seats: CoopPublicSeat[] = [
+    { seat: 0, callsign: 'NOVA-1', ready: true, isHost: true, connected: true },
+    { seat: 1, callsign: 'STAR-2', ready: true, isHost: false, connected: true },
+  ];
+  const client = new CoopClient({ code: 'DECK88', role: 'host', callsign: 'NOVA-1', storage: null });
+  // Simulate welcomed Seat 0 without opening a socket
+  Object.assign(client, { seat: 0 });
+  const dir = new CoopFlightDirector({ client, initialSeats: seats, storage: null, now: () => 1000 });
+  const phone = dir.setViewport(390, 844, undefined, true);
+  assert.equal(phone.useThumbDeck, true);
+
+  // Bind a minimal world adapter to toggle gameOver / paused / boss state
+  const stubWorld = {
+    gameOver: false,
+    paused: false,
+    boss: null as null | { kind: 'sum' | 'arms'; state: 'fight'; pods: Array<{ value: number }> },
+  };
+  dir.bindWorld(stubWorld as never);
+
+  // 1. During normal play with NO Sum Boss active, upper-arena taps pass through (`false`) while pad touches steer (`true`)
+  const upperPt = arenaToClientPoint(phone, 384, 300);
+  assert.equal(dir.handlePointerDown(1, upperPt.x, upperPt.y, true), false);
+  const padX = phone.padRect.x + phone.padRect.w / 2;
+  const padY = phone.padRect.y + phone.padRect.h / 2;
+  assert.equal(dir.handlePointerDown(2, padX, padY, true), true);
+  assert.equal(dir.deck.state().touching, true);
+
+  // 2. Rotate phone to landscape (`844 x 390`) mid-touch, lift finger, and rotate back (`390 x 844`)
+  const landscape = dir.setViewport(844, 390, undefined, true);
+  assert.equal(landscape.useThumbDeck, false);
+  assert.equal(dir.deck.state().touching, false, 'viewport switch immediately releases captured thumb pointer');
+  dir.handlePointerUp(2);
+  dir.setViewport(390, 844, undefined, true);
+  assert.equal(dir.deck.state().touching, false);
+  assert.equal(dir.deck.state().firing, false);
+
+  // A new thumb touch with a different pointerId steers immediately after rotating back
+  assert.equal(dir.handlePointerDown(3, padX, padY, true), true);
+  assert.equal(dir.handlePointerMove(3, padX + 90, padY), true);
+  assert.ok(dir.deck.state().targetX > formationSpawnX0() + 120);
+
+  // 3. On Game Over (and on Pause), 100% of screen touches pass through (`false`) and release any held deck pointer!
+  stubWorld.gameOver = true;
+  for (let y = 20; y < 844; y += 60) {
+    for (let x = 20; x < 390; x += 60) {
+      assert.equal(dir.handlePointerDown(10, x, y, true), false, `touch at (${x},${y}) passes through on Game Over`);
+    }
+  }
+  assert.equal(dir.deck.state().touching, false);
+
+  stubWorld.gameOver = false;
+  stubWorld.paused = true;
+  assert.equal(dir.handlePointerDown(11, padX, padY, true), false, 'pad touch passes through while Paused');
+
+  dir.dispose();
+  client.dispose();
+});
+
+function formationSpawnX0(): number {
+  return COOP_ARENA_WIDTH / 2 + (0 - 1.5) * 96;
+}

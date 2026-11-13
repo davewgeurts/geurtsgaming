@@ -244,6 +244,7 @@ export function clearStoredCoopToken(code: string, storage: StorageLike | null =
   if (!clean) return;
   try {
     storage?.removeItem(`${TOKEN_PREFIX}${clean}`);
+    storage?.removeItem(`gg_coop_host_state_${clean}`);
   } catch {
     /* ignore */
   }

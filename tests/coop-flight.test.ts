@@ -12,7 +12,7 @@ import {
   type CoopPickupItem,
   type CoopWorldAdapter,
 } from '../src/game/coop-flight';
-import { COOP_WORLD_H, COOP_WORLD_W } from '../src/game/coop-protocol';
+import { COOP_WORLD_H, COOP_WORLD_W, decodeGuestInput, decodeWorldSnapshot } from '../src/game/coop-protocol';
 import { COOP_SEAT_COLORS, type CoopErrorMessage } from '../src/game/coop-types';
 import { KINDS, makeEnemy, type Enemy } from '../src/game/enemies';
 import { makeProblem } from '../src/game/maths';
@@ -647,4 +647,299 @@ test('Mid-field Guest reconnect receives targeted (to: seat) asteroid-field resy
   resumedHostClient.dispose();
   g1Client.dispose();
   g2Client.dispose();
+});
+
+test('Gate 2 fixes: Host reload unfreezes Guest in <= 0.1s, 4-ship saturation drops 0 enemy bullets/rockets, missed pause self-heals, and squad limbo triggers Game Over', async () => {
+  const room = new CoopRoom('GATE22');
+  const bridge = createRoomWsBridge(room);
+  let clockMs = 10_000;
+  const now = () => clockMs;
+
+  const makeClient = (opts: Omit<CoopConnectOptions, 'code' | 'WebSocketConstructor' | 'wsBase'>) =>
+    new CoopClient({
+      ...opts,
+      code: 'GATE22',
+      wsBase: 'ws://localhost:84/relay',
+      WebSocketConstructor: bridge.WsCtor,
+      pingIntervalMs: 0,
+    });
+
+  const hostStore = new MemoryStorage();
+  const g1Store = new MemoryStorage();
+  let hostClient = makeClient({ role: 'host', callsign: 'NOVA-1', storage: hostStore });
+  const g1Client = makeClient({ role: 'guest', callsign: 'STAR-2', storage: g1Store });
+
+  hostClient.connect();
+  g1Client.connect();
+  await flushMicrotasks();
+  hostClient.startSquad();
+  await flushMicrotasks();
+
+  let hostWorld = new HeadlessArenaWorld(true);
+  const g1World = new HeadlessArenaWorld(true);
+  let hostDir = new CoopFlightDirector({ client: hostClient, storage: hostStore, now });
+  const g1Dir = new CoopFlightDirector({ client: g1Client, storage: g1Store, now });
+  hostDir.bindWorld(hostWorld);
+  g1Dir.bindWorld(g1World);
+
+  // --- 3.2: Saturated 4-ship fire (`rapid` + `wide` + `wingmates` + `pierce`) + 24 enemy bullets + 4 rockets ---
+  hostWorld.upgrades.add('rapid');
+  hostWorld.upgrades.add('wide');
+  hostWorld.upgrades.add('wingmates');
+  hostWorld.upgrades.add('pierce');
+  hostWorld.upgrades.add('rockets');
+  for (let i = 0; i < 24; i++) {
+    hostWorld.shots.push({
+      x: 100 + i * 20,
+      y: 260,
+      vx: 0,
+      vy: 180,
+      hostile: true,
+      dead: false,
+      color: '#ff4466',
+    });
+  }
+  for (let i = 0; i < 4; i++) {
+    hostWorld.rockets.push({ x: 200 + i * 60, y: 500, vx: 0, vy: -220, age: 0.1, dead: false });
+  }
+  // Also add 90 friendly bolts on Host to exceed SNAP_MAX_SHOTS (52) by > 2x
+  for (let i = 0; i < 90; i++) {
+    hostWorld.shots.push({
+      x: 300,
+      y: 700 - (i % 40) * 8,
+      vx: 0,
+      vy: -600,
+      hostile: false,
+      dead: false,
+      color: COOP_SEAT_COLORS[0],
+    });
+  }
+  const snapBytes = hostDir.broadcastSnapshotNow(hostWorld)!;
+  const decodedSnap = decodeWorldSnapshot(snapBytes)!;
+  assert.equal(
+    decodedSnap.shots.filter((s) => s.kind === 'enemy').length,
+    24,
+    '0 hostile enemy bullets dropped even with 90 friendly bolts active',
+  );
+  assert.equal(decodedSnap.shots.filter((s) => s.kind === 'rocket').length, 4, '0 rockets dropped');
+  await flushMicrotasks();
+  clockMs += 60;
+  g1Dir.step(1 / 60, 1 / 60, g1World, { ...idleCtrl, firing: true });
+  assert.equal(g1World.upgrades.has('pierce'), true, 'full 10-upgrade bitmask synced pierce to Guest');
+  assert.equal(g1World.upgrades.has('rockets'), true, 'full 10-upgrade bitmask synced rockets to Guest');
+  assert.equal(
+    g1World.shots.filter((s) => s.hostile).length,
+    24,
+    'Guest sees all 24 hostile bullets',
+  );
+  assert.ok(
+    g1World.shots.some((s) => !s.hostile && s.color === COOP_SEAT_COLORS[1]),
+    'Guest simulates own cannon bolts locally at 0ms muzzle lag',
+  );
+
+  // --- 3.3: Missed `host-paused: false` self-heals via snapshot even while Guest world is paused (no `step()` needed) ---
+  g1World.paused = true;
+  g1Dir.hostPaused = true;
+  hostWorld.paused = false;
+  hostDir.broadcastSnapshotNow(hostWorld);
+  await flushMicrotasks();
+  assert.equal(g1Dir.hostPaused, false, 'snapshot paused=false cleared director.hostPaused immediately');
+  assert.equal(g1World.paused, false, 'snapshot paused=false unpaused Guest world without waiting for update()');
+
+  // --- 4.2: Blast breaking 50+ asteroid rocks + late reconnect leaves 0 ghost rocks ---
+  hostWorld.wave = 3;
+  hostWorld.sets.plan([{ at: 0, kind: 'rocks' }]);
+  hostWorld.sets.advance(0, 0.1);
+  hostWorld.sets.run(0.1, 0.1, hostWorld.setEnv(), 0, false);
+  hostWorld.sets.run(ALERT_LEAD + 0.2, ALERT_LEAD + 0.2, hostWorld.setEnv(), 0, false);
+  hostWorld.sets.run(3.0, 3.0, hostWorld.setEnv(), 0, false);
+  hostWorld.sets.blast(hostWorld.setEnv());
+  for (const r of hostWorld.sets.field!.rocks.filter((rk) => !rk.dead).slice(0, 35)) {
+    hostWorld.sets.breakRock(r, hostWorld.setEnv());
+  }
+  assert.ok(hostWorld.sets.brokenRockIds.length > 60, 'over 60 rocks broken on Host');
+  hostDir.broadcastSnapshotNow(hostWorld);
+  await flushMicrotasks();
+  clockMs += 60;
+  g1Dir.step(1 / 60, 1 / 60, g1World, idleCtrl);
+  const hostAliveRockIds = new Set(hostWorld.sets.field!.rocks.filter((r) => !r.dead).map((r) => r.id));
+  const guestGhostRocks = g1World.sets.field!.rocks.filter((r) => !r.dead && !hostAliveRockIds.has(r.id));
+  assert.equal(guestGhostRocks.length, 0, '0 ghost rocks on Guest after 60+ broken rocks');
+
+  // --- 3.1: Host page reload after >3 minutes of play (`snapTick > 3200`) unfreezes Guest in <= 0.1s ---
+  hostWorld.enemies = [makeEnemy('dart', 140, 320)];
+  for (let f = 0; f < 60 * 185; f++) {
+    clockMs += 16.67;
+    hostDir.step(1 / 60, 1 / 60, hostWorld, idleCtrl);
+  }
+  await flushMicrotasks();
+  clockMs += 16.67;
+  g1Dir.step(1 / 60, 1 / 60, g1World, idleCtrl);
+  assert.equal(Math.round(g1World.enemies[0]!.x), 140);
+
+  // Host reloads browser tab: socket drops (`hostReconnecting = true`), then new Host `CoopClient` + `CoopFlightDirector` starts at tick 1
+  hostDir.dispose();
+  hostClient.dispose();
+  await flushMicrotasks();
+  assert.equal(g1Dir.hostReconnecting, true);
+
+  clockMs += 2_000;
+  hostClient = makeClient({ role: 'host', callsign: 'NOVA-1', storage: hostStore });
+  hostWorld = new HeadlessArenaWorld(true);
+  hostWorld.enemies = [makeEnemy('hex', 610, 340)];
+  hostDir = new CoopFlightDirector({ client: hostClient, storage: hostStore, now });
+  hostDir.bindWorld(hostWorld);
+  hostClient.connect();
+  await flushMicrotasks();
+
+  for (let f = 0; f < 6; f++) {
+    clockMs += 16.67;
+    hostDir.step(1 / 60, 1 / 60, hostWorld, idleCtrl);
+    await flushMicrotasks();
+    g1Dir.step(1 / 60, 1 / 60, g1World, idleCtrl);
+  }
+  assert.equal(g1Dir.hostReconnecting, false);
+  assert.equal(g1World.enemies[0]?.kind, 'hex', 'Guest switched to reloaded Host world within 0.1s (6 frames)');
+  assert.equal(Math.round(g1World.enemies[0]!.x), 610);
+
+  // --- 3.4: Squad limbo: Host pilot knocked down (`alive = false, respawnSec = 6`), then Guest leaves -> immediate Game Over ---
+  hostDir.pilots[0].alive = false;
+  hostDir.pilots[0].respawnSec = COOP_WINGMAN_RESPAWN_SEC;
+  assert.equal(hostWorld.gameOver, false);
+  g1Client.leave();
+  await flushMicrotasks();
+  assert.equal(
+    hostWorld.gameOver,
+    true,
+    'When the last living pilot leaves while teammates are rebooting, squad triggers Game Over immediately',
+  );
+
+  hostDir.dispose();
+  g1Dir.dispose();
+  hostClient.dispose();
+  g1Client.dispose();
+});
+
+test('Guest own-ship prediction has 0.0px lag/drift under 60±40ms jitter, and Sum Boss pod taps move ship 0.0px on Host', () => {
+  // Deterministic PRNG for `60 ± 40 ms` network jitter
+  let seed = 987654321;
+  const nextRand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
+
+  let clockMs = 1_000;
+  const now = () => clockMs;
+  const wireQueue: Array<{ at: number; toHost: boolean; bytes: Uint8Array }> = [];
+
+  const hostClient = new CoopClient({ code: 'JITR77', role: 'host', callsign: 'NOVA-1', storage: null });
+  const guestClient = new CoopClient({ code: 'JITR77', role: 'guest', callsign: 'STAR-2', storage: null });
+  const roster = [
+    { seat: 0 as const, callsign: 'NOVA-1', ready: true, isHost: true, connected: true },
+    { seat: 1 as const, callsign: 'STAR-2', ready: true, isHost: false, connected: true },
+  ];
+  Object.assign(hostClient, { seat: 0 });
+  Object.assign(guestClient, { seat: 1 });
+
+  const binarySinks: {
+    host: ((b: Uint8Array) => void) | null;
+    guest: ((b: Uint8Array) => void) | null;
+  } = { host: null, guest: null };
+  const origHostSub = hostClient.subscribe.bind(hostClient);
+  const origGuestSub = guestClient.subscribe.bind(guestClient);
+  hostClient.subscribe = (h) => {
+    binarySinks.host = h.onBinary ?? null;
+    return origHostSub(h);
+  };
+  guestClient.subscribe = (h) => {
+    binarySinks.guest = h.onBinary ?? null;
+    return origGuestSub(h);
+  };
+  hostClient.sendBinary = (b) => {
+    wireQueue.push({ at: clockMs + 20 + nextRand() * 80, toHost: false, bytes: new Uint8Array(b) });
+    return true;
+  };
+  guestClient.sendBinary = (b) => {
+    const copy = new Uint8Array(b);
+    copy[1] = 1; // relay stamps authoritative seat
+    wireQueue.push({ at: clockMs + 20 + nextRand() * 80, toHost: true, bytes: copy });
+    return true;
+  };
+
+  const hostWorld = new HeadlessArenaWorld(true);
+  const guestWorld = new HeadlessArenaWorld(true);
+  const hostDir = new CoopFlightDirector({ client: hostClient, initialSeats: roster, storage: null, now });
+  const guestDir = new CoopFlightDirector({ client: guestClient, initialSeats: roster, storage: null, now });
+  hostDir.bindWorld(hostWorld);
+  guestDir.bindWorld(guestWorld);
+
+  const dt = 1 / 60;
+  let idealX = formationSpawnForSeat(1).x;
+  let maxLagPx = 0;
+  let maxSettleDriftPx = 0;
+  let releaseX: number | null = null;
+  let prevAcross = 0;
+
+  for (let f = 0; f < 360; f++) {
+    clockMs += dt * 1000;
+    wireQueue.sort((a, b) => a.at - b.at);
+    while (wireQueue.length > 0 && wireQueue[0]!.at <= clockMs) {
+      const pkt = wireQueue.shift()!;
+      if (pkt.toHost) binarySinks.host?.(pkt.bytes);
+      else binarySinks.guest?.(pkt.bytes);
+    }
+
+    const tSec = f * dt;
+    const across = tSec % 1.0 < 0.7 ? (Math.floor(tSec) % 2 === 0 ? 1 : -1) : 0;
+    guestDir.step(dt, dt, guestWorld, { ...idleCtrl, across });
+    hostDir.step(dt, dt, hostWorld, idleCtrl);
+
+    idealX = Math.min(COOP_WORLD_W - 22, Math.max(22, idealX + across * 380 * dt));
+    maxLagPx = Math.max(maxLagPx, Math.abs(guestDir.pilots[1].x - idealX));
+
+    if (prevAcross !== 0 && across === 0) releaseX = guestDir.pilots[1].x;
+    if (releaseX !== null && across === 0) {
+      maxSettleDriftPx = Math.max(maxSettleDriftPx, Math.abs(guestDir.pilots[1].x - releaseX));
+    }
+    if (across !== 0) releaseX = null;
+    prevAcross = across;
+  }
+
+  assert.equal(maxLagPx, 0, 'Guest own-ship has 0.0px lag vs pure local prediction under 60±40ms jitter');
+  assert.equal(maxSettleDriftPx, 0, 'Guest own-ship has 0.0px drift after releasing steering keys');
+
+  // --- 3.8: 10 Sum Boss pod taps in a row encode `hasPointer: false` and move Guest ship 0.0px on Host ---
+  const sumBoss = createBoss(2, hostWorld.bossEnvObj);
+  sumBoss.state = 'fight';
+  sumBoss.x = 384;
+  sumBoss.y = 200;
+  hostWorld.boss = sumBoss;
+  guestWorld.boss = sumBoss;
+
+  const restingHostX = hostDir.pilots[1].x;
+  const restingHostY = hostDir.pilots[1].y;
+  wireQueue.length = 0;
+
+  for (let k = 0; k < 10; k++) {
+    guestDir.queueArenaTap(384, 307, guestWorld);
+    guestDir.step(dt, dt, guestWorld, idleCtrl);
+    const tapPkt = wireQueue.pop()!;
+    const decoded = decodeGuestInput(tapPkt.bytes)!;
+    assert.equal(decoded.tap, true);
+    assert.equal(decoded.hasPointer, false, 'Sum Boss tap frame never sets hasPointer=true');
+    binarySinks.host?.(tapPkt.bytes);
+    for (let i = 0; i < 3; i++) {
+      clockMs += 16.67;
+      hostDir.step(dt, dt, hostWorld, idleCtrl);
+    }
+  }
+
+  assert.equal(hostDir.pilots[1].x, restingHostX, 'Host-side Guest ship X moved 0.0px across 10 pod taps');
+  assert.equal(hostDir.pilots[1].y, restingHostY, 'Host-side Guest ship Y moved 0.0px across 10 pod taps');
+  assert.equal(hostWorld.bossTaps.length, 10, 'All 10 pod taps reached strikeBoss on Host');
+
+  hostDir.dispose();
+  guestDir.dispose();
+  hostClient.dispose();
+  guestClient.dispose();
 });

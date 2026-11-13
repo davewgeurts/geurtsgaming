@@ -22,11 +22,15 @@ import {
   COOP_WORLD_W,
   SnapshotInterpolator,
   decodeGuestInput,
+  decodeUpgradesMask,
   decodeWorldSnapshot,
   encodeGuestInput,
+  encodeUpgradesMask,
   encodeWorldSnapshot,
   formatBossMathQuestion,
+  packBrokenRockWords,
   parseBossMathQuestion,
+  unpackBrokenRockWords,
   type CoopSnapBoss,
   type CoopSnapEnemy,
   type CoopSnapField,
@@ -226,14 +230,23 @@ export class CoopFlightDirector {
   private readonly unsubscribe: () => void;
 
   private readonly wasSeatConnected: [boolean, boolean, boolean, boolean] = [false, false, false, false];
+  private readonly hostSessionId: number;
   private activeWorld: CoopWorldAdapter | null = null;
   private elapsedSec = 0;
+  private hostSimElapsedMs = 0;
+  private sentInitialPause = false;
   private snapAccumSec = 0;
   private inputAccumSec = 0;
   private snapTick = 0;
   private inputSeq = 0;
   private fxSeq = 0;
   private readonly recentFx: StoredFxEntry[] = [];
+  private readonly firedSinceLastSnap: [boolean, boolean, boolean, boolean] = [false, false, false, false];
+  private readonly guardCoolBySeat: [number, number, number, number] = [0, 0, 0, 0];
+  private readonly guestLocalBolts: Shot[] = [];
+  private readonly predHistory: Array<{ seq: number; x: number; y: number; valid: boolean }>;
+  private hasSentAnyInput = false;
+  private wasAliveOnWire = true;
   private guestPendingTap: { x: number; y: number } | null = null;
   private testControlOverride: (CoopLocalControlInput & { tap?: { x: number; y: number } | null }) | null = null;
   private guestTankerCache: Tanker | null = null;
@@ -244,6 +257,8 @@ export class CoopFlightDirector {
     this.nowFn = opts.now ?? (() => performance.now());
     this.onClosed = opts.onClosed;
     this.onStatus = opts.onStatus;
+    this.hostSessionId = 1 + Math.floor(Math.random() * 255);
+    this.predHistory = Array.from({ length: 256 }, () => ({ seq: 0, x: 0, y: 0, valid: false }));
 
     this.layout = computeCoopViewportLayout(COOP_WORLD_W, COOP_WORLD_H, false);
     const myInitialPos =
@@ -299,6 +314,7 @@ export class CoopFlightDirector {
       onHostResumed: () => {
         this.hostReconnecting = false;
         this.hostReconnectDeadlineMs = 0;
+        this.interpolator.reset();
         this.onStatus?.('Host reconnected. Resuming flight.');
       },
       onHostPaused: (paused: boolean) => {
@@ -325,14 +341,20 @@ export class CoopFlightDirector {
     return this.client.seat;
   }
 
+  bindWorld(world: CoopWorldAdapter): void {
+    this.activeWorld = world;
+  }
+
   dispose(): void {
     this.unsubscribe();
     this.deck.reset();
+    this.guestLocalBolts.length = 0;
     this.activeWorld = null;
   }
 
   /** Update viewport layout (`arenaRect` + portrait-phone Bottom 38% `deckRect`) on window resize. */
   setViewport(viewW: number, viewH: number, insets?: Partial<SafeInsets>, coarsePointer = true): CoopViewportLayout {
+    const prevUseDeck = this.layout.useThumbDeck;
     const fullInsets: SafeInsets = {
       top: insets?.top ?? 0,
       right: insets?.right ?? 0,
@@ -340,6 +362,9 @@ export class CoopFlightDirector {
       left: insets?.left ?? 0,
     };
     this.layout = computeCoopViewportLayout(viewW, viewH, coarsePointer, fullInsets);
+    if (!this.layout.useThumbDeck || prevUseDeck !== this.layout.useThumbDeck) {
+      this.deck.releasePointer();
+    }
     return this.layout;
   }
 
@@ -355,9 +380,17 @@ export class CoopFlightDirector {
   /** Route pointer events through `CoopThumbDeck` when on a portrait phone (`layout.useThumbDeck`). */
   handlePointerDown(pointerId: number, x: number, y: number, touch: boolean): boolean {
     if (!touch || !this.layout.useThumbDeck || this.client.seat < 0) return false;
+    const w = this.activeWorld;
+    if (w && (w.gameOver || w.paused)) {
+      this.deck.releasePointer();
+      return false;
+    }
+    const allowArenaTap = Boolean(
+      w?.boss && w.boss.kind === 'sum' && w.boss.state === 'fight' && w.boss.pods.length > 0,
+    );
     const myPilot = this.pilots[this.client.seat as CoopSeatIndex];
     this.deck.syncTarget(myPilot.x, myPilot.y);
-    return this.deck.onPointerDown(this.layout, pointerId, x, y);
+    return this.deck.onPointerDown(this.layout, pointerId, x, y, allowArenaTap);
   }
 
   handlePointerMove(pointerId: number, x: number, y: number): boolean {
@@ -366,8 +399,11 @@ export class CoopFlightDirector {
   }
 
   handlePointerUp(pointerId: number): boolean {
-    if (!this.layout.useThumbDeck) return false;
     return this.deck.onPointerUp(pointerId);
+  }
+
+  releasePointers(): void {
+    this.deck.releasePointer();
   }
 
   /** Queue an arena tap (e.g. clicking/tapping a Sum Boss pod on Guest or Host). */
@@ -430,6 +466,12 @@ export class CoopFlightDirector {
 
   /** Reset all present pilots to formation & full hull when the Host starts a fresh squad run. */
   resetSquadForNewRun(): void {
+    this.guestLocalBolts.length = 0;
+    this.invalidatePredHistory();
+    this.hasSentAnyInput = false;
+    this.wasAliveOnWire = true;
+    this.guardCoolBySeat.fill(0);
+    this.firedSinceLastSnap.fill(false);
     for (const p of this.pilots) {
       if (!p.present) continue;
       const pos = formationSpawnForSeat(p.seat);
@@ -509,6 +551,7 @@ export class CoopFlightDirector {
       front: front === null ? null : Math.round(front),
       alert: alert === null ? null : Math.round(alert * 100) / 100,
       values: brokenIds.slice(-16),
+      bitmap: packBrokenRockWords(brokenIds),
     });
   }
 
@@ -608,6 +651,23 @@ export class CoopFlightDirector {
           world.spark(s.x, s.y, NEON.cyan);
           this.recordHostFx('spark', s.x, s.y, NEON.cyan);
           world.play('clang');
+        }
+        if (this.guardCoolBySeat[p.seat]! <= 0) {
+          const rammed = world.enemies.find(
+            (e) => !e.dead && Math.hypot(e.x - gx, e.y - gy) < (KINDS[e.kind].radius + 8) * scale,
+          );
+          if (rammed) {
+            this.guardCoolBySeat[p.seat] = 0.3;
+            rammed.hp -= 2;
+            rammed.flash = 0.1;
+            if (rammed.hp <= 0) {
+              world.destroyEnemy(rammed);
+              this.recordHostFx('enemy-burst', rammed.x, rammed.y, KINDS[rammed.kind].color, { enemyKind: rammed.kind });
+            } else {
+              world.play('hit');
+              this.recordHostFx('spark', gx, gy, NEON.cyan);
+            }
+          }
         }
       }
     }
@@ -755,7 +815,7 @@ export class CoopFlightDirector {
           const ghostAlpha = 0.25 + 0.12 * Math.sin(time * 6);
           ink(p.color, ghostAlpha, 1.2, () => {
             trace(ctx, SHIP, p.x, p.y, shipScale * 0.85, 0);
-            traceText(ctx, `REBOOT ${Math.ceil(p.respawnSec)}S`, p.x, p.y + 22 * scale, 7, 'center');
+            traceText(ctx, `REBOOT ${Math.ceil(p.respawnSec)} SEC`, p.x, p.y + 22 * scale, 7, 'center');
           }, false);
         }
         continue;
@@ -837,7 +897,7 @@ export class CoopFlightDirector {
         const status = !p.connected
           ? 'SIGNAL LOST'
           : !p.alive
-            ? `REBOOT ${Math.ceil(p.respawnSec)}S`
+            ? `REBOOT ${Math.ceil(p.respawnSec)} SEC`
             : `HULL ${p.hull}/${p.maxHull}`;
         ink(p.color, p.connected ? 0.92 : 0.45, 1.3, () => {
           traceText(ctx, `P${p.seat + 1} ${p.callsign}`, rx, ry, 7.5, 'left');
@@ -845,9 +905,9 @@ export class CoopFlightDirector {
         }, false);
         ry += 30;
       }
-    } else if (activePilots.length > 1) {
+    } else if (!useThumbDeck && activePilots.length > 1) {
       const slotW = Math.min(96, (arenaRect.w - 16) / activePilots.length);
-      const topY = arenaRect.y + 6;
+      const topY = arenaRect.y + 68;
       activePilots.forEach((p, idx) => {
         const cx = arenaRect.x + 8 + slotW * (idx + 0.5);
         const tag = !p.connected ? `P${p.seat + 1} WAIT` : !p.alive ? `P${p.seat + 1} OUT` : `P${p.seat + 1} ${p.hull}HP`;
@@ -860,6 +920,18 @@ export class CoopFlightDirector {
     // 3. Portrait-phone Bottom 38% Thumb Steering Deck
     if (useThumbDeck && this.client.seat >= 0) {
       const me = this.pilots[this.client.seat as CoopSeatIndex];
+      const wingmen = activePilots
+        .filter((p) => p.seat !== me.seat)
+        .map((p) => ({
+          seat: p.seat,
+          callsign: p.callsign,
+          color: p.color,
+          hull: p.hull,
+          maxHull: p.maxHull,
+          alive: p.alive,
+          connected: p.connected,
+          respawnSec: p.respawnSec,
+        }));
       this.deck.render(ctx, this.layout, {
         seat: me.seat,
         callsign: me.callsign,
@@ -867,6 +939,7 @@ export class CoopFlightDirector {
         maxHull: me.maxHull,
         alive: me.alive,
         respawnSec: me.respawnSec,
+        wingmen,
       });
     }
 
@@ -881,7 +954,7 @@ export class CoopFlightDirector {
       ink(NEON.yellow, 0.95, 1.6, () => {
         ctx.rect(bx - bw / 2, by - 28, bw, 58);
         traceText(ctx, 'HOST RECONNECTING', bx, by - 14, 10, 'center');
-        traceText(ctx, `HOLDING FORMATION - ${secLeft}S`, bx, by + 6, 7.5, 'center');
+        traceText(ctx, `HOLDING FORMATION - ${secLeft} SEC`, bx, by + 6, 7.5, 'center');
       });
     } else if (!this.isHost && this.hostPaused) {
       const bx = arenaRect.x + arenaRect.w / 2;
@@ -933,6 +1006,25 @@ export class CoopFlightDirector {
     }
   }
 
+  private invalidatePredHistory(): void {
+    for (const entry of this.predHistory) {
+      entry.valid = false;
+    }
+  }
+
+  private checkAllConnectedPilotsDown(world: CoopWorldAdapter): boolean {
+    if (!this.isHost || world.gameOver) return false;
+    const anyPresent = this.pilots.some((p) => p.present);
+    if (!anyPresent) return false;
+    const anyConnectedAlive = this.pilots.some((p) => p.present && p.connected && p.alive);
+    if (!anyConnectedAlive) {
+      this.clearSavedHostProgress();
+      world.triggerSquadGameOver();
+      return true;
+    }
+    return false;
+  }
+
   private handleLobbyUpdate(lobby: CoopLobbyState): void {
     const reconnectedGuests: CoopSeatIndex[] = [];
     for (const s of lobby.seats) {
@@ -951,8 +1043,13 @@ export class CoopFlightDirector {
 
     this.applySeatRoster(lobby.seats, false);
 
-    // Round 9 #3: Targeted reconnect resync (`to: seat`) so a rejoining Guest immediately regains
-    // wave context, seeded asteroid belt + already-broken rock IDs, and Host pause state.
+    // 3.4: If the last living pilot disconnected or left while squadmates were rebooting, end the run immediately
+    if (this.isHost && this.activeWorld && this.checkAllConnectedPilotsDown(this.activeWorld)) {
+      this.broadcastSnapshotNow(this.activeWorld);
+    }
+
+    // Round 9 #3 + Round 12 3.3: Targeted reconnect resync (`to: seat`) so a rejoining Guest immediately regains
+    // wave context, seeded asteroid belt + full broken-rock bitmap, and authoritative Host pause state.
     if (this.isHost && this.activeWorld && reconnectedGuests.length > 0) {
       const w = this.activeWorld;
       for (const seat of reconnectedGuests) {
@@ -972,12 +1069,11 @@ export class CoopFlightDirector {
             front: w.sets.field ? Math.round(w.sets.field.front) : null,
             alert: w.sets.alert === null ? null : Math.round(w.sets.alert * 100) / 100,
             values: w.sets.brokenRockIds.slice(-16),
+            bitmap: packBrokenRockWords(w.sets.brokenRockIds),
           });
         }
       }
-      if (w.paused) {
-        this.client.sendHostPaused(true);
-      }
+      this.client.sendHostPaused(Boolean(w.paused));
       this.broadcastSnapshotNow(w);
     }
   }
@@ -988,24 +1084,33 @@ export class CoopFlightDirector {
       if (!input) return;
       const pilot = this.pilots[input.seat];
       if (!pilot.present || pilot.seat === this.client.seat) return;
-      pilot.latestInput = input;
       pilot.ackSeq = input.seq;
       if (input.tap) {
         pilot.pendingTap = {
           x: clamp(input.targetX, 0, COOP_WORLD_W),
           y: clamp(input.targetY, 0, COOP_WORLD_H),
         };
+        if (pilot.latestInput) {
+          pilot.latestInput = { ...pilot.latestInput, firing: input.firing, seq: input.seq };
+        }
+        return;
       }
+      pilot.latestInput = input;
       return;
     }
 
     const snap = decodeWorldSnapshot(bytes);
     if (!snap) return;
+    const accepted = this.interpolator.push(snap, this.nowFn());
+    if (!accepted) return;
     if (this.hostReconnecting) {
       this.hostReconnecting = false;
       this.hostReconnectDeadlineMs = 0;
     }
-    this.interpolator.push(snap, this.nowFn());
+    if (snap.paused !== this.hostPaused || (this.activeWorld && snap.paused !== this.activeWorld.paused)) {
+      this.hostPaused = snap.paused;
+      this.activeWorld?.setHostPausedFromWire?.(snap.paused);
+    }
   }
 
   private handleHostEvent(msg: CoopEventMessage): void {
@@ -1022,9 +1127,11 @@ export class CoopFlightDirector {
       if (typeof msg.score === 'number') w.score = msg.score;
       if (typeof msg.freed === 'number') w.freed = msg.freed;
     } else if (msg.kind === 'asteroid-field' && typeof msg.seed === 'number') {
-      const brokenIds = Array.isArray(msg.values)
-        ? msg.values.filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
-        : [];
+      const brokenIds = Array.isArray(msg.bitmap)
+        ? unpackBrokenRockWords(msg.bitmap)
+        : Array.isArray(msg.values)
+          ? msg.values.filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+          : [];
       const front = msg.front === undefined ? null : msg.front;
       const alert = msg.alert === undefined ? null : msg.alert;
       if (front === null && alert !== null && alert <= 0.15) {
@@ -1043,6 +1150,17 @@ export class CoopFlightDirector {
     world: CoopWorldAdapter,
     localCtrl: CoopLocalControlInput,
   ): void {
+    this.hostSimElapsedMs += realDt * 1000;
+    if (!this.sentInitialPause) {
+      this.sentInitialPause = true;
+      this.client.sendHostPaused(Boolean(world.paused));
+    }
+
+    if (!world.gameOver && this.checkAllConnectedPilotsDown(world)) {
+      this.broadcastSnapshotNow(world);
+      return;
+    }
+
     const anyOtherLiving = this.pilots.some((p) => p.present && p.connected && p.alive);
     const tankerHooked = Boolean(world.sets.tanker?.hooked);
 
@@ -1071,6 +1189,7 @@ export class CoopFlightDirector {
 
       p.invulnerable = Math.max(0, p.invulnerable - simDt);
       p.cooldown = Math.max(0, p.cooldown - simDt);
+      this.guardCoolBySeat[p.seat] = Math.max(0, this.guardCoolBySeat[p.seat]! - simDt);
       if (world.upgrades.has('shield') && !p.shieldReady) {
         p.shieldRecharge -= simDt;
         if (p.shieldRecharge <= 0) {
@@ -1083,37 +1202,53 @@ export class CoopFlightDirector {
 
       const isHookedPilot = tankerHooked && this.hookedSeat === p.seat;
 
+      if (p.seat !== this.client.seat && p.connected && p.pendingTap) {
+        const tap = p.pendingTap;
+        p.pendingTap = null;
+        world.strikeBoss(tap.x, tap.y, true, true);
+      }
+
       if (p.seat === this.client.seat) {
         this.movePilotWithLocalControl(p, simDt, localCtrl);
         const deckState = this.deck.state();
-        const wantsFire = (this.layout.useThumbDeck ? deckState.firing || localCtrl.firing : localCtrl.firing) && !world.parked;
+        const keyFiring = localCtrl.firing && !localCtrl.touching;
+        const wantsFire = (this.layout.useThumbDeck ? deckState.firing || keyFiring : localCtrl.firing) && !world.parked;
         p.firing = wantsFire && !isHookedPilot;
       } else if (p.connected && p.latestInput) {
         const inp = p.latestInput;
-        let dx = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
-        let dy = (inp.down ? 1 : 0) - (inp.up ? 1 : 0);
-        if (dx && dy) {
-          dx *= Math.SQRT1_2;
-          dy *= Math.SQRT1_2;
-        }
-        p.x += dx * 380 * simDt;
-        p.y += dy * 380 * simDt;
-        if (inp.hasPointer) {
-          const tx = clampArenaShipX(inp.targetX) - p.x;
-          const ty = clampArenaShipY(inp.targetY) - p.y;
-          const dist = Math.hypot(tx, ty);
-          if (dist > 0.5) {
-            const step = Math.min(dist, 760 * simDt);
-            p.x += (tx / dist) * step;
-            p.y += (ty / dist) * step;
+        if (!inp.tap) {
+          let dx = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+          let dy = (inp.down ? 1 : 0) - (inp.up ? 1 : 0);
+          if (dx && dy) {
+            dx *= Math.SQRT1_2;
+            dy *= Math.SQRT1_2;
           }
-        }
-        p.x = clampArenaShipX(p.x);
-        p.y = clampArenaShipY(p.y);
-        if (p.pendingTap) {
-          const tap = p.pendingTap;
-          p.pendingTap = null;
-          world.strikeBoss(tap.x, tap.y, true, true);
+          if (inp.hasPointer) {
+            p.x += dx * 380 * simDt;
+            p.y += dy * 380 * simDt;
+            const tx = clampArenaShipX(inp.targetX) - p.x;
+            const ty = clampArenaShipY(inp.targetY) - p.y;
+            const dist = Math.hypot(tx, ty);
+            if (dist > 0.5) {
+              const step = Math.min(dist, 760 * simDt);
+              p.x += (tx / dist) * step;
+              p.y += (ty / dist) * step;
+            }
+          } else if (dx || dy) {
+            p.x += dx * 380 * simDt;
+            p.y += dy * 380 * simDt;
+          } else {
+            const tx = clampArenaShipX(inp.targetX) - p.x;
+            const ty = clampArenaShipY(inp.targetY) - p.y;
+            const dist = Math.hypot(tx, ty);
+            if (dist > 0.25) {
+              const step = Math.min(dist, 380 * simDt);
+              p.x += (tx / dist) * step;
+              p.y += (ty / dist) * step;
+            }
+          }
+          p.x = clampArenaShipX(p.x);
+          p.y = clampArenaShipY(p.y);
         }
         p.firing = inp.firing && !world.parked && !isHookedPilot;
       } else {
@@ -1130,6 +1265,7 @@ export class CoopFlightDirector {
       if (p.firing && p.cooldown <= 0 && !world.gameOver) {
         p.cooldown = world.upgrades.has('rapid') ? 0.11 : 0.17;
         p.volley += 1;
+        this.firedSinceLastSnap[p.seat] = true;
         if (p.seat === this.client.seat) world.play('shot');
         fireVolley(
           world.shots,
@@ -1162,7 +1298,7 @@ export class CoopFlightDirector {
     const mySeat = this.client.seat >= 0 ? (this.client.seat as CoopSeatIndex) : 0;
     const me = this.pilots[mySeat];
 
-    // 1. 0ms predicted local movement + cannon audio feedback
+    // 1. 0ms predicted local movement + immediate local cosmetic bolts + cannon audio feedback
     if (me.present && me.alive && !this.hostReconnecting && !this.hostPaused && !world.gameOver) {
       me.cooldown = Math.max(0, me.cooldown - simDt);
       this.movePilotWithLocalControl(me, simDt, localCtrl);
@@ -1172,11 +1308,25 @@ export class CoopFlightDirector {
 
       const isHooked = Boolean(world.sets.tanker?.hooked) && this.hookedSeat === mySeat;
       const deckState = this.deck.state();
-      const wantsFire = (this.layout.useThumbDeck ? deckState.firing || localCtrl.firing : localCtrl.firing) && !world.parked;
+      const keyFiring = localCtrl.firing && !localCtrl.touching;
+      const wantsFire = (this.layout.useThumbDeck ? deckState.firing || keyFiring : localCtrl.firing) && !world.parked;
       me.firing = wantsFire && !isHooked;
-      if (me.firing && me.cooldown <= 0) {
+      if (me.firing && me.cooldown <= 0 && Number.isFinite(me.x) && Number.isFinite(me.y)) {
         me.cooldown = world.upgrades.has('rapid') ? 0.11 : 0.17;
+        me.volley += 1;
         world.play('shot');
+        fireVolley(
+          this.guestLocalBolts,
+          me.x,
+          me.y,
+          clamp(world.energy, 0, 1),
+          me.volley,
+          1,
+          1,
+          Boolean(world.boss),
+          world.upgrades,
+          me.color,
+        );
       }
     } else {
       me.firing = false;
@@ -1189,9 +1339,21 @@ export class CoopFlightDirector {
       this.sendGuestInputFrame(me, localCtrl);
     }
 
-    // 3. Sample 60fps Host-tick-timeline interpolator to reconstruct world & reconcile local ship
+    // 3. Sample 60fps Host-timeline interpolator to reconstruct world & reconcile local ship
     const sample = this.interpolator.sample(this.nowFn());
-    if (!sample) return;
+    const latestSnap = this.interpolator.latest();
+    if (!sample) {
+      this.stepGuestLocalBolts(simDt, world);
+      world.shots = [...this.guestLocalBolts];
+      return;
+    }
+
+    if (latestSnap && typeof latestSnap.upgradesMask === 'number') {
+      world.upgrades.clear();
+      for (const id of decodeUpgradesMask(latestSnap.upgradesMask)) {
+        world.upgrades.add(id);
+      }
+    }
 
     const prevWave = world.wave;
     world.wave = sample.wave;
@@ -1206,8 +1368,13 @@ export class CoopFlightDirector {
     if (sample.gameOver && !world.gameOver) {
       world.triggerSquadGameOver();
     } else if (!sample.gameOver && world.gameOver) {
+      this.guestLocalBolts.length = 0;
+      this.invalidatePredHistory();
+      this.hasSentAnyInput = false;
       world.resumeSquadNewRun?.();
     }
+
+    const authMe = latestSnap?.ships.find((sh) => sh.seat === mySeat) ?? null;
 
     for (const s of sample.ships) {
       const p = this.pilots[s.seat];
@@ -1221,28 +1388,86 @@ export class CoopFlightDirector {
       p.shieldReady = s.shielded;
       p.orbit = s.orbit;
       p.ackSeq = s.ackSeq;
-      if (s.wing) world.upgrades.add('wingmates');
-      if (s.orbitUpgrade) world.upgrades.add('guardian');
-      if (s.spread) world.upgrades.add('wide');
+      if (latestSnap?.upgradesMask === undefined) {
+        if (s.wing) world.upgrades.add('wingmates');
+        if (s.orbitUpgrade) world.upgrades.add('guardian');
+        if (s.spread) world.upgrades.add('wide');
+      }
 
       if (s.seat === mySeat) {
-        const err = Math.hypot(s.x - p.x, s.y - p.y);
-        if (!s.alive || err > 180) {
-          p.x = s.x;
-          p.y = s.y;
-          p.lastX = s.x;
+        const wireMe = authMe ?? s;
+        const authX = clampArenaShipX(wireMe.x);
+        const authY = clampArenaShipY(wireMe.y);
+        const justRespawned = !this.wasAliveOnWire && wireMe.alive;
+        this.wasAliveOnWire = wireMe.alive;
+
+        if (!wireMe.alive || justRespawned || !this.hasSentAnyInput) {
+          p.x = authX;
+          p.y = authY;
+          p.lastX = authX;
+          this.invalidatePredHistory();
           this.deck.syncTarget(p.x, p.y);
-        } else if (err > 1.5) {
-          const blend = err > 48 ? 0.18 : 0.06;
-          p.x += (s.x - p.x) * blend;
-          p.y += (s.y - p.y) * blend;
-          this.deck.syncTarget(p.x, p.y);
+        } else {
+          const hist = this.predHistory[wireMe.ackSeq & 0xff];
+          if (hist && hist.valid && hist.seq === wireMe.ackSeq) {
+            const dxErr = authX - hist.x;
+            const dyErr = authY - hist.y;
+            const ackErr = Math.hypot(dxErr, dyErr);
+            if (ackErr > 240) {
+              p.x = authX;
+              p.y = authY;
+              p.lastX = authX;
+              this.invalidatePredHistory();
+              this.deck.syncTarget(p.x, p.y);
+            } else if (ackErr > 120) {
+              const stepX = dxErr * 0.15;
+              const stepY = dyErr * 0.15;
+              p.x = clampArenaShipX(p.x + stepX);
+              p.y = clampArenaShipY(p.y + stepY);
+              for (const entry of this.predHistory) {
+                if (entry.valid) {
+                  entry.x = clampArenaShipX(entry.x + stepX);
+                  entry.y = clampArenaShipY(entry.y + stepY);
+                }
+              }
+              this.deck.syncTarget(p.x, p.y);
+            }
+          }
         }
       } else {
         p.x = s.x;
         p.y = s.y;
         p.lean = s.lean;
         p.firing = s.firing;
+        if (
+          p.connected &&
+          p.alive &&
+          !this.hostReconnecting &&
+          !this.hostPaused &&
+          !world.gameOver &&
+          Number.isFinite(p.x) &&
+          Number.isFinite(p.y)
+        ) {
+          p.cooldown = Math.max(0, p.cooldown - simDt);
+          if (p.firing && p.cooldown <= 0) {
+            p.cooldown = world.upgrades.has('rapid') ? 0.11 : 0.17;
+            p.volley += 1;
+            fireVolley(
+              this.guestLocalBolts,
+              p.x,
+              p.y,
+              clamp(world.energy, 0, 1),
+              p.volley,
+              1,
+              1,
+              Boolean(world.boss),
+              world.upgrades,
+              p.color,
+            );
+          }
+        } else {
+          p.firing = false;
+        }
       }
     }
 
@@ -1284,32 +1509,7 @@ export class CoopFlightDirector {
       world.sets.near.length = 0;
     }
 
-    // Reconstruct shots, rockets, and beams
-    const nextShots: Shot[] = [];
-    const nextRockets: Rocket[] = [];
-    const nextBeams: Beam[] = [];
-    for (const sh of sample.shots) {
-      if (sh.kind === 'rocket') {
-        nextRockets.push({ x: sh.x, y: sh.y, vx: sh.vx, vy: sh.vy, age: 0.2, dead: false });
-      } else if (sh.kind === 'beam') {
-        nextBeams.push({ x: sh.x, y: sh.y, age: (1 - sh.beamLife) * 0.22 });
-      } else {
-        nextShots.push({
-          x: sh.x,
-          y: sh.y,
-          vx: sh.vx,
-          vy: sh.vy,
-          hostile: sh.kind === 'enemy',
-          dead: false,
-          color: sh.color,
-        });
-      }
-    }
-    world.shots = nextShots;
-    world.rockets = nextRockets;
-    world.beams = nextBeams;
-
-    // Reconstruct pickups & hazard mines
+    // Reconstruct pickups & hazard mines before culling local cosmetic bolts
     const nextPickups: CoopPickupItem[] = [];
     const nextMines: CoopMineItem[] = [];
     for (const it of sample.items) {
@@ -1346,6 +1546,32 @@ export class CoopFlightDirector {
     world.pickups = nextPickups;
     world.mines = nextMines;
 
+    // Reconstruct authoritative hostile shots, rockets, and beams + step local cosmetic squad bolts
+    const nextShots: Shot[] = [];
+    const nextRockets: Rocket[] = [];
+    const nextBeams: Beam[] = [];
+    for (const sh of sample.shots) {
+      if (sh.kind === 'rocket') {
+        nextRockets.push({ x: sh.x, y: sh.y, vx: sh.vx, vy: sh.vy, age: 0.2, dead: false });
+      } else if (sh.kind === 'beam') {
+        nextBeams.push({ x: sh.x, y: sh.y, age: (1 - sh.beamLife) * 0.22 });
+      } else {
+        nextShots.push({
+          x: sh.x,
+          y: sh.y,
+          vx: sh.vx,
+          vy: sh.vy,
+          hostile: sh.kind === 'enemy',
+          dead: false,
+          color: sh.color,
+        });
+      }
+    }
+    this.stepGuestLocalBolts(simDt, world);
+    world.shots = [...nextShots, ...this.guestLocalBolts];
+    world.rockets = nextRockets;
+    world.beams = nextBeams;
+
     // Play deduplicated FX events packed inside `BIN_FRAME_SNAP`
     for (const fx of this.interpolator.consumeNewFx()) {
       if (fx.kind === 'spark') {
@@ -1366,6 +1592,55 @@ export class CoopFlightDirector {
         world.spark(fx.x, fx.y, fx.toughRock ? ROCK : PEBBLE);
         world.play('boom');
       }
+    }
+  }
+
+  private stepGuestLocalBolts(simDt: number, world: CoopWorldAdapter): void {
+    if (this.guestLocalBolts.length === 0) return;
+    if (!this.hostPaused && !this.hostReconnecting && simDt > 0) {
+      for (const b of this.guestLocalBolts) {
+        b.x += b.vx * simDt;
+        b.y += b.vy * simDt;
+        if (b.x < -32 || b.x > COOP_WORLD_W + 32 || b.y < -48 || b.y > COOP_WORLD_H + 32) {
+          b.dead = true;
+          continue;
+        }
+        if (world.boss && (world.boss.state === 'fight' || world.boss.state === 'enter')) {
+          if (Math.hypot(b.x - world.boss.x, b.y - world.boss.y) < 42) {
+            b.dead = true;
+            continue;
+          }
+        }
+        if (world.sets.rockAt(b.x, b.y)) {
+          b.dead = true;
+          continue;
+        }
+        if (world.mines.some((m) => !m.dead && Math.hypot(b.x - m.x, b.y - m.y) < 11)) {
+          b.dead = true;
+          continue;
+        }
+        for (const e of world.enemies) {
+          if (e.dead || e === b.skip) continue;
+          if (Math.hypot(b.x - e.x, b.y - e.y) < KINDS[e.kind].radius + 4) {
+            if (b.pierce) {
+              b.pierce -= 1;
+              b.skip = e;
+            } else {
+              b.dead = true;
+            }
+            break;
+          }
+        }
+      }
+    }
+    let write = 0;
+    for (let i = 0; i < this.guestLocalBolts.length; i++) {
+      const b = this.guestLocalBolts[i]!;
+      if (!b.dead) this.guestLocalBolts[write++] = b;
+    }
+    this.guestLocalBolts.length = write;
+    if (this.guestLocalBolts.length > 160) {
+      this.guestLocalBolts.splice(0, this.guestLocalBolts.length - 160);
     }
   }
 
@@ -1406,7 +1681,7 @@ export class CoopFlightDirector {
     this.guestPendingTap = null;
 
     const deckState = this.deck.state();
-    const hasPointer = Boolean(tap) || (this.layout.useThumbDeck ? deckState.touching : ctrl.touching);
+    const hasPointer = !tap && (this.layout.useThumbDeck ? deckState.touching : ctrl.touching);
     const targetX = tap
       ? tap.x
       : this.layout.useThumbDeck && deckState.touching
@@ -1421,6 +1696,14 @@ export class CoopFlightDirector {
         : ctrl.touching
           ? ctrl.touchY
           : me.y;
+
+    this.predHistory[this.inputSeq & 0xff] = {
+      seq: this.inputSeq,
+      x: me.x,
+      y: me.y,
+      valid: true,
+    };
+    this.hasSentAnyInput = true;
 
     const frame = encodeGuestInput({
       seat: this.client.seat as CoopSeatIndex,
@@ -1544,7 +1827,7 @@ export class CoopFlightDirector {
         maxHull: p.maxHull,
         invulnerable: p.invulnerable > 0,
         shielded: p.shieldReady,
-        firing: p.firing,
+        firing: p.firing || this.firedSinceLastSnap[p.seat]!,
         spread: hasSpread,
         wing: hasWing,
         orbitUpgrade: hasGuard,
@@ -1555,6 +1838,7 @@ export class CoopFlightDirector {
         ackSeq: p.ackSeq,
         respawnSec: p.alive ? 0 : p.respawnSec,
       }));
+    this.firedSinceLastSnap.fill(false);
 
     const enemies: CoopSnapEnemy[] = world.enemies
       .filter((e) => !e.dead)
@@ -1641,15 +1925,16 @@ export class CoopFlightDirector {
         front: world.sets.field ? world.sets.field.front : null,
         alert: world.sets.alert,
         wave: world.wave,
-        recentBrokenIds: world.sets.brokenRockIds.slice(-8),
+        recentBrokenIds: world.sets.brokenRockIds,
       };
     }
 
+    // 3.2: Only pack hostile bullets, rockets, and lance beams on the wire; Guests simulate cosmetic friendly bolts locally at 60fps
     const shots: CoopSnapShot[] = [];
     for (const sh of world.shots) {
-      if (sh.dead) continue;
+      if (sh.dead || !sh.hostile) continue;
       shots.push({
-        kind: sh.hostile ? 'enemy' : 'bolt',
+        kind: 'enemy',
         color: sh.color,
         heavy: Boolean(sh.pierce),
         x: sh.x,
@@ -1705,6 +1990,9 @@ export class CoopFlightDirector {
 
     return {
       tick: this.snapTick,
+      session: this.hostSessionId,
+      hostElapsedMs: Math.round(this.hostSimElapsedMs),
+      upgradesMask: encodeUpgradesMask(world.upgrades),
       wave: Math.max(1, world.wave),
       banner: world.banner,
       teamScore: world.score,

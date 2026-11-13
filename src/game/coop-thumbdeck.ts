@@ -93,24 +93,24 @@ export function computeCoopViewportLayout(
   };
 
   const padMarginX = clamp(Math.round(vw * 0.04), 10, 20);
-  const headerH = useThumbDeck ? 40 : 0;
+  const headerH = useThumbDeck ? 52 : 0;
   const padBottom = Math.max(10, insets.bottom + 8);
   const padRect: ScreenBox = useThumbDeck
     ? {
         x: padMarginX,
         y: deckY + headerH,
         w: Math.max(140, vw - padMarginX * 2),
-        h: Math.max(96, deckHeight - headerH - padBottom),
+        h: Math.max(92, deckHeight - headerH - padBottom),
       }
     : { x: 0, y: vh, w: 0, h: 0 };
 
-  const btnW = useThumbDeck ? Math.min(138, Math.round(vw * 0.36)) : 0;
+  const btnW = useThumbDeck ? Math.min(142, Math.round(vw * 0.37)) : 0;
   const autoFireBtnRect: ScreenBox = useThumbDeck
     ? {
         x: vw - padMarginX - btnW,
-        y: deckY + 6,
+        y: deckY + 4,
         w: btnW,
-        h: 28,
+        h: 44,
       }
     : { x: 0, y: vh, w: 0, h: 0 };
 
@@ -241,15 +241,16 @@ export class CoopThumbDeck {
     pointerId: number,
     clientX: number,
     clientY: number,
+    allowArenaTap = true,
   ): boolean {
     if (!layout.useThumbDeck) return false;
 
-    if (pointInRect(layout.autoFireBtnRect, clientX, clientY, 6)) {
+    if (pointInRect(layout.autoFireBtnRect, clientX, clientY, 4)) {
       this.autoFireLatch = !this.autoFireLatch;
       return true;
     }
 
-    if (clientY >= layout.deckRect.y - 6) {
+    if (clientY >= layout.deckRect.y - 4) {
       if (this.activePointerId === null) {
         this.activePointerId = pointerId;
         this.originClientX = clamp(
@@ -270,10 +271,12 @@ export class CoopThumbDeck {
       return true;
     }
 
-    const worldPt = clientToArenaPoint(layout, clientX, clientY);
-    if (worldPt.inside) {
-      this.pendingArenaTap = { x: worldPt.x, y: worldPt.y };
-      return true;
+    if (allowArenaTap) {
+      const worldPt = clientToArenaPoint(layout, clientX, clientY);
+      if (worldPt.inside) {
+        this.pendingArenaTap = { x: worldPt.x, y: worldPt.y };
+        return true;
+      }
     }
 
     return false;
@@ -328,6 +331,12 @@ export class CoopThumbDeck {
       maxHull: number;
       alive: boolean;
       respawnSec: number;
+      wingmen?: ReadonlyArray<{
+        seat: CoopSeatIndex;
+        connected: boolean;
+        alive: boolean;
+        hull: number;
+      }>;
     },
   ): void {
     if (!layout.useThumbDeck) return;
@@ -345,27 +354,39 @@ export class CoopThumbDeck {
       ctx.lineTo(deckRect.w, deckRect.y + 0.5);
     });
 
-    // Pilot seat badge + hull pips on left of header
+    // Pilot seat badge + hull pips + compact squadmate tags on left of header
+    const leftAvailW = Math.max(80, autoFireBtnRect.x - padRect.x - 12);
     const badge = `P${info.seat + 1} - ${info.callsign}`;
-    const badgeSize = fitTo(badge, 10, Math.max(80, autoFireBtnRect.x - padRect.x - 16));
+    const badgeSize = fitTo(badge, 9.5, leftAvailW);
     ink(ctx, seatColor, 0.95, 1.5, () => {
-      traceText(ctx, badge, padRect.x, deckRect.y + 10, badgeSize, 'left');
+      traceText(ctx, badge, padRect.x, deckRect.y + 7, badgeSize, 'left');
     });
 
-    const pipY = deckRect.y + 27;
+    const pipY = deckRect.y + 22;
     for (let i = 0; i < info.maxHull; i++) {
       const filled = i < info.hull;
-      const px = padRect.x + i * 15;
+      const px = padRect.x + i * 14;
       ink(
         ctx,
         filled ? seatColor : SAND,
         filled ? 0.95 : 0.25,
         1.4,
         () => {
-          ctx.rect(px, pipY, 10, 6);
+          ctx.rect(px, pipY, 10, 5);
         },
         filled,
       );
+    }
+
+    if (info.wingmen && info.wingmen.length > 0) {
+      const tagW = Math.min(64, leftAvailW / info.wingmen.length);
+      info.wingmen.forEach((w, idx) => {
+        const wColor = COOP_SEAT_COLORS[w.seat] ?? SAND;
+        const wTag = !w.connected ? `P${w.seat + 1} WAIT` : !w.alive ? `P${w.seat + 1} OUT` : `P${w.seat + 1} ${w.hull}HP`;
+        ink(ctx, wColor, w.connected ? 0.88 : 0.45, 1.15, () => {
+          traceText(ctx, wTag, padRect.x + idx * tagW, deckRect.y + 34, 5.8, 'left');
+        }, false);
+      });
     }
 
     // Auto-Fire latch button
@@ -427,7 +448,7 @@ export class CoopThumbDeck {
     if (!info.alive) {
       const msg =
         info.respawnSec > 0
-          ? `WINGMAN REBOOT IN ${Math.ceil(info.respawnSec)}S`
+          ? `WINGMAN REBOOT IN ${Math.ceil(info.respawnSec)} SEC`
           : 'HULL DOWN - STAND BY';
       const sz = fitTo(msg, 11, padRect.w - 24);
       ink(ctx, NEON.orange, 0.9, 1.5, () => {

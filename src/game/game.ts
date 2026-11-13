@@ -29,10 +29,7 @@ import type { Mood } from './avatar';
 import { Backdrop } from './backdrop';
 import { bossParts, createBoss, shootBoss, tapBoss, touchesBoss, updateBoss, type Boss, type BossEnv, type Hit } from './boss';
 import { choose } from './challenge';
-import type { CoopClient } from './coop-client';
-import { CoopFlightDirector, type CoopWorldAdapter } from './coop-flight';
-import { COOP_WORLD_H, COOP_WORLD_W } from './coop-protocol';
-import type { CoopPublicSeat } from './coop-types';
+import type { CoopFlightDirector, CoopWorldAdapter } from './coop-flight';
 import { NEON, PEBBLE, PINK, ROCK, SAND, clamp, pick, rand, strokeInk, type Ink } from './core';
 import { KINDS, buildWavePlan, renderEnemies, spawnEnemy, spawnX, splitShards, updateEnemies, type Enemy, type Spawn } from './enemies';
 import { Fireworks, renderFireworks } from './fireworks';
@@ -69,6 +66,8 @@ const MAX_HULL = 3;
 const ENERGY_SECONDS = 18;
 /** How slowly the game runs while a capsule's question waits for its answer. */
 const SLOW_MOTION = 0.06;
+const COOP_ARENA_W = 768;
+const COOP_ARENA_H = 1024;
 
 type State = 'ready' | 'playing' | 'over';
 
@@ -103,11 +102,9 @@ export interface GameOptions {
   multiplayer?: MultiplayerClient;
   /** Called when the Top 10 Pilots leaderboard overlay is shown or hidden. */
   onLeaderboard?: (open: boolean) => void;
-  /** Optional Co-op Squad session (`Phase 2`: shared `768 x 1024` 4-ship flight). */
+  /** Optional Co-op Squad session (`Phase 2`: shared `768 x 1024` 4-ship flight, lazy-loaded by HeroGame). */
   coop?: {
-    client: CoopClient;
-    seats?: readonly CoopPublicSeat[];
-    onClosed?: (reason: string) => void;
+    director: CoopFlightDirector;
   };
 }
 
@@ -301,20 +298,16 @@ export class Game {
       resumeSquadNewRun: () => self.resumeCoopGuestRun(),
       setHostPausedFromWire: (paused) => {
         self.paused = paused;
-        self.opts.onPause?.(paused);
+        if (self.coop?.isHost) {
+          self.opts.onPause?.(paused);
+        }
       },
     };
 
-    this.coop = opts.coop
-      ? new CoopFlightDirector({
-          client: opts.coop.client,
-          initialSeats: opts.coop.seats,
-          onClosed: (reason) => opts.coop?.onClosed?.(reason),
-          onStatus: (m) => opts.onStatus?.(m),
-        })
-      : null;
+    this.coop = opts.coop?.director ?? null;
 
     if (this.coop) {
+      this.coop.bindWorld(this.coopAdapter);
       this.setsEnv.seeded = true;
       this.setsEnv.onTankerStart = (w) => this.coop?.notifyHostTankerStart(w);
       this.setsEnv.onFieldAlarm = (w, s) => this.coop?.notifyHostFieldEvent(w, s, null, 0, []);
@@ -340,9 +333,10 @@ export class Game {
         ? {
             mapPoint: (x: number, y: number) => this.coop!.mapCanvasPointToArena(x, y),
             pointerDown: (id: number, x: number, y: number, touch: boolean) =>
-              this.coop!.handlePointerDown(id, x, y, touch),
+              this.state === 'playing' && !this.paused && this.coop!.handlePointerDown(id, x, y, touch),
             pointerMove: (id: number, x: number, y: number) => this.coop!.handlePointerMove(id, x, y),
             pointerUp: (id: number) => this.coop!.handlePointerUp(id),
+            pointerDrop: () => this.coop!.releasePointers(),
           }
         : {}),
     }, this.coarse ? 'touch' : 'keys');
@@ -385,7 +379,11 @@ export class Game {
     // Draw once straight away, so the overlay never fades in on an empty canvas.
     this.render();
     this.last = performance.now();
-    this.raf = requestAnimationFrame(this.frame);
+    if (this.coop && document.hidden) {
+      this.onVisibility();
+    } else {
+      this.raf = requestAnimationFrame(this.frame);
+    }
   }
 
   /** Keep the score if it beats the best so far. Returns whether it did. */
@@ -565,8 +563,8 @@ export class Game {
     };
 
     if (this.coop) {
-      this.w = COOP_WORLD_W;
-      this.h = COOP_WORLD_H;
+      this.w = COOP_ARENA_W;
+      this.h = COOP_ARENA_H;
       this.scale = 1;
       this.pace = 1;
       this.inset = { top: 0, right: 0, bottom: 0, left: 0 };
@@ -667,7 +665,19 @@ export class Game {
   private pick(x: number, y: number): boolean {
     if (this.paused) return false;
     if (this.coop) {
-      return this.state === 'playing' && this.boss !== null && this.coop.queueArenaTap(x, y, this.coopAdapter);
+      if (
+        this.state !== 'playing' ||
+        !this.boss ||
+        this.boss.kind !== 'sum' ||
+        this.boss.state !== 'fight' ||
+        !this.boss.pods.length
+      ) {
+        return false;
+      }
+      if (!this.coop.isHost && !touchesBoss(this.boss, x, y, 16, this.bossEnv())) {
+        return false;
+      }
+      return this.coop.queueArenaTap(x, y, this.coopAdapter);
     }
     if (this.picking) {
       const band = boxAt(x, y, offerBoxes(this.w, this.h, this.room, challengeTopY(this.h, this.inset.top, this.homeY, true), GRADE_BANDS.length));
@@ -727,9 +737,15 @@ export class Game {
         this.last = performance.now();
         this.bgTimer = setInterval(() => {
           const now = performance.now();
-          const dt = Math.min(0.05, Math.max(0, (now - this.last) / 1000));
+          let elapsed = Math.min(1.0, Math.max(0, (now - this.last) / 1000));
           this.last = now;
-          if (!this.paused) this.update(dt);
+          if (!this.paused) {
+            while (elapsed > 0.001) {
+              const step = Math.min(0.05, elapsed);
+              this.update(step);
+              elapsed -= step;
+            }
+          }
         }, 50);
       } else {
         this.sound.unlock();
@@ -991,6 +1007,9 @@ export class Game {
     burst: (shape, x, y, scale, rot, color) => {
       this.burst(shape, x, y, scale, rot, color);
       this.sound.play('boom');
+      if (this.coop?.isHost && x > 0 && y > 0) {
+        this.coop.recordHostFx('spark', x, y, color);
+      }
     },
     problem: () => makeProblem(sumLevel(this.wave, this.grade ?? 1)),
   };
@@ -1200,6 +1219,9 @@ export class Game {
         { x: b.x, y: b.y, age: -0.12, color: NEON.cyan },
         { x: b.x, y: b.y, age: -0.24, color: NEON.yellow },
       );
+      if (this.coop?.isHost) {
+        this.coop.recordHostFx('boss-burst', b.x, b.y, NEON.red);
+      }
       if (!this.reduceMotion) this.shake = 0.5;
     } else {
       this.bossNote = 'IT GOT AWAY';
@@ -1221,8 +1243,17 @@ export class Game {
     if (e.dead) return;
     e.hp -= amount;
     e.flash = 0.1;
-    if (e.hp <= 0) this.destroyEnemy(e);
-    else this.sound.play('hit');
+    if (e.hp <= 0) {
+      this.destroyEnemy(e);
+      if (this.coop?.isHost) {
+        this.coop.recordHostFx('enemy-burst', e.x, e.y, KINDS[e.kind].color, { enemyKind: e.kind });
+      }
+    } else {
+      this.sound.play('hit');
+      if (this.coop?.isHost) {
+        this.coop.recordHostFx('spark', e.x, e.y, KINDS[e.kind].color);
+      }
+    }
   }
 
   private destroyEnemy(e: Enemy): void {
@@ -1752,7 +1783,7 @@ export class Game {
     const sc = this.scale;
     const { ship } = this;
     const has = (id: UpgradeId) => this.upgrades.has(id);
-    if (has('shield') && !this.shield.ready) {
+    if (!this.coop && has('shield') && !this.shield.ready) {
       this.shield.recharge -= dt;
       if (this.shield.recharge <= 0) {
         this.shield.ready = true;
@@ -1760,7 +1791,7 @@ export class Game {
       }
     }
 
-    if (has('guardian')) {
+    if (!this.coop && has('guardian')) {
       this.orbit += dt * 3.6;
       this.guardCool = Math.max(0, this.guardCool - dt);
       const g = this.guardianAt;
@@ -1791,35 +1822,49 @@ export class Game {
       onBlast: (x, y, reach) => {
         this.rings.push({ x, y, age: 0, color: NEON.orange, reach });
         this.sound.play('boom');
+        if (this.coop?.isHost) {
+          this.coop.recordHostFx('ring', x, y, NEON.orange);
+        }
       },
     });
 
     if (this.asking || !(this.enemies.length > 0 || this.boss?.state === 'fight')) return;
 
+    const shooters = this.coop
+      ? this.coop.pilots.filter((p) => p.present && p.connected && p.alive)
+      : [{ x: ship.x, y: ship.y, color: NEON.cyan }];
+    if (shooters.length === 0) return;
+
     if (has('lance') && (this.lanceIn -= dt) <= 0) {
       this.lanceIn = LANCE_SECONDS;
-      const x = ship.x;
-      this.beams.push({ x, y: ship.y - 18 * sc, age: 0 });
+      const origin = shooters[this.volley++ % shooters.length]!;
+      const x = origin.x;
+      this.beams.push({ x, y: origin.y - 18 * sc, age: 0 });
       this.sound.play('beam');
-      for (const e of this.enemies) if (e.y < ship.y && Math.abs(e.x - x) < (KINDS[e.kind].radius + 7) * sc) this.damage(e, 2);
+      for (const e of this.enemies) if (e.y < origin.y && Math.abs(e.x - x) < (KINDS[e.kind].radius + 7) * sc) this.damage(e, 2);
       for (let n = 0; n < 4; n++) {
-        for (let y = ship.y - 20 * sc; y > 0; y -= 8) if (this.strikeBoss(x, y, false)) break;
+        for (let y = origin.y - 20 * sc; y > 0; y -= 8) if (this.strikeBoss(x, y, false)) break;
       }
     }
 
     if (has('rockets') && (this.rocketIn -= dt) <= 0) {
       this.rocketIn = ROCKET_SECONDS;
-      this.rockets.push({ x: ship.x, y: ship.y - 16 * sc, vx: (Math.random() < 0.5 ? -1 : 1) * 140, vy: -240, age: 0, dead: false });
+      const origin = shooters[this.volley++ % shooters.length]!;
+      this.rockets.push({ x: origin.x, y: origin.y - 16 * sc, vx: (Math.random() < 0.5 ? -1 : 1) * 140, vy: -240, age: 0, dead: false });
       this.sound.play('rocket');
     }
 
     if (has('nova') && (this.novaIn -= dt) <= 0) {
       this.novaIn = NOVA_SECONDS;
+      const origin = shooters[this.volley++ % shooters.length]!;
       const reach = 210 * sc;
-      this.rings.push({ x: ship.x, y: ship.y, age: 0, color: NEON.cyan, reach });
+      this.rings.push({ x: origin.x, y: origin.y, age: 0, color: NEON.cyan, reach });
       this.sound.play('nova');
-      for (const s of this.shots) if (s.hostile && Math.hypot(s.x - ship.x, s.y - ship.y) < reach) s.dead = true;
-      for (const e of this.enemies) if (Math.hypot(e.x - ship.x, e.y - ship.y) < reach) this.damage(e, 1);
+      if (this.coop?.isHost) {
+        this.coop.recordHostFx('ring', origin.x, origin.y, NEON.cyan);
+      }
+      for (const s of this.shots) if (s.hostile && Math.hypot(s.x - origin.x, s.y - origin.y) < reach) s.dead = true;
+      for (const e of this.enemies) if (Math.hypot(e.x - origin.x, e.y - origin.y) < reach) this.damage(e, 1);
     }
   }
 

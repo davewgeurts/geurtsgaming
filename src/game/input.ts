@@ -54,6 +54,7 @@ export interface InputHost {
   pointerDown?(pointerId: number, x: number, y: number, touch: boolean): boolean;
   pointerMove?(pointerId: number, x: number, y: number): boolean;
   pointerUp?(pointerId: number): boolean;
+  pointerDrop?(): void;
 }
 
 /** The part of a canvas this needs: somewhere to listen, and where it is on the page. */
@@ -137,6 +138,7 @@ export class Input {
   drop(): void {
     this.keys.clear();
     this.touchId = null;
+    this.host.pointerDrop?.();
   }
 
   /** Measure where the canvas is in the window. */

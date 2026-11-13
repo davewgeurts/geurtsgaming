@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { CoopRoom } from '../relay/room.mjs';
-import { CoopClient, type CoopConnectOptions, type StorageLike } from '../src/game/coop-client';
+import { CoopClient, clearStoredCoopToken, type CoopConnectOptions, type StorageLike } from '../src/game/coop-client';
 import {
   CoopLobbyController,
   CoopLobbyModal,
@@ -584,4 +584,32 @@ test('Removing a guest via keyboard never moves focus onto another Remove button
     g.HTMLElement = prevEl;
     g.HTMLInputElement = prevInput;
   }
+});
+
+test('HeroGame hides [hidden] arcade buttons, confirms before leaving Co-op flight, lazy-loads coop-flight, and clears saved host progress on Leave', async () => {
+  // 1. `clearStoredCoopToken` removes both `gg_coop_token_<CODE>` and `gg_coop_host_state_<CODE>`
+  const store = new MemoryStorage();
+  store.setItem('gg_coop_token_XKCD42', 'tok-123');
+  store.setItem('gg_coop_host_state_XKCD42', JSON.stringify({ wave: 4, score: 1800, freed: 12 }));
+  clearStoredCoopToken('XKCD42', store);
+  assert.equal(store.getItem('gg_coop_token_XKCD42'), null);
+  assert.equal(store.getItem('gg_coop_host_state_XKCD42'), null);
+
+  // 2. Verify HeroGame.astro markup, CSS, Co-op leave confirmation, and lazy `coop-flight` import
+  const heroSrc = await readFile(new URL('../src/components/HeroGame.astro', import.meta.url), 'utf8');
+  assert.match(heroSrc, /\.arcade-btn\[hidden\]\s*\{\s*display:\s*none;\s*\}/, '.arcade-btn[hidden] overrides display: grid');
+  assert.ok(heroSrc.includes('data-coop-leave-confirm'), 'renders Co-op leave confirmation dialog');
+  assert.ok(heroSrc.includes('role="alertdialog"'), 'Co-op leave confirmation uses accessible alertdialog role');
+  assert.ok(heroSrc.includes('data-coop-stay') && heroSrc.includes('data-coop-confirm-leave'));
+  assert.ok(
+    heroSrc.includes("coopSession ? import('../game/coop-flight') : Promise.resolve(null)"),
+    'HeroGame only imports coop-flight when launching a Co-op squad',
+  );
+
+  // 3. Verify `src/game/game.ts` has zero runtime imports from `coop-*` so Solo pays 0 KB Co-op overhead
+  const gameSrc = await readFile(new URL('../src/game/game.ts', import.meta.url), 'utf8');
+  const runtimeCoopImports = gameSrc
+    .split('\n')
+    .filter((line) => /^\s*import\s+(?!type\b).*from\s+['"]\.\/coop-/.test(line));
+  assert.deepEqual(runtimeCoopImports, [], 'game.ts contains only type-only imports from ./coop-*');
 });

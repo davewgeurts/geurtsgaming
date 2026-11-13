@@ -479,8 +479,8 @@ test('encodeWorldSnapshot prioritizes enemy bullets, beams, and rockets over old
   }));
   const specialShots = [
     { kind: 'beam' as const, color: NEON.yellow, heavy: false, x: 384, y: 800, vx: 0, vy: 0, beamLife: 0.7 },
-    { kind: 'rocket' as const, color: NEON.magenta, heavy: true, x: 240, y: 620, vx: -80, vy: -520, beamLife: 0 },
-    { kind: 'rocket' as const, color: NEON.magenta, heavy: true, x: 520, y: 620, vx: 80, vy: -520, beamLife: 0 },
+    { kind: 'rocket' as const, color: NEON.orange, heavy: true, x: 240, y: 620, vx: -80, vy: -520, beamLife: 0 },
+    { kind: 'rocket' as const, color: NEON.orange, heavy: true, x: 520, y: 620, vx: 80, vy: -520, beamLife: 0 },
   ];
 
   const snap: CoopWorldSnapshot = {

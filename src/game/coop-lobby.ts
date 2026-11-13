@@ -639,6 +639,7 @@ export class CoopLobbyModal {
     const wasJoinBtn = Boolean(activeEl?.hasAttribute('data-coop-join-btn'));
     const focusedAction = activeEl?.dataset.coopAction ?? null;
     const focusedSeat = activeEl?.dataset.seat ?? null;
+    const focusedSeatCard = activeEl?.dataset.coopSeat ?? null;
     const hadFocusInPanel = Boolean(activeEl);
 
     const { headSlot, alertSlot, statusSlot, bodySlot } = this.ensurePanelSlots(panel);
@@ -721,6 +722,7 @@ export class CoopLobbyModal {
         wasJoinBtn,
         focusedAction,
         focusedSeat,
+        focusedSeatCard,
       });
     }
   }
@@ -734,6 +736,7 @@ export class CoopLobbyModal {
       wasJoinBtn: boolean;
       focusedAction: string | null;
       focusedSeat: string | null;
+      focusedSeatCard: string | null;
     },
   ): void {
     if (saved.wasTypingCode) {
@@ -935,6 +938,7 @@ export interface SavedLobbyFocus {
   wasJoinBtn: boolean;
   focusedAction: string | null;
   focusedSeat: string | null;
+  focusedSeatCard?: string | null;
 }
 
 /**
@@ -973,12 +977,17 @@ export function resolveLobbyFocusTarget(
         `[data-coop-action="${saved.focusedAction}"]:not([disabled])`,
       );
     }
+  } else if (saved.focusedSeatCard !== undefined && saved.focusedSeatCard !== null) {
+    nextTarget = panel.querySelector<HTMLElement>(
+      `[data-coop-seat="${saved.focusedSeatCard}"][tabindex]`,
+    );
   }
 
   if (!nextTarget) {
     nextTarget =
       panel.querySelector<HTMLElement>('[data-coop-copy-link]:not([disabled])') ??
       panel.querySelector<HTMLElement>('[data-coop-ready-btn]:not([disabled])') ??
+      panel.querySelector<HTMLElement>('input[name="coop-code"]:not([disabled])') ??
       panel.querySelector<HTMLElement>('[data-coop-host-btn]:not([disabled])') ??
       panel;
   }

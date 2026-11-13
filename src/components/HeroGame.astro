@@ -58,6 +58,26 @@
     </button>
     <button class="arcade-btn" type="button" data-game-exit>Exit</button>
   </div>
+  <div
+    class="coop-leave-confirm"
+    data-coop-leave-confirm
+    hidden
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="coop-leave-title"
+    aria-describedby="coop-leave-desc"
+  >
+    <div class="coop-leave-card">
+      <h2 id="coop-leave-title" class="coop-leave-title">Leave Squad Flight?</h2>
+      <p id="coop-leave-desc" class="coop-leave-desc" data-coop-leave-desc>
+        Leaving gives up your seat in this squad flight.
+      </p>
+      <div class="coop-leave-actions">
+        <button type="button" class="coop-leave-btn coop-leave-stay" data-coop-stay>Stay in Flight</button>
+        <button type="button" class="coop-leave-btn coop-leave-danger" data-coop-confirm-leave>Leave Squad</button>
+      </div>
+    </div>
+  </div>
   <p class="visually-hidden" aria-live="polite" data-game-status></p>
 </div>
 
@@ -360,6 +380,7 @@
     cursor: pointer;
     transition: background 0.15s ease, border-color 0.15s ease;
   }
+  .arcade-btn[hidden] { display: none; }
   /* The icons are drawn like everything else in the game: thin lines, nothing filled. */
   .arcade-icon { min-width: 44px; padding: 0; }
   .arcade-icon svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
@@ -384,6 +405,72 @@
 
   @media (prefers-reduced-motion: reduce) {
     .launch-ship, .flame, .launch::before, .launch::after, .squad-dot { animation: none; }
+  }
+
+  /* Co-op Leave Confirmation Sheet */
+  .coop-leave-confirm {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    background: rgba(3, 7, 26, 0.82);
+    backdrop-filter: blur(6px);
+  }
+  .coop-leave-confirm[hidden] { display: none; }
+  .coop-leave-card {
+    width: min(100%, 380px);
+    padding: 20px;
+    border-radius: 16px;
+    background: linear-gradient(180deg, rgba(8, 20, 66, 0.98), rgba(4, 10, 36, 0.99));
+    border: 1px solid rgba(66, 245, 255, 0.42);
+    box-shadow: 0 20px 54px rgba(0, 0, 0, 0.65), 0 0 26px rgba(66, 245, 255, 0.16);
+    color: var(--sand);
+    display: grid;
+    gap: 12px;
+    text-align: center;
+  }
+  .coop-leave-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: 1rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #42f5ff;
+  }
+  .coop-leave-desc {
+    margin: 0;
+    font-size: 0.92rem;
+    line-height: 1.45;
+    color: color-mix(in srgb, var(--sand) 90%, #7ef0f7);
+  }
+  .coop-leave-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 4px;
+  }
+  .coop-leave-btn {
+    min-height: 44px;
+    padding: 0 14px;
+    border-radius: 10px;
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .coop-leave-stay {
+    background: rgba(66, 245, 255, 0.16);
+    border: 1px solid #42f5ff;
+    color: #ffffff;
+  }
+  .coop-leave-danger {
+    background: rgba(255, 94, 168, 0.14);
+    border: 1px solid rgba(255, 94, 168, 0.65);
+    color: #ff9ec7;
   }
 
   /* Co-op 4-Seat Hangar Modal */
@@ -741,6 +828,10 @@
   const pause = overlay?.querySelector<HTMLButtonElement>('[data-game-pause]');
   const ranks = overlay?.querySelector<HTMLButtonElement>('[data-game-ranks]');
   const status = overlay?.querySelector<HTMLElement>('[data-game-status]');
+  const leaveConfirm = overlay?.querySelector<HTMLElement>('[data-coop-leave-confirm]');
+  const leaveDesc = overlay?.querySelector<HTMLElement>('[data-coop-leave-desc]');
+  const stayBtn = overlay?.querySelector<HTMLButtonElement>('[data-coop-stay]');
+  const confirmLeaveBtn = overlay?.querySelector<HTMLButtonElement>('[data-coop-confirm-leave]');
   const squadOnline = document.querySelector<HTMLElement>('[data-squad-online]');
   const squadTop = document.querySelector<HTMLElement>('[data-squad-top]');
   const squadSep = document.querySelector<HTMLElement>('[data-squad-sep]');
@@ -758,6 +849,27 @@
     let mp: MultiplayerClient | null = null;
     let opening = false;
     let inCoopGame = false;
+    let inCoopIsHost = false;
+
+    const hideLeaveConfirm = () => {
+      if (!leaveConfirm || leaveConfirm.hidden) return;
+      leaveConfirm.hidden = true;
+      overlay.focus({ preventScroll: true });
+    };
+
+    const openLeaveConfirm = () => {
+      if (!leaveConfirm || !inCoopGame || !game) {
+        close();
+        return;
+      }
+      if (leaveDesc) {
+        leaveDesc.textContent = inCoopIsHost
+          ? 'Leaving as Host closes this squad flight for everyone in the room.'
+          : 'Leaving gives up your seat in this squad flight.';
+      }
+      leaveConfirm.hidden = false;
+      stayBtn?.focus({ preventScroll: true });
+    };
 
     const ensureMultiplayer = async (): Promise<MultiplayerClient> => {
       if (mp) return mp;
@@ -794,8 +906,10 @@
 
     const close = (viaBack = false, fromCoopServerClose = false) => {
       if (!game) return;
+      if (leaveConfirm) leaveConfirm.hidden = true;
       const wasCoop = inCoopGame;
       inCoopGame = false;
+      inCoopIsHost = false;
       game.destroy();
       game = null;
       if (ranks) ranks.hidden = false;
@@ -835,11 +949,13 @@
         /* no speech, or storage blocked: the game is silent or decides for itself */
       }
       try {
-        const [{ Game }, multiplayer] = await Promise.all([
+        const [{ Game }, multiplayer, coopFlightMod] = await Promise.all([
           import('../game/game'),
           ensureMultiplayer(),
+          coopSession ? import('../game/coop-flight') : Promise.resolve(null),
         ]);
         overlay.hidden = false;
+        if (leaveConfirm) leaveConfirm.hidden = true;
         document.documentElement.classList.add('game-active');
         rest().forEach((el) => (el.inert = true));
         announce(true);
@@ -847,25 +963,39 @@
         if (pause) pause.hidden = Boolean(coopSession && coopSession.client.role !== 'host');
         try {
           inCoopGame = Boolean(coopSession);
+          inCoopIsHost = Boolean(coopSession && coopSession.client.role === 'host');
+          const coopDirector =
+            coopSession && coopFlightMod
+              ? new coopFlightMod.CoopFlightDirector({
+                  client: coopSession.client,
+                  initialSeats: coopSession.seats,
+                  onClosed: () => {
+                    close(false, true);
+                    if (coopOverlay) {
+                      coopOverlay.hidden = false;
+                      rest().forEach((el) => (el.inert = true));
+                      coopOverlay.focus({ preventScroll: true });
+                    }
+                  },
+                  onStatus: (message) => {
+                    if (status) status.textContent = message;
+                  },
+                })
+              : null;
           game = new Game(canvas, {
             multiplayer,
-            ...(coopSession
-              ? {
-                  coop: {
-                    client: coopSession.client,
-                    seats: coopSession.seats,
-                    onClosed: () => {
-                      close(false, true);
-                      if (coopOverlay) {
-                        coopOverlay.hidden = false;
-                        rest().forEach((el) => (el.inert = true));
-                        coopOverlay.focus({ preventScroll: true });
-                      }
-                    },
-                  },
-                }
-              : {}),
-            onExit: () => close(),
+            ...(coopDirector ? { coop: { director: coopDirector } } : {}),
+            onExit: () => {
+              if (!inCoopGame) {
+                close();
+                return;
+              }
+              if (leaveConfirm && !leaveConfirm.hidden) {
+                hideLeaveConfirm();
+              } else {
+                openLeaveConfirm();
+              }
+            },
             onStatus: (message) => {
               if (status) status.textContent = message;
             },
@@ -884,6 +1014,8 @@
         } catch (error) {
           // The game could not start (no canvas support, say): put the page back exactly as it was.
           inCoopGame = false;
+          inCoopIsHost = false;
+          if (leaveConfirm) leaveConfirm.hidden = true;
           if (ranks) ranks.hidden = false;
           if (pause) pause.hidden = false;
           overlay.hidden = true;
@@ -908,7 +1040,31 @@
     launch.addEventListener('click', () => {
       void open();
     });
-    exit.addEventListener('click', () => close());
+    exit.addEventListener('click', () => {
+      if (inCoopGame) {
+        openLeaveConfirm();
+      } else {
+        close();
+      }
+    });
+    stayBtn?.addEventListener('click', () => {
+      hideLeaveConfirm();
+    });
+    confirmLeaveBtn?.addEventListener('click', () => {
+      if (leaveConfirm) leaveConfirm.hidden = true;
+      close();
+    });
+    leaveConfirm?.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab' && stayBtn && confirmLeaveBtn) {
+        if (e.shiftKey && document.activeElement === stayBtn) {
+          e.preventDefault();
+          confirmLeaveBtn.focus({ preventScroll: true });
+        } else if (!e.shiftKey && document.activeElement === confirmLeaveBtn) {
+          e.preventDefault();
+          stayBtn.focus({ preventScroll: true });
+        }
+      }
+    });
     ranks?.addEventListener('click', () => {
       game?.toggleLeaderboard();
       overlay.focus({ preventScroll: true });
@@ -924,7 +1080,14 @@
       // Hand the keyboard back to the game, so Enter and Space start and steer rather than press this button again.
       overlay.focus({ preventScroll: true });
     });
-    addEventListener('popstate', () => close(true));
+    addEventListener('popstate', () => {
+      if (inCoopGame && game) {
+        history.pushState({ ggGame: true }, '');
+        openLeaveConfirm();
+        return;
+      }
+      close(true);
+    });
 
     const closeCoopModal = () => {
       if (!coopOverlay || coopOverlay.hidden) return;
