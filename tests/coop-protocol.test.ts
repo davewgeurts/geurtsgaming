@@ -9,6 +9,7 @@ import {
   SNAP_MAX_ITEMS,
   SNAP_MAX_SHIPS,
   SNAP_MAX_SHOTS,
+  SNAP_PROTOCOL_VERSION,
   SnapshotInterpolator,
   decodeGuestInput,
   decodeUpgradesMask,
@@ -17,13 +18,14 @@ import {
   encodeUpgradesMask,
   encodeWorldSnapshot,
   formatBossMathQuestion,
+  isSnapshotVersionMismatch,
   packBrokenRockWords,
   parseBossMathQuestion,
   unpackBrokenRockWords,
   type CoopSnapFx,
   type CoopWorldSnapshot,
 } from '../src/game/coop-protocol';
-import { BIN_FRAME_INPUT, BIN_FRAME_SNAP, MAX_BINARY_BYTES } from '../src/game/coop-types';
+import { BIN_FRAME_INPUT, BIN_FRAME_SNAP, COOP_PROTOCOL_VERSION, MAX_BINARY_BYTES } from '../src/game/coop-types';
 import { NEON, SAND } from '../src/game/core';
 
 test('BIN_FRAME_INPUT packs to 8 bytes, round-trips sub-pixel targets and flags, and rejects bad frames', () => {
@@ -720,4 +722,255 @@ test('SnapshotInterpolator rides out 250ms network stalls without snap-jumps and
   fxIt256.consumeNewFx();
   fxIt256.push(fxSnap(500, [fxAt(10 + 256)]), 30000);
   assert.equal(fxIt256.consumeNewFx().length, 1, 'exact 256-FX wrap across gap still plays next FX');
+});
+
+test('Round 13 (4.3): snapshot protocol version 2 rejects legacy v1 frames and detects version mismatches cleanly', () => {
+  assert.equal(COOP_PROTOCOL_VERSION, 2);
+  assert.equal(SNAP_PROTOCOL_VERSION, 2);
+
+  const valid = encodeWorldSnapshot({
+    session: 9,
+    tick: 1,
+    hostElapsedMs: 100,
+    wave: 1,
+    banner: 0,
+    teamScore: 0,
+    freed: 0,
+    energy: 0.5,
+    paused: false,
+    parked: false,
+    gameOver: false,
+    ships: [],
+    enemies: [],
+    boss: null,
+    tanker: null,
+    field: null,
+    shots: [],
+    items: [],
+    fx: [],
+  });
+  assert.equal(valid.byteLength, 25, 'minimum v2 snapshot header is 25 bytes');
+  assert.equal(valid[1]! & 0x03, 2, 'version bits encode protocol version 2');
+  assert.equal(isSnapshotVersionMismatch(valid), false);
+  assert.ok(decodeWorldSnapshot(valid));
+
+  for (const wrongVer of [1, 3]) {
+    const mutated = new Uint8Array(valid);
+    mutated[1] = (mutated[1]! & ~0x03) | wrongVer;
+    assert.equal(decodeWorldSnapshot(mutated), null, `version ${wrongVer} is rejected by decoder`);
+    assert.equal(isSnapshotVersionMismatch(mutated), true, `version ${wrongVer} is flagged as version mismatch`);
+  }
+  const v0Mutated = new Uint8Array(valid);
+  v0Mutated[1] = v0Mutated[1]! & ~0x03;
+  assert.equal(decodeWorldSnapshot(v0Mutated), null, 'version 0 is rejected by decoder');
+  assert.equal(isSnapshotVersionMismatch(v0Mutated), false, 'zeroed version bits do not false-trigger mismatch');
+
+  // Non-snapshot frames and 1-byte truncated frames are never misclassified as version mismatch
+  assert.equal(isSnapshotVersionMismatch(new Uint8Array([BIN_FRAME_SNAP])), false);
+  const inputBytes = encodeGuestInput({
+    seat: 1,
+    targetX: 200,
+    targetY: 500,
+    firing: false,
+    hasPointer: false,
+    left: false,
+    right: false,
+    up: false,
+    down: false,
+    tap: false,
+    seq: 1,
+  });
+  assert.equal(isSnapshotVersionMismatch(inputBytes), false);
+});
+
+test('Round 13 (4.1, 4.4, Sec 5): straight shots extrapolate to present, extrapolation turns smooth out, and pauses/stalls never replay FX', () => {
+  const period = 1000 / 18;
+
+  // 1. 4.1: Enemy bullets extrapolate forward to Host present (~85ms ahead of interpolated entities)
+  const bulletIt = new SnapshotInterpolator();
+  let nextTick = 0;
+  let sampled: CoopWorldSnapshot | null = null;
+  for (let wallMs = 0; wallMs <= 3600; wallMs += 1000 / 60) {
+    while (nextTick * period + 10 <= wallMs) {
+      const hostMs = nextTick * period;
+      nextTick++;
+      const snap = decodeWorldSnapshot(
+        encodeWorldSnapshot({
+          session: 5,
+          tick: nextTick,
+          hostElapsedMs: Math.round(hostMs),
+          wave: 1,
+          banner: 0,
+          teamScore: 0,
+          freed: 0,
+          energy: 0.5,
+          paused: false,
+          parked: false,
+          gameOver: false,
+          ships: [],
+          enemies: [{ id: 1, kind: 'dart', color: '#ffffff', hp: 1, flash: false, rot: 0, x: 300, y: 80 + hostMs * 0.2 }],
+          boss: null,
+          tanker: null,
+          field: null,
+          shots: [{ kind: 'enemy', color: '#ff3366', x: 300, y: 80 + hostMs * 0.2, vx: 0, vy: 200, heavy: false, beamLife: 0 }],
+          items: [],
+          fx: [],
+        }),
+      )!;
+      bulletIt.push(snap, hostMs + 10);
+    }
+    sampled = bulletIt.sample(wallMs);
+  }
+  const latestShotY = bulletIt.latest()!.shots[0]!.y;
+  const enemyY = sampled!.enemies[0]!.y;
+  const shotY = sampled!.shots[0]!.y;
+  assert.ok(shotY > latestShotY + 2, `shot extrapolated forward past newest snapshot to Host present (${shotY} vs ${latestShotY})`);
+  assert.ok(shotY - enemyY >= 10 && shotY - enemyY <= 20, `expected shot extrapolated ahead of interp enemy, got ${shotY - enemyY}`);
+
+  // 2. 4.4: Direction reversal during an extrapolation stall blends smoothly (< 12px/frame instead of a 30px snap)
+  const turnIt = new SnapshotInterpolator();
+  const shipSnap = (tick: number, hostMs: number, x: number): CoopWorldSnapshot =>
+    decodeWorldSnapshot(
+      encodeWorldSnapshot({
+        session: 6,
+        tick,
+        hostElapsedMs: Math.round(hostMs),
+        wave: 1,
+        banner: 0,
+        teamScore: 0,
+        freed: 0,
+        energy: 0.5,
+        paused: false,
+        parked: false,
+        gameOver: false,
+        ships: [
+          {
+            seat: 0,
+            hull: 3,
+            maxHull: 3,
+            connected: true,
+            alive: true,
+            invulnerable: false,
+            shielded: false,
+            firing: false,
+            spread: false,
+            wing: false,
+            orbitUpgrade: false,
+            x,
+            y: 800,
+            lean: 0,
+            orbit: 0,
+            ackSeq: 0,
+            respawnSec: 0,
+          },
+        ],
+        enemies: [],
+        boss: null,
+        tanker: null,
+        field: null,
+        shots: [],
+        items: [],
+        fx: [],
+      }),
+    )!;
+
+  // Ship moves right at +380 px/s for ticks 1..6, then reverses left at -380 px/s while tick 7 is delayed 180ms
+  const turnX = (ms: number) => (ms <= 300 ? 300 + (ms / 1000) * 380 : 300 + 0.3 * 380 - ((ms - 300) / 1000) * 380);
+  let maxSingleFrameStep = 0;
+  let lastX: number | null = null;
+  const scheduled: Array<{ arrMs: number; snap: CoopWorldSnapshot }> = [];
+  for (let k = 1; k <= 14; k++) {
+    const hMs = k * 50;
+    const stall = k === 7 || k === 8 ? 170 : 0;
+    scheduled.push({ arrMs: hMs + 10 + stall, snap: shipSnap(k, hMs, turnX(hMs)) });
+  }
+  scheduled.sort((a, b) => a.arrMs - b.arrMs);
+  let si = 0;
+  for (let wall = 60; wall <= 750; wall += 1000 / 60) {
+    while (si < scheduled.length && scheduled[si]!.arrMs <= wall) {
+      turnIt.push(scheduled[si]!.snap, scheduled[si]!.arrMs);
+      si++;
+    }
+    const s = turnIt.sample(wall);
+    if (!s || s.ships.length === 0) continue;
+    const x = s.ships[0]!.x;
+    if (lastX !== null) {
+      maxSingleFrameStep = Math.max(maxSingleFrameStep, Math.abs(x - lastX));
+    }
+    lastX = x;
+  }
+  assert.ok(maxSingleFrameStep < 12, `post-extrapolation turn blended smoothly: max step=${maxSingleFrameStep.toFixed(2)}px (< 12px)`);
+
+  // 3. Section 5: 600ms wall-clock stalls and 3s Host pauses never replay FX ring entries and resume smoothly
+  const pauseIt = new SnapshotInterpolator();
+  const ring: CoopSnapFx[] = [];
+  let fxSeq = 0;
+  let recorded = 0;
+  let consumed = 0;
+  let hostSimMs = 0;
+  let wallMs = 0;
+  let tick = 0;
+  let maxResumeStep = 0;
+  let prevEnemyX: number | null = null;
+
+  for (let step = 0; step < 90; step++) {
+    const paused = step >= 30 && step < 50;
+    const stallMs = step === 15 ? 600 : paused && step === 30 ? 3000 : Math.round(period);
+    wallMs += stallMs;
+    if (!paused) {
+      hostSimMs += period;
+      tick++;
+      fxSeq = (fxSeq + 1) & 0xff;
+      ring.push({
+        seq: fxSeq,
+        kind: 'enemy-burst',
+        color: '#ffffff',
+        enemyKind: 'dart',
+        toughRock: false,
+        x: 200,
+        y: 200,
+      });
+      while (ring.length > 6) ring.shift();
+      recorded++;
+    } else {
+      tick++;
+    }
+    const snap = decodeWorldSnapshot(
+      encodeWorldSnapshot({
+        session: 12,
+        tick,
+        hostElapsedMs: Math.round(hostSimMs),
+        wave: 1,
+        banner: 0,
+        teamScore: 0,
+        freed: 0,
+        energy: 0.5,
+        paused,
+        parked: false,
+        gameOver: false,
+        ships: [],
+        enemies: [{ id: 3, kind: 'dart', color: '#ffffff', hp: 1, flash: false, rot: 0, x: 80 + hostSimMs * 0.24, y: 260 }],
+        boss: null,
+        tanker: null,
+        field: null,
+        shots: [],
+        items: [],
+        fx: ring,
+      }),
+    )!;
+    pauseIt.push(snap, wallMs);
+    consumed += pauseIt.consumeNewFx().length;
+    for (let sub = 0; sub < 3; sub++) {
+      const s = pauseIt.sample(wallMs + sub * (1000 / 60));
+      if (s && s.enemies.length > 0) {
+        const ex = s.enemies[0]!.x;
+        if (prevEnemyX !== null && step >= 50 && step <= 60) {
+          maxResumeStep = Math.max(maxResumeStep, Math.abs(ex - prevEnemyX));
+        }
+        prevEnemyX = ex;
+      }
+    }
+  }
+  assert.equal(consumed, recorded, `zero duplicate or dropped FX across 600ms stall + 3s pause (${consumed} vs ${recorded})`);
+  assert.ok(maxResumeStep < 8.5, `post-unpause enemy step stays smooth: max=${maxResumeStep.toFixed(2)}px`);
 });

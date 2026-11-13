@@ -275,11 +275,11 @@ export class CoopThumbDeck {
       const worldPt = clientToArenaPoint(layout, clientX, clientY);
       if (worldPt.inside) {
         this.pendingArenaTap = { x: worldPt.x, y: worldPt.y };
-        return true;
       }
     }
 
-    return false;
+    // In thumb-deck flight, swallow upper-arena touches so Input never starts direct finger-follow steering.
+    return true;
   }
 
   onPointerMove(
@@ -331,6 +331,7 @@ export class CoopThumbDeck {
       maxHull: number;
       alive: boolean;
       respawnSec: number;
+      gameOver?: boolean;
       wingmen?: ReadonlyArray<{
         seat: CoopSeatIndex;
         connected: boolean;
@@ -446,8 +447,9 @@ export class CoopThumbDeck {
     );
 
     if (!info.alive) {
-      const msg =
-        info.respawnSec > 0
+      const msg = info.gameOver
+        ? 'SQUAD DOWN'
+        : info.respawnSec > 0
           ? `WINGMAN REBOOT IN ${Math.ceil(info.respawnSec)} SEC`
           : 'HULL DOWN - STAND BY';
       const sz = fitTo(msg, 11, padRect.w - 24);

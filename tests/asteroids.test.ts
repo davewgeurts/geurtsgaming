@@ -138,3 +138,18 @@ test('seeded asteroid fields produce bit-identical rocks, lanes, bombs, prizes, 
     assert.equal(rngA(), rngB());
   }
 });
+
+test('all asteroid rock IDs across waves 1..30 stay strictly within the 512-bit Co-op broken-rock bitmap', () => {
+  let maxRockId = 0;
+  for (let wave = 1; wave <= 30; wave++) {
+    for (let s = 1; s <= 12; s++) {
+      const seed = ((wave * 2654435761) ^ (s * 2246822519)) >>> 0 || 1;
+      const field = createField({ w: 768, h: 1024, left: 0, right: 0, scale: 1, pace: 1, wave, seed });
+      for (const r of field.rocks) {
+        if (r.id > maxRockId) maxRockId = r.id;
+        assert.ok(r.id < 512, `wave ${wave} seed ${seed} rock.id=${r.id} exceeds 512-bit bitmap`);
+      }
+    }
+  }
+  assert.ok(maxRockId > 200 && maxRockId < 512, `expected realistic max rock.id in (200, 512), got ${maxRockId}`);
+});

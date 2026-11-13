@@ -165,6 +165,8 @@ export interface HudViewContext {
   totalLiberated?: number;
   topPilots?: readonly PilotScore[];
   showLeaderboard?: boolean;
+  /** Optional Co-op role (`'host'` or `'guest'`) so Game Over / Pause prompts match squad capabilities. */
+  coopRole?: 'host' | 'guest';
   /** Seconds the question "what grade are you in?" has been up, or null when it is not being asked. */
   grading?: number | null;
 }
@@ -497,7 +499,9 @@ export function renderMessages(v: HudViewContext): void {
   if (paused) {
     drawCentred(v, 'PAUSED', mid, 28);
     drawCentred(v, coarse ? 'TAP TO RESUME' : 'PRESS P TO RESUME', mid + 52, 11, 0.8);
-    drawCentred(v, coarse ? 'TAP THE STAR FOR THE TOP 10 PILOTS' : 'PRESS L FOR TOP 10 PILOTS', mid + 78, 9, 0.72, NEON.cyan);
+    if (!v.coopRole) {
+      drawCentred(v, coarse ? 'TAP THE STAR FOR THE TOP 10 PILOTS' : 'PRESS L FOR TOP 10 PILOTS', mid + 78, 9, 0.72, NEON.cyan);
+    }
     return;
   }
 
@@ -572,8 +576,19 @@ export function renderMessages(v: HudViewContext): void {
     const alpha = Math.min(1, stateTime / 0.5);
     drawCentred(v, 'GAME OVER', mid - 38, 32, alpha);
     drawCentred(v, `SCORE ${pad6(score)}`, mid + 20, 15, alpha);
-    drawCentred(v, newBest ? 'NEW BEST!' : `BEST ${pad6(best)}`, mid + 48, 11, alpha * 0.8, newBest ? PINK : SAND);
+    if (!v.coopRole) {
+      drawCentred(v, newBest ? 'NEW BEST!' : `BEST ${pad6(best)}`, mid + 48, 11, alpha * 0.8, newBest ? PINK : SAND);
+    }
     const totalFreed = freed + soulsInFlight;
+    if (v.coopRole) {
+      drawCentred(v, totalFreed === 1 ? 'SQUAD SET 1 PERSON FREE' : `SQUAD SET ${totalFreed} PEOPLE FREE`, mid + 54, 11, alpha, SOUL);
+      if (v.coopRole === 'guest') {
+        drawCentred(v, 'WAITING FOR THE HOST TO RELAUNCH', mid + 96, 10, alpha * 0.9, NEON.cyan);
+      } else if (stateTime > 0.9 && blink) {
+        drawCentred(v, coarse ? 'TAP TO RELAUNCH SQUAD' : 'PRESS SPACE TO RELAUNCH - ESC TO LEAVE', mid + 104, 10, 0.9);
+      }
+      return;
+    }
     drawCentred(v, totalFreed === 1 ? 'YOU SET 1 PERSON FREE' : `YOU SET ${totalFreed} PEOPLE FREE`, mid + 72, 11, alpha, SOUL);
     if (v.lastRank) {
       drawCentred(v, `TOP 10 PILOT RANK ${v.lastRank} - ${v.callsign ?? 'PILOT'}`, mid + 96, 10, alpha, NEON.cyan);

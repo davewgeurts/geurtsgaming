@@ -295,6 +295,12 @@ export class CoopLobbyController {
     return true;
   }
 
+  /** Surface a launch, chunk-load, or protocol-version error inside the Hangar modal. */
+  reportError(message: string): void {
+    this.error = message;
+    this.emit();
+  }
+
   private openRoomSocket(code: string, role: CoopRole, tvMode: boolean): void {
     this.code = normalizeCoopRoomCode(code);
     this.welcomedOnce = false;

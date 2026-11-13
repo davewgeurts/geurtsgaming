@@ -949,11 +949,34 @@
         /* no speech, or storage blocked: the game is silent or decides for itself */
       }
       try {
-        const [{ Game }, multiplayer, coopFlightMod] = await Promise.all([
-          import('../game/game'),
-          ensureMultiplayer(),
-          coopSession ? import('../game/coop-flight') : Promise.resolve(null),
-        ]);
+        let GameCtor: typeof Game;
+        let multiplayer: MultiplayerClient;
+        let coopFlightMod: typeof import('../game/coop-flight') | null;
+        try {
+          const [{ Game }, mpInstance, flightMod] = await Promise.all([
+            import('../game/game'),
+            ensureMultiplayer(),
+            coopSession ? import('../game/coop-flight') : Promise.resolve(null),
+          ]);
+          GameCtor = Game;
+          multiplayer = mpInstance;
+          coopFlightMod = flightMod;
+        } catch (error) {
+          console.error('The arcade bundle could not be loaded.', error);
+          if (coopSession && coopOverlay) {
+            coopOverlay.hidden = false;
+            rest().forEach((el) => (el.inert = true));
+            coopModal?.controller.reportError('This game was updated or lost connection. Refresh the page to rejoin.');
+            coopOverlay.focus({ preventScroll: true });
+          } else {
+            overlay.hidden = true;
+            document.documentElement.classList.remove('game-active');
+            rest().forEach((el) => (el.inert = false));
+            announce(false);
+            launch.focus({ preventScroll: true });
+          }
+          return;
+        }
         overlay.hidden = false;
         if (leaveConfirm) leaveConfirm.hidden = true;
         document.documentElement.classList.add('game-active');
@@ -977,12 +1000,22 @@
                       coopOverlay.focus({ preventScroll: true });
                     }
                   },
+                  onVersionMismatch: (message) => {
+                    close(false, true);
+                    coopModal?.controller.leaveRoom();
+                    coopModal?.controller.reportError(message);
+                    if (coopOverlay) {
+                      coopOverlay.hidden = false;
+                      rest().forEach((el) => (el.inert = true));
+                      coopOverlay.focus({ preventScroll: true });
+                    }
+                  },
                   onStatus: (message) => {
                     if (status) status.textContent = message;
                   },
                 })
               : null;
-          game = new Game(canvas, {
+          game = new GameCtor(canvas, {
             multiplayer,
             ...(coopDirector ? { coop: { director: coopDirector } } : {}),
             onExit: () => {
@@ -1054,17 +1087,45 @@
       if (leaveConfirm) leaveConfirm.hidden = true;
       close();
     });
-    leaveConfirm?.addEventListener('keydown', (e) => {
-      if (e.key === 'Tab' && stayBtn && confirmLeaveBtn) {
-        if (e.shiftKey && document.activeElement === stayBtn) {
-          e.preventDefault();
-          confirmLeaveBtn.focus({ preventScroll: true });
-        } else if (!e.shiftKey && document.activeElement === confirmLeaveBtn) {
-          e.preventDefault();
-          stayBtn.focus({ preventScroll: true });
-        }
+    leaveConfirm?.addEventListener('pointerdown', (e) => {
+      if (e.target === leaveConfirm || (leaveConfirm.contains(e.target as Node) && e.target !== stayBtn && e.target !== confirmLeaveBtn)) {
+        e.preventDefault();
+        stayBtn?.focus({ preventScroll: true });
       }
     });
+    window.addEventListener(
+      'keydown',
+      (e) => {
+        if (!leaveConfirm || leaveConfirm.hidden) return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.code === 'Escape') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          hideLeaveConfirm();
+          return;
+        }
+        if (e.key === 'Tab' && stayBtn && confirmLeaveBtn) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          if (document.activeElement === stayBtn) {
+            (e.shiftKey ? confirmLeaveBtn : confirmLeaveBtn).focus({ preventScroll: true });
+          } else if (document.activeElement === confirmLeaveBtn) {
+            stayBtn.focus({ preventScroll: true });
+          } else {
+            (e.shiftKey ? confirmLeaveBtn : stayBtn).focus({ preventScroll: true });
+          }
+          return;
+        }
+        const onSheetBtn = document.activeElement === stayBtn || document.activeElement === confirmLeaveBtn;
+        if (onSheetBtn && (e.code === 'Enter' || e.code === 'Space')) {
+          e.stopImmediatePropagation();
+          return;
+        }
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      },
+      true,
+    );
     ranks?.addEventListener('click', () => {
       game?.toggleLeaderboard();
       overlay.focus({ preventScroll: true });

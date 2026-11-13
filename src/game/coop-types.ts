@@ -6,7 +6,7 @@
  */
 import type { Grade } from './fireworks';
 
-export const COOP_PROTOCOL_VERSION = 1;
+export const COOP_PROTOCOL_VERSION = 2;
 
 /** Unambiguous 31-symbol room code alphabet (`0/O/1/I/L` omitted) — matches `relay/room.mjs`. */
 export const COOP_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';

@@ -9,6 +9,10 @@ import {
   computeCoopViewportLayout,
 } from '../src/game/coop-thumbdeck';
 import { COOP_ARENA_HEIGHT, COOP_ARENA_WIDTH, type CoopPublicSeat } from '../src/game/coop-types';
+import { NEON, type Ink } from '../src/game/core';
+import { textWidth } from '../src/game/font';
+import { freshVillain, renderHud, renderMessages, type Box, type HudViewContext } from '../src/game/hud';
+import { UPGRADES } from '../src/game/upgrades';
 
 test('computeCoopViewportLayout reserves bottom 38% on portrait phones and full 3:4 arena on tablets/laptops', () => {
   // Portrait iPhone (390 x 844)
@@ -116,9 +120,11 @@ test('Portrait-phone Host lets 100% of touches pass through on Game Over or Paus
   };
   dir.bindWorld(stubWorld as never);
 
-  // 1. During normal play with NO Sum Boss active, upper-arena taps pass through (`false`) while pad touches steer (`true`)
+  // 1. During normal play with NO Sum Boss active, upper-arena taps are swallowed (`true`) with 0 steering or queued taps (`3.1`), while pad touches steer (`true`)
   const upperPt = arenaToClientPoint(phone, 384, 300);
-  assert.equal(dir.handlePointerDown(1, upperPt.x, upperPt.y, true), false);
+  assert.equal(dir.handlePointerDown(1, upperPt.x, upperPt.y, true), true);
+  assert.equal(dir.deck.state().touching, false);
+  assert.equal(dir.deck.consumeArenaTap(), null);
   const padX = phone.padRect.x + phone.padRect.w / 2;
   const padY = phone.padRect.y + phone.padRect.h / 2;
   assert.equal(dir.handlePointerDown(2, padX, padY, true), true);
@@ -158,3 +164,336 @@ test('Portrait-phone Host lets 100% of touches pass through on Game Over or Paus
 function formationSpawnX0(): number {
   return COOP_ARENA_WIDTH / 2 + (0 - 1.5) * 96;
 }
+
+interface RecordedBatch extends Box {
+  color: string;
+}
+
+function createStrokeRecorder() {
+  const stack: Array<{ tx: number; ty: number; sx: number; sy: number }> = [];
+  let tx = 0;
+  let ty = 0;
+  let sx = 1;
+  let sy = 1;
+  let curMinX = Infinity;
+  let curMinY = Infinity;
+  let curMaxX = -Infinity;
+  let curMaxY = -Infinity;
+  const batches: RecordedBatch[] = [];
+
+  const mark = (x: number, y: number) => {
+    const px = tx + x * sx;
+    const py = ty + y * sy;
+    if (px < curMinX) curMinX = px;
+    if (py < curMinY) curMinY = py;
+    if (px > curMaxX) curMaxX = px;
+    if (py > curMaxY) curMaxY = py;
+  };
+
+  const resetCur = () => {
+    curMinX = Infinity;
+    curMinY = Infinity;
+    curMaxX = -Infinity;
+    curMaxY = -Infinity;
+  };
+
+  let inInk = false;
+  const ctxStrokes: RecordedBatch[] = [];
+
+  const ctx = {
+    save() {
+      stack.push({ tx, ty, sx, sy });
+    },
+    restore() {
+      const prev = stack.pop();
+      if (prev) {
+        tx = prev.tx;
+        ty = prev.ty;
+        sx = prev.sx;
+        sy = prev.sy;
+      }
+    },
+    translate(dx: number, dy: number) {
+      tx += dx * sx;
+      ty += dy * sy;
+    },
+    scale(kx: number, ky: number) {
+      sx *= kx;
+      sy *= ky;
+    },
+    beginPath() {
+      if (!inInk) resetCur();
+    },
+    closePath() {},
+    moveTo(x: number, y: number) {
+      mark(x, y);
+    },
+    lineTo(x: number, y: number) {
+      mark(x, y);
+    },
+    rect(x: number, y: number, w: number, h: number) {
+      mark(x, y);
+      mark(x + w, y + h);
+    },
+    arc(x: number, y: number, r: number) {
+      mark(x - r, y - r);
+      mark(x + r, y + r);
+    },
+    arcTo(x1: number, y1: number, x2: number, y2: number) {
+      mark(x1, y1);
+      mark(x2, y2);
+    },
+    quadraticCurveTo(cx: number, cy: number, x: number, y: number) {
+      mark(cx, cy);
+      mark(x, y);
+    },
+    fill() {},
+    stroke() {
+      if (!inInk && Number.isFinite(curMinX)) {
+        ctxStrokes.push({
+          color: String((ctx as unknown as { strokeStyle: string }).strokeStyle),
+          x: curMinX,
+          y: curMinY,
+          w: Math.max(0, curMaxX - curMinX),
+          h: Math.max(0, curMaxY - curMinY),
+        });
+      }
+    },
+    fillRect() {},
+    strokeRect(x: number, y: number, w: number, h: number) {
+      mark(x, y);
+      mark(x + w, y + h);
+    },
+    clip() {},
+    fillStyle: '',
+    strokeStyle: '',
+    shadowColor: '',
+    shadowBlur: 0,
+    globalAlpha: 1,
+    lineWidth: 1,
+  } as unknown as CanvasRenderingContext2D;
+
+  const ink: Ink = (color, _alpha, _width, draw) => {
+    inInk = true;
+    resetCur();
+    draw();
+    inInk = false;
+    if (Number.isFinite(curMinX)) {
+      batches.push({
+        color,
+        x: curMinX,
+        y: curMinY,
+        w: Math.max(0, curMaxX - curMinX),
+        h: Math.max(0, curMaxY - curMinY),
+      });
+    }
+  };
+
+  return { ctx, ink, batches, ctxStrokes };
+}
+
+function boxesOverlap(a: Box, b: Box): boolean {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function baseHudContext(
+  ctx: CanvasRenderingContext2D,
+  ink: Ink,
+  overrides: Partial<HudViewContext> = {},
+): HudViewContext {
+  const villain = freshVillain();
+  villain.show = 10;
+  villain.line = 'SOLVE THIS OR FALL';
+  villain.lineUntil = 10;
+  return {
+    ctx,
+    ink,
+    w: COOP_ARENA_WIDTH,
+    h: COOP_ARENA_HEIGHT,
+    scale: 1,
+    shipScale: 1,
+    inset: { top: 0, right: 0, bottom: 0, left: 0 },
+    room: COOP_ARENA_WIDTH,
+    homeY: COOP_ARENA_HEIGHT * 0.86,
+    time: 1.0,
+    reduceMotion: true,
+    coarse: true,
+    input: 'touch',
+    state: 'playing',
+    stateTime: 1.5,
+    paused: false,
+    shipX: 384,
+    shipY: 880,
+    lean: 0,
+    hull: 3,
+    maxHull: 3,
+    energy: 0.8,
+    jam: 0,
+    score: 12450,
+    best: 25000,
+    newBest: false,
+    wave: 8,
+    banner: 0,
+    freed: 14,
+    freedPulse: 0,
+    soulsInFlight: 0,
+    bossFreed: 0,
+    bossNote: '',
+    intermission: 0,
+    fuelNote: { text: '', until: 0, color: '#ffffff' },
+    upgrades: new Set(UPGRADES.map((u) => u.id)),
+    boss: { state: 'fight', kind: 'sum', x: 384, y: 200, hp: 14, maxHp: 20 } as never,
+    tanker: null,
+    brk: null,
+    prompt: null,
+    pilotMood: 'calm',
+    villainMood: 'calm',
+    villain,
+    callsign: 'ACE',
+    onlineCount: 4,
+    ...overrides,
+  };
+}
+
+test('Round 13 (4.2): tablet portrait (768x1024 and 810x1080) wingman tags have zero overlap with HUD face, wave, upgrades, or boss', () => {
+  const fourSeats: CoopPublicSeat[] = [0, 1, 2, 3].map((i) => ({
+    seat: i as 0 | 1 | 2 | 3,
+    callsign: `P${i + 1}`,
+    ready: true,
+    isHost: i === 0,
+    connected: true,
+  }));
+
+  for (const [vw, vh] of [
+    [768, 1024],
+    [810, 1080],
+  ] as const) {
+    const client = new CoopClient({ code: 'TAB768', role: 'host', storage: null });
+    Object.assign(client, { seat: 0, seats: fourSeats });
+    const dir = new CoopFlightDirector({ client, initialSeats: fourSeats, storage: null, now: () => 1000 });
+    const layout = dir.setViewport(vw, vh, undefined, true);
+    assert.equal(layout.useThumbDeck, false);
+    assert.ok(layout.arenaRect.x < 132, 'tablet portrait uses top compact wingman bar');
+
+    const hudRec = createStrokeRecorder();
+    hudRec.ctx.save();
+    hudRec.ctx.translate(layout.arenaRect.x, layout.arenaRect.y);
+    hudRec.ctx.scale(layout.arenaScale, layout.arenaScale);
+    renderHud(baseHudContext(hudRec.ctx, hudRec.ink));
+    hudRec.ctx.restore();
+    assert.ok(hudRec.batches.length >= 8, 'HUD rendered portrait, score, wave, 10 upgrades, and boss corner');
+
+    const chromeRec = createStrokeRecorder();
+    dir.renderViewportChrome(chromeRec.ctx, chromeRec.ink, 1.0);
+    // Batch 0 is the full 3:4 arena frame rect; batches 1..4 are P1..P4 wingman tags
+    const tagBoxes = chromeRec.batches.slice(1);
+    assert.equal(tagBoxes.length, 4, `${vw}x${vh}: expected 4 wingman tag batches`);
+
+    const arcadeControlsBox: Box = { x: vw - 180, y: 12, w: 168, h: 40 };
+    for (let idx = 0; idx < tagBoxes.length; idx++) {
+      const tag = tagBoxes[idx]!;
+      assert.equal(
+        boxesOverlap(tag, arcadeControlsBox),
+        false,
+        `${vw}x${vh}: tag P${idx + 1} overlaps .arcade-controls`,
+      );
+      for (const hb of hudRec.batches) {
+        assert.equal(
+          boxesOverlap(tag, hb),
+          false,
+          `${vw}x${vh}: tag P${idx + 1} (${Math.round(tag.x)},${Math.round(tag.y)} ${Math.round(tag.w)}x${Math.round(tag.h)}) overlaps HUD element (${Math.round(hb.x)},${Math.round(hb.y)} ${Math.round(hb.w)}x${Math.round(hb.h)})`,
+        );
+      }
+    }
+
+    dir.dispose();
+    client.dispose();
+  }
+});
+
+test('Round 13 (Sec 5): Guest Game Over shows host-relaunch notice without Top 10, Game Over hides reboot timers, and stacked wrecks stagger labels', () => {
+  // 1. Guest Game Over draws "WAITING FOR THE HOST TO RELAUNCH" (at mid + 96) and omits BEST + Top 10 + Retry
+  const guestRec = createStrokeRecorder();
+  renderMessages(
+    baseHudContext(guestRec.ctx, guestRec.ink, {
+      time: 0.2,
+      state: 'over',
+      stateTime: 1.5,
+      coarse: false,
+      input: 'keys',
+      coopRole: 'guest',
+    }),
+  );
+  const expectedWaitWidth = textWidth('WAITING FOR THE HOST TO RELAUNCH', 10);
+  assert.equal(guestRec.batches.length, 4, 'Guest Game Over draws exactly 4 lines (GAME OVER, SCORE, SQUAD SET FREE, WAITING FOR HOST)');
+  const waitBatch = guestRec.batches[3]!;
+  assert.equal(waitBatch.color, NEON.cyan);
+  assert.ok(Math.abs(waitBatch.w - expectedWaitWidth) < 4, 'bottom line matches WAITING FOR THE HOST TO RELAUNCH');
+
+  // Solo Game Over still draws BEST + TOP 10 + PRESS SPACE TO RETRY (6 lines)
+  const soloRec = createStrokeRecorder();
+  renderMessages(
+    baseHudContext(soloRec.ctx, soloRec.ink, {
+      time: 0.2,
+      state: 'over',
+      stateTime: 1.5,
+      coarse: false,
+      input: 'keys',
+      coopRole: undefined,
+    }),
+  );
+  assert.equal(soloRec.batches.length, 6, 'Solo Game Over still draws all 6 solo lines including BEST and Top 10');
+
+  // 2. Two pilots wrecked at the exact same (384, 700) stagger their label Ys and say "HULL DOWN" on Game Over
+  const twoSeats: CoopPublicSeat[] = [
+    { seat: 0, callsign: 'ACE', ready: true, isHost: true, connected: true },
+    { seat: 1, callsign: 'NOVA', ready: true, isHost: false, connected: true },
+  ];
+  const client = new CoopClient({ code: 'WRECKS', role: 'host', storage: null });
+  Object.assign(client, { seat: 0, seats: twoSeats });
+  const dir = new CoopFlightDirector({ client, initialSeats: twoSeats, storage: null, now: () => 1000 });
+  const stubWorld = {
+    gameOver: false,
+    paused: false,
+    boss: null,
+    upgrades: new Set<string>(),
+  };
+  dir.bindWorld(stubWorld as never);
+  for (const s of [0, 1] as const) {
+    dir.pilots[s].alive = false;
+    dir.pilots[s].x = 384;
+    dir.pilots[s].y = 700;
+    dir.pilots[s].respawnSec = 4.2;
+  }
+
+  const liveWreckRec = createStrokeRecorder();
+  dir.renderSquadShips(liveWreckRec.ctx, liveWreckRec.ink, 1.0, 1, 1, true, new Set());
+  // Each dead pilot draws 1 combined ghost-ship + reboot-label batch; co-located P2 shifts its label down by +10px
+  assert.equal(liveWreckRec.batches.length, 2);
+  const liveBatch1 = liveWreckRec.batches[0]!;
+  const liveBatch2 = liveWreckRec.batches[1]!;
+  assert.ok(
+    liveBatch2.y + liveBatch2.h - (liveBatch1.y + liveBatch1.h) >= 9.5,
+    `co-located wreck labels stagger vertically (${liveBatch1.y + liveBatch1.h} vs ${liveBatch2.y + liveBatch2.h})`,
+  );
+
+  stubWorld.gameOver = true;
+  const overWreckRec = createStrokeRecorder();
+  dir.renderSquadShips(overWreckRec.ctx, overWreckRec.ink, 1.0, 1, 1, true, new Set());
+  assert.equal(overWreckRec.batches.length, 0, 'Game Over hides arena REBOOT ghost countdowns');
+
+  // 3. Portrait-phone thumb deck replaces "WINGMAN REBOOT IN 5 SEC" with "SQUAD DOWN" on Game Over
+  dir.setViewport(390, 844, undefined, true);
+  stubWorld.gameOver = false;
+  const liveDeckRec = createStrokeRecorder();
+  dir.renderViewportChrome(liveDeckRec.ctx, liveDeckRec.ink, 1.0);
+  stubWorld.gameOver = true;
+  const overDeckRec = createStrokeRecorder();
+  dir.renderViewportChrome(overDeckRec.ctx, overDeckRec.ink, 1.0);
+  const liveBannerW = Math.max(...liveDeckRec.ctxStrokes.filter((b) => b.color === NEON.orange).map((b) => b.w));
+  const overBannerW = Math.max(...overDeckRec.ctxStrokes.filter((b) => b.color === NEON.orange).map((b) => b.w));
+  assert.ok(overBannerW < liveBannerW - 40, 'Thumb deck replaces WINGMAN REBOOT IN ... SEC with SQUAD DOWN on Game Over');
+
+  dir.dispose();
+  client.dispose();
+});

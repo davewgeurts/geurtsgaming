@@ -146,6 +146,8 @@ export class Game {
   private readonly input: Input;
   /** Counts the ship's volleys, for the things that fire every other one. */
   private volley = 0;
+  /** Rotates auto-firing upgrades (lance, rockets, nova) across living Co-op pilots without touching Solo volley parity. */
+  private upgradeTurn = 0;
   /** Scratch space for sorting things by colour before drawing them. */
   private readonly tints = new Set<string>();
 
@@ -287,9 +289,28 @@ export class Game {
       destroyEnemy: (e) => self.destroyEnemy(e),
       equipUpgrade: (id) => self.equip(id),
       detonateScreen: (ox, oy, color) => {
-        for (const e of self.enemies) if (!e.dead) self.destroyEnemy(e);
+        let fxBudget = 12;
+        for (const e of self.enemies) {
+          if (!e.dead) {
+            self.destroyEnemy(e);
+            if (self.coop?.isHost && fxBudget > 0) {
+              fxBudget -= 1;
+              self.coop.recordHostFx('enemy-burst', e.x, e.y, KINDS[e.kind].color, { enemyKind: e.kind });
+            }
+          }
+        }
         for (const s of self.shots) if (s.hostile) s.dead = true;
+        const brokenBefore = self.sets.brokenRockIds.length;
         self.sets.blast(self.setEnv());
+        if (self.coop?.isHost && self.sets.field && self.sets.brokenRockIds.length > brokenBefore) {
+          let rockFx = 0;
+          for (const r of self.sets.near) {
+            if (r.dead && !r.tough && rockFx < 3) {
+              rockFx += 1;
+              self.coop.recordHostFx('rock-break', r.x, self.sets.field.front - r.d, PEBBLE, { toughRock: false });
+            }
+          }
+        }
         self.rings.push({ x: ox, y: oy, age: 0, color });
         self.sound.play('blast');
         if (!self.reduceMotion) self.shake = 0.4;
@@ -337,6 +358,7 @@ export class Game {
             pointerMove: (id: number, x: number, y: number) => this.coop!.handlePointerMove(id, x, y),
             pointerUp: (id: number) => this.coop!.handlePointerUp(id),
             pointerDrop: () => this.coop!.releasePointers(),
+            allowButtonSpace: true,
           }
         : {}),
     }, this.coarse ? 'touch' : 'keys');
@@ -733,7 +755,7 @@ export class Game {
     if (this.coop) {
       if (document.hidden) {
         this.voice.hush();
-        this.input.letGo();
+        this.input.drop();
         this.last = performance.now();
         this.bgTimer = setInterval(() => {
           const now = performance.now();
@@ -866,6 +888,7 @@ export class Game {
     this.villain = freshVillain();
     this.picking = false;
     this.showLeaderboard = false;
+    this.upgradeTurn = 0;
     this.coop.resetSquadForNewRun();
     this.setState('playing');
     this.sound.play('start');
@@ -1837,7 +1860,7 @@ export class Game {
 
     if (has('lance') && (this.lanceIn -= dt) <= 0) {
       this.lanceIn = LANCE_SECONDS;
-      const origin = shooters[this.volley++ % shooters.length]!;
+      const origin = shooters[this.upgradeTurn++ % shooters.length]!;
       const x = origin.x;
       this.beams.push({ x, y: origin.y - 18 * sc, age: 0 });
       this.sound.play('beam');
@@ -1849,14 +1872,14 @@ export class Game {
 
     if (has('rockets') && (this.rocketIn -= dt) <= 0) {
       this.rocketIn = ROCKET_SECONDS;
-      const origin = shooters[this.volley++ % shooters.length]!;
+      const origin = shooters[this.upgradeTurn++ % shooters.length]!;
       this.rockets.push({ x: origin.x, y: origin.y - 16 * sc, vx: (Math.random() < 0.5 ? -1 : 1) * 140, vy: -240, age: 0, dead: false });
       this.sound.play('rocket');
     }
 
     if (has('nova') && (this.novaIn -= dt) <= 0) {
       this.novaIn = NOVA_SECONDS;
-      const origin = shooters[this.volley++ % shooters.length]!;
+      const origin = shooters[this.upgradeTurn++ % shooters.length]!;
       const reach = 210 * sc;
       this.rings.push({ x: origin.x, y: origin.y, age: 0, color: NEON.cyan, reach });
       this.sound.play('nova');
@@ -2051,6 +2074,7 @@ export class Game {
       totalLiberated: this.coop ? this.freed : squad.totalLiberated,
       topPilots: this.coop ? [] : squad.topPilots,
       showLeaderboard: this.showLeaderboard,
+      ...(this.coop ? { coopRole: this.coop.isHost ? ('host' as const) : ('guest' as const) } : {}),
       grading: this.picking ? this.pickAge : null,
     };
   }

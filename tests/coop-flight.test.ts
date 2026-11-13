@@ -4,6 +4,8 @@ import { CoopRoom } from '../relay/room.mjs';
 import { createBoss, tapBoss, type Boss, type BossEnv } from '../src/game/boss';
 import { CoopClient, type CoopConnectOptions, type StorageLike } from '../src/game/coop-client';
 import {
+  COOP_ACK_DEADBAND_PX,
+  COOP_STALE_INPUT_SEC,
   COOP_WINGMAN_RESPAWN_SEC,
   CoopFlightDirector,
   formationSpawnForSeat,
@@ -12,8 +14,15 @@ import {
   type CoopPickupItem,
   type CoopWorldAdapter,
 } from '../src/game/coop-flight';
-import { COOP_WORLD_H, COOP_WORLD_W, decodeGuestInput, decodeWorldSnapshot } from '../src/game/coop-protocol';
-import { COOP_SEAT_COLORS, type CoopErrorMessage } from '../src/game/coop-types';
+import {
+  COOP_WORLD_H,
+  COOP_WORLD_W,
+  SNAP_MAX_FX,
+  decodeGuestInput,
+  decodeWorldSnapshot,
+  encodeWorldSnapshot,
+} from '../src/game/coop-protocol';
+import { COOP_SEAT_COLORS, type CoopErrorMessage, type CoopLobbyState, type CoopPublicSeat } from '../src/game/coop-types';
 import { KINDS, makeEnemy, type Enemy } from '../src/game/enemies';
 import { makeProblem } from '../src/game/maths';
 import { ALERT_LEAD, SetPieces, type SetPieceEnv } from '../src/game/setpieces';
@@ -942,4 +951,480 @@ test('Guest own-ship prediction has 0.0px lag/drift under 60±40ms jitter, and S
   guestDir.dispose();
   hostClient.dispose();
   guestClient.dispose();
+});
+
+function createDirectPair(opts?: {
+  seats?: CoopPublicSeat[];
+  tvMode?: boolean;
+  guestViewport?: [number, number, boolean];
+  onVersionMismatch?: () => void;
+}) {
+  let clockMs = 1000;
+  const now = () => clockMs;
+  const roster: CoopPublicSeat[] =
+    opts?.seats ??
+    [
+      { seat: 0, callsign: 'ACE', ready: true, isHost: true, connected: true },
+      { seat: 1, callsign: 'NOVA', ready: true, isHost: false, connected: true },
+    ];
+  const wireQueue: Array<{ at: number; toHost: boolean; bytes: Uint8Array }> = [];
+  const binarySinks: { host?: (b: Uint8Array) => void; guest?: (b: Uint8Array) => void } = {};
+  const lobbySinks: { host?: (l: CoopLobbyState) => void; guest?: (l: CoopLobbyState) => void } = {};
+  let upDelay: () => number = () => 5;
+  let downDelay: () => number = () => 5;
+
+  const makeMockClient = (role: 'host' | 'guest', seat: 0 | 1) => {
+    const c = new CoopClient({
+      code: 'R13FIX',
+      role,
+      callsign: role === 'host' ? 'ACE' : 'NOVA',
+      tvMode: Boolean(opts?.tvMode),
+      storage: null,
+    });
+    Object.assign(c, { seat, seats: roster.map((s) => ({ ...s })) });
+    const origSub = c.subscribe.bind(c);
+    c.subscribe = (h) => {
+      if (role === 'host') {
+        binarySinks.host = h.onBinary;
+        lobbySinks.host = h.onLobby;
+      } else {
+        binarySinks.guest = h.onBinary;
+        lobbySinks.guest = h.onLobby;
+      }
+      return origSub(h);
+    };
+    c.sendBinary = (bytes: Uint8Array) => {
+      const copy = new Uint8Array(bytes);
+      if (role === 'guest') copy[1] = seat;
+      const delay = role === 'guest' ? upDelay() : downDelay();
+      wireQueue.push({ at: clockMs + delay, toHost: role === 'guest', bytes: copy });
+      return true;
+    };
+    c.sendEvent = () => true;
+    c.sendHostPaused = () => true;
+    return c;
+  };
+
+  const hostClient = makeMockClient('host', 0);
+  const guestClient = makeMockClient('guest', 1);
+  const hostWorld = new HeadlessArenaWorld(false);
+  const guestWorld = new HeadlessArenaWorld(true);
+  const hostDir = new CoopFlightDirector({ client: hostClient, initialSeats: roster, storage: null, now });
+  const guestDir = new CoopFlightDirector({
+    client: guestClient,
+    initialSeats: roster,
+    storage: null,
+    now,
+    onVersionMismatch: opts?.onVersionMismatch,
+  });
+  hostDir.bindWorld(hostWorld);
+  guestDir.bindWorld(guestWorld);
+  if (opts?.guestViewport) {
+    const [vw, vh, coarse] = opts.guestViewport;
+    guestDir.setViewport(vw, vh, undefined, coarse);
+  }
+
+  const flushWire = () => {
+    wireQueue.sort((a, b) => a.at - b.at);
+    while (wireQueue.length > 0 && wireQueue[0]!.at <= clockMs) {
+      const pkt = wireQueue.shift()!;
+      if (pkt.toHost) binarySinks.host?.(pkt.bytes);
+      else binarySinks.guest?.(pkt.bytes);
+    }
+  };
+
+  return {
+    get clockMs() {
+      return clockMs;
+    },
+    advanceClock(ms: number) {
+      clockMs += ms;
+    },
+    setDelays(up: () => number, down: () => number) {
+      upDelay = up;
+      downDelay = down;
+    },
+    wireQueue,
+    binarySinks,
+    lobbySinks,
+    hostClient,
+    guestClient,
+    hostWorld,
+    guestWorld,
+    hostDir,
+    guestDir,
+    flushWire,
+    dispose() {
+      hostDir.dispose();
+      guestDir.dispose();
+      hostClient.dispose();
+      guestClient.dispose();
+    },
+  };
+}
+
+test('Round 13 (3.1): portrait-phone Guest upper-arena touch moves Guest ship 0.0px on Host and locally', () => {
+  const pair = createDirectPair({ guestViewport: [390, 844, true] });
+  assert.equal(pair.guestDir.layout.useThumbDeck, true);
+  const idle: CoopLocalControlInput = { across: 0, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 };
+  const dt = 1 / 60;
+
+  for (let i = 0; i < 20; i++) {
+    pair.advanceClock(dt * 1000);
+    pair.flushWire();
+    pair.hostDir.step(dt, dt, pair.hostWorld, idle);
+    pair.guestDir.step(dt, dt, pair.guestWorld, idle);
+  }
+
+  const startHost = { x: pair.hostDir.pilots[1].x, y: pair.hostDir.pilots[1].y };
+  const startGuest = { x: pair.guestDir.pilots[1].x, y: pair.guestDir.pilots[1].y };
+
+  // 1. Real upper-arena pointerdown at screen (100, 150) is swallowed by the thumb deck
+  assert.equal(pair.guestDir.handlePointerDown(42, 100, 150, true), true);
+  assert.equal(pair.guestDir.deck.state().touching, false);
+
+  // 2. Even if Input leaked `touching: true, touchX: 193, touchY: 284` for 2.0s, Guest never sends ctrl.touch* in deck mode
+  const leakedArenaCtrl: CoopLocalControlInput = {
+    across: 0,
+    down: 0,
+    firing: false,
+    touching: true,
+    touchX: 193,
+    touchY: 284,
+  };
+  for (let f = 0; f < 120; f++) {
+    pair.advanceClock(dt * 1000);
+    pair.flushWire();
+    pair.guestDir.step(dt, dt, pair.guestWorld, leakedArenaCtrl);
+    pair.hostDir.step(dt, dt, pair.hostWorld, idle);
+  }
+  pair.guestDir.handlePointerUp(42);
+
+  assert.equal(Math.hypot(pair.hostDir.pilots[1].x - startHost.x, pair.hostDir.pilots[1].y - startHost.y), 0);
+  assert.equal(Math.hypot(pair.guestDir.pilots[1].x - startGuest.x, pair.guestDir.pilots[1].y - startGuest.y), 0);
+  pair.dispose();
+});
+
+test('Round 13 (3.2 & reboot): short Wi-Fi drop keeps run & reboot timers alive while explicit Leave ends immediately, and respawned Guest moves 0.0px toward death spot', () => {
+  const idle: CoopLocalControlInput = { across: 0, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 };
+  const dt = 1 / 60;
+
+  // Case A: Host rebooting + Guest Wi-Fi blip (`connected: false`, `present: true`) keeps run alive AND ticks Host reboot timer!
+  const pair = createDirectPair();
+  pair.hostDir.pilots[0].alive = false;
+  pair.hostDir.pilots[0].hull = 0;
+  pair.hostDir.pilots[0].respawnSec = 3.0;
+  pair.lobbySinks.host?.({
+    code: 'R13FIX',
+    formattedCode: 'R13-FIX',
+    hostConnected: true,
+    tvMode: false,
+    locked: true,
+    seats: [
+      { seat: 0, callsign: 'ACE', ready: true, isHost: true, connected: true },
+      { seat: 1, callsign: 'NOVA', ready: true, isHost: false, connected: false },
+    ],
+  });
+  assert.equal(pair.hostWorld.gameOver, false, 'transient Wi-Fi blip of last living pilot never ends the run');
+  for (let f = 0; f < 60; f++) {
+    pair.advanceClock(dt * 1000);
+    pair.hostDir.step(dt, dt, pair.hostWorld, idle);
+  }
+  assert.ok(pair.hostDir.pilots[0].respawnSec < 2.1, 'reboot timer continues ticking while living seat is held in grace');
+  assert.equal(pair.hostWorld.gameOver, false);
+
+  // Explicit Leave removes Seat 1 from roster (`present: false`) while Host is still down -> immediate Game Over (`3.4` preserved)
+  pair.lobbySinks.host?.({
+    code: 'R13FIX',
+    formattedCode: 'R13-FIX',
+    hostConnected: true,
+    tvMode: false,
+    locked: true,
+    seats: [{ seat: 0, callsign: 'ACE', ready: true, isHost: true, connected: true }],
+  });
+  assert.equal(pair.hostWorld.gameOver, true, 'explicit Leave of last living pilot ends the run immediately');
+  pair.dispose();
+
+  // Case B: TV mode (`Seat 0` absent) — Guest blips or connects late without ending the run
+  const tvSeats: CoopPublicSeat[] = [
+    { seat: 1, callsign: 'NOVA', ready: true, isHost: false, connected: false },
+  ];
+  const tvPair = createDirectPair({ seats: tvSeats, tvMode: true });
+  tvPair.advanceClock(16.67);
+  tvPair.hostDir.step(dt, dt, tvPair.hostWorld, idle);
+  assert.equal(tvPair.hostWorld.gameOver, false, 'TV mode starting while Guest socket is still connecting stays alive');
+  tvPair.dispose();
+
+  // Case C: Rebooted Guest ship with in-flight death-spot packets moves 0.0px from spawn on Host
+  const rbPair = createDirectPair();
+  rbPair.setDelays(() => 65, () => 65);
+  // Fly Guest to (620, 560), then kill Guest while packets carrying (620, 560) are still arriving
+  for (let f = 0; f < 90; f++) {
+    rbPair.advanceClock(dt * 1000);
+    rbPair.flushWire();
+    rbPair.guestDir.step(dt, dt, rbPair.guestWorld, { ...idle, across: 1, down: -1 });
+    rbPair.hostDir.step(dt, dt, rbPair.hostWorld, idle);
+  }
+  for (let f = 0; f < 20; f++) {
+    rbPair.advanceClock(dt * 1000);
+    rbPair.flushWire();
+    rbPair.guestDir.step(dt, dt, rbPair.guestWorld, idle);
+    rbPair.hostDir.step(dt, dt, rbPair.hostWorld, idle);
+  }
+  const deathSpot = { x: rbPair.hostDir.pilots[1].x, y: rbPair.hostDir.pilots[1].y };
+  assert.ok(deathSpot.x > 500 && deathSpot.y < 700);
+
+  // Kill Seat 1 via lethal hostile shot on Host and fast-forward through the 5s reboot with Guest idle
+  rbPair.hostDir.pilots[1].hull = 1;
+  rbPair.hostDir.pilots[1].invulnerable = 0;
+  rbPair.hostWorld.shots.push({
+    x: deathSpot.x,
+    y: deathSpot.y,
+    vx: 0,
+    vy: 200,
+    hostile: true,
+    dead: false,
+    color: '#ff3366',
+  } as Shot);
+  rbPair.hostDir.collideHostSquad(rbPair.hostWorld, 1);
+  assert.equal(rbPair.hostDir.pilots[1].alive, false);
+
+  const spawn = formationSpawnForSeat(1);
+  let sawRespawn = false;
+  let maxPostSpawnExcursion = 0;
+  for (let f = 0; f < Math.ceil((COOP_WINGMAN_RESPAWN_SEC + 1.5) * 60); f++) {
+    rbPair.advanceClock(dt * 1000);
+    rbPair.flushWire();
+    rbPair.guestDir.step(dt, dt, rbPair.guestWorld, idle);
+    rbPair.hostDir.step(dt, dt, rbPair.hostWorld, idle);
+    if (rbPair.hostDir.pilots[1].alive) {
+      sawRespawn = true;
+      const d = Math.hypot(rbPair.hostDir.pilots[1].x - spawn.x, rbPair.hostDir.pilots[1].y - spawn.y);
+      maxPostSpawnExcursion = Math.max(maxPostSpawnExcursion, d);
+    }
+  }
+  assert.equal(sawRespawn, true);
+  assert.equal(maxPostSpawnExcursion, 0, 'respawned Guest ship moved 0.0px toward stale death spot on Host');
+  rbPair.dispose();
+});
+
+test('Round 13 (3.4): 600ms upstream stalls expire stale velocity after 150ms with < 30px release slide, and 24px deadband eases smoothly', () => {
+  assert.equal(COOP_STALE_INPUT_SEC, 0.15);
+  assert.equal(COOP_ACK_DEADBAND_PX, 24);
+
+  const idle: CoopLocalControlInput = { across: 0, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 };
+  const dt = 1 / 60;
+  let seed = 42;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
+
+  const pair = createDirectPair();
+  let stallUntilMs = 0;
+  let nextStallSec = 1.6;
+  pair.setDelays(
+    () => {
+      const base = 20 + rand() * 80;
+      const nowSec = (pair.clockMs - 1000) / 1000;
+      if (nowSec >= nextStallSec) {
+        stallUntilMs = pair.clockMs + 600;
+        nextStallSec += 2.2;
+      }
+      const stallHold = Math.max(0, stallUntilMs - pair.clockMs);
+      return base + stallHold;
+    },
+    () => 20 + rand() * 80,
+  );
+
+  let prevAcross = 0;
+  let releaseX: number | null = null;
+  let maxReleaseSlidePx = 0;
+  let maxSingleFrameJumpPx = 0;
+  let prevGuestX = pair.guestDir.pilots[1].x;
+
+  for (let f = 0; f < 60 * 10; f++) {
+    pair.advanceClock(dt * 1000);
+    pair.flushWire();
+    const tSec = f * dt;
+    const across = tSec % 1.4 < 0.9 ? (Math.floor(tSec / 1.4) % 2 === 0 ? 1 : -1) : 0;
+    pair.guestDir.step(dt, dt, pair.guestWorld, { ...idle, across });
+    pair.hostDir.step(dt, dt, pair.hostWorld, idle);
+
+    const gx = pair.guestDir.pilots[1].x;
+    maxSingleFrameJumpPx = Math.max(maxSingleFrameJumpPx, Math.abs(gx - prevGuestX));
+    prevGuestX = gx;
+
+    if (prevAcross !== 0 && across === 0) releaseX = gx;
+    if (releaseX !== null && across === 0) {
+      maxReleaseSlidePx = Math.max(maxReleaseSlidePx, Math.abs(gx - releaseX));
+    }
+    if (across !== 0) releaseX = null;
+    prevAcross = across;
+  }
+
+  assert.ok(maxReleaseSlidePx < 30, `600ms upstream stalls gave ${maxReleaseSlidePx.toFixed(1)}px release slide (< 30px)`);
+  assert.ok(maxSingleFrameJumpPx <= 12, `max 1-frame Guest step=${maxSingleFrameJumpPx.toFixed(1)}px`);
+  pair.dispose();
+
+  // Direct verification of the 24px deadband + <= 8px/frame easing when Host forcibly displaces Guest by 45px
+  const easePair = createDirectPair();
+  for (let f = 0; f < 20; f++) {
+    easePair.advanceClock(dt * 1000);
+    easePair.flushWire();
+    easePair.guestDir.step(dt, dt, easePair.guestWorld, idle);
+    easePair.hostDir.step(dt, dt, easePair.hostWorld, idle);
+  }
+  const displacedX = easePair.hostDir.pilots[1].x + 45;
+  let maxEaseStep = 0;
+  let lastX = easePair.guestDir.pilots[1].x;
+  for (let f = 0; f < 60; f++) {
+    easePair.advanceClock(dt * 1000);
+    easePair.flushWire();
+    easePair.guestDir.step(dt, dt, easePair.guestWorld, idle);
+    easePair.hostDir.step(dt, dt, easePair.hostWorld, idle);
+    easePair.hostDir.pilots[1].x = displacedX;
+    if (f % 3 === 0) easePair.hostDir.broadcastSnapshotNow(easePair.hostWorld);
+    const curX = easePair.guestDir.pilots[1].x;
+    maxEaseStep = Math.max(maxEaseStep, Math.abs(curX - lastX));
+    lastX = curX;
+  }
+  assert.ok(
+    Math.abs(easePair.guestDir.pilots[1].x - displacedX) <= COOP_ACK_DEADBAND_PX + 1,
+    `discrepancy > 24px reconciled inside deadband (got ${Math.abs(easePair.guestDir.pilots[1].x - displacedX).toFixed(2)}px)`,
+  );
+  assert.ok(maxEaseStep <= 8.1, `reconciliation eased smoothly at <= 8px/frame (got ${maxEaseStep.toFixed(2)}px)`);
+  easePair.dispose();
+});
+
+test('Round 13 (4.1, 4.3, Sec 5): bullet-crossing agreement, v1 mismatch banner, Guest local pierce by Enemy.id, and 16-FX cap', () => {
+  const idle: CoopLocalControlInput = { across: 0, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 };
+  const dt = 1 / 60;
+
+  // 1. 4.1: Single-bullet crossing sweep on LAN agrees on hits/misses (<= 6 disagreements across 71 near-miss crossings)
+  let disagreements = 0;
+  let agreeHit = 0;
+  const shipY = formationSpawnForSeat(1).y;
+  for (let k = 0; k <= 70; k++) {
+    const tCross = 2.3 + k * 0.01;
+    const p = createDirectPair();
+    let spawned = false;
+    let minSeen = Infinity;
+    for (let f = 1; f <= 220; f++) {
+      p.advanceClock(dt * 1000);
+      p.flushWire();
+      const t = (p.clockMs - 1000) / 1000;
+      const across = t >= 2.5 && t < 3.0 ? 1 : 0;
+      p.hostDir.step(dt, dt, p.hostWorld, idle);
+      if (!spawned && t >= tCross - 1.5) {
+        spawned = true;
+        p.hostWorld.shots.push({
+          x: 384,
+          y: shipY - 260 * (tCross - t),
+          vx: 0,
+          vy: 260,
+          hostile: true,
+          dead: false,
+          color: '#ff4466',
+        } as Shot);
+      }
+      for (const s of p.hostWorld.shots) {
+        s.x += s.vx * dt;
+        s.y += s.vy * dt;
+        if (s.y > COOP_WORLD_H + 40) s.dead = true;
+      }
+      p.hostDir.collideHostSquad(p.hostWorld, 1);
+      p.hostWorld.shots = p.hostWorld.shots.filter((s) => !s.dead);
+
+      p.guestDir.step(dt, dt, p.guestWorld, { ...idle, across });
+      const me = p.guestDir.pilots[1];
+      for (const s of p.guestWorld.shots) {
+        if (s.hostile) minSeen = Math.min(minSeen, Math.hypot(s.x - me.x, s.y - me.y));
+      }
+    }
+    const hit = p.hostDir.pilots[1].hull < 3;
+    const saw = minSeen < 12;
+    if (hit !== saw) disagreements++;
+    else if (hit && saw) agreeHit++;
+    p.dispose();
+  }
+  assert.ok(agreeHit >= 7, `expected >= 7 agreed hits across crossing sweep, got ${agreeHit}`);
+  assert.ok(disagreements <= 6, `expected <= 6 grazing disagreements across 71 crossings, got ${disagreements}`);
+
+  // 2. Section 5: Guest local `pierce` bolt passes through two stacked enemies across frames (Enemy.id skip)
+  const piercePair = createDirectPair();
+  piercePair.hostWorld.energy = 0.1;
+  piercePair.guestWorld.energy = 0.1;
+  piercePair.hostWorld.upgrades.add('pierce');
+  const e1 = makeEnemy('dart', 336, 700, 1);
+  const e2 = makeEnemy('dart', 336, 640, 1);
+  const e3 = makeEnemy('dart', 336, 580, 1);
+  e1.hp = 10;
+  e2.hp = 10;
+  e3.hp = 10;
+  piercePair.hostWorld.enemies.push(e1, e2, e3);
+  let minGuestBoltY = 999;
+  for (let f = 0; f < 36; f++) {
+    piercePair.advanceClock(dt * 1000);
+    piercePair.flushWire();
+    const fire = f >= 6 && f <= 10;
+    piercePair.hostDir.step(dt, dt, piercePair.hostWorld, idle);
+    for (const s of piercePair.hostWorld.shots) {
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+    }
+    piercePair.hostDir.collideHostSquad(piercePair.hostWorld, 1);
+    piercePair.hostWorld.shots = piercePair.hostWorld.shots.filter((s) => !s.dead);
+    piercePair.guestDir.step(dt, dt, piercePair.guestWorld, { ...idle, firing: fire });
+    for (const b of piercePair.guestDir['guestLocalBolts'] as Shot[]) {
+      if (b.y < minGuestBoltY) minGuestBoltY = b.y;
+    }
+  }
+  // Host twin bolts (pierce=2 -> each hits 3 enemies total: pierces e1 at 700 & e2 at 640, stops at e3 at 580)
+  assert.equal(e1.hp, 8);
+  assert.equal(e2.hp, 8);
+  assert.equal(e3.hp, 8);
+  assert.ok(minGuestBoltY <= 610, `Guest local pierce bolt also passed e1/e2 down to y=${minGuestBoltY}`);
+  piercePair.dispose();
+
+  // 3. Section 5: Host recentFx ring retains all 16 (`SNAP_MAX_FX`) FX recorded in one frame
+  const fxPair = createDirectPair();
+  for (let i = 0; i < SNAP_MAX_FX; i++) {
+    fxPair.hostDir.recordHostFx('enemy-burst', 100 + i * 20, 200, '#ffffff', { enemyKind: 'dart' });
+  }
+  const snapBytes = fxPair.hostDir.broadcastSnapshotNow(fxPair.hostWorld)!;
+  const decodedSnap = decodeWorldSnapshot(snapBytes)!;
+  assert.equal(decodedSnap.fx.length, SNAP_MAX_FX, 'all 16 FX in a single frame fit in the snapshot FX ring');
+  fxPair.dispose();
+
+  // 4. 4.3: Receiving v1 snapshots sets `versionMismatch` immediately and invokes `onVersionMismatch` on 2nd frame
+  let mismatchCount = 0;
+  const verPair = createDirectPair({ onVersionMismatch: () => mismatchCount++ });
+  const v1Bytes = encodeWorldSnapshot({
+    session: 1,
+    tick: 1,
+    hostElapsedMs: 50,
+    wave: 1,
+    banner: 0,
+    teamScore: 0,
+    freed: 0,
+    energy: 0.5,
+    paused: false,
+    parked: false,
+    gameOver: false,
+    ships: [],
+    enemies: [],
+    boss: null,
+    tanker: null,
+    field: null,
+    shots: [],
+    items: [],
+    fx: [],
+  });
+  v1Bytes[1] = (v1Bytes[1]! & ~0x03) | 1; // legacy v1
+  verPair.binarySinks.guest?.(v1Bytes);
+  assert.equal(verPair.guestDir.versionMismatch, true);
+  verPair.binarySinks.guest?.(v1Bytes);
+  assert.equal(mismatchCount, 1);
+  verPair.dispose();
 });
