@@ -11,11 +11,16 @@ import {
   SNAP_MAX_SHOTS,
   SnapshotInterpolator,
   decodeGuestInput,
+  decodeUpgradesMask,
   decodeWorldSnapshot,
   encodeGuestInput,
+  encodeUpgradesMask,
   encodeWorldSnapshot,
   formatBossMathQuestion,
+  packBrokenRockWords,
   parseBossMathQuestion,
+  unpackBrokenRockWords,
+  type CoopSnapFx,
   type CoopWorldSnapshot,
 } from '../src/game/coop-protocol';
 import { BIN_FRAME_INPUT, BIN_FRAME_SNAP, MAX_BINARY_BYTES } from '../src/game/coop-types';
@@ -443,4 +448,276 @@ test('SnapshotInterpolator smoothly lerps by seat/enemy ID at 60fps under jitter
     expectedSeqs,
     'every FX event (including dropped tick=7 recovered from tick=8) plays once in exact order across u8 wrap',
   );
+});
+
+test('encodeWorldSnapshot prioritizes enemy bullets, beams, and rockets over older bolts and packs 80+ broken rocks', () => {
+  const upgradesMask = encodeUpgradesMask(['rapid', 'wide', 'pierce', 'wingmates', 'guardian', 'nova']);
+  assert.deepEqual(decodeUpgradesMask(upgradesMask), ['rapid', 'wide', 'wingmates', 'pierce', 'guardian', 'nova']);
+
+  const brokenIds = Array.from({ length: 85 }, (_, i) => i * 5); // up to id=420
+  assert.deepEqual(unpackBrokenRockWords(packBrokenRockWords(brokenIds)), brokenIds);
+
+  const boltShots = Array.from({ length: 100 }, (_, i) => ({
+    kind: 'bolt' as const,
+    color: NEON.cyan,
+    heavy: false,
+    x: 100 + (i % 50) * 10,
+    y: 900 - i * 4,
+    vx: 0,
+    vy: -640,
+    beamLife: 0,
+  }));
+  const enemyShots = Array.from({ length: 14 }, (_, i) => ({
+    kind: 'enemy' as const,
+    color: NEON.orange,
+    heavy: false,
+    x: 80 + i * 40,
+    y: 300 + i * 10,
+    vx: 0,
+    vy: 260,
+    beamLife: 0,
+  }));
+  const specialShots = [
+    { kind: 'beam' as const, color: NEON.yellow, heavy: false, x: 384, y: 800, vx: 0, vy: 0, beamLife: 0.7 },
+    { kind: 'rocket' as const, color: NEON.magenta, heavy: true, x: 240, y: 620, vx: -80, vy: -520, beamLife: 0 },
+    { kind: 'rocket' as const, color: NEON.magenta, heavy: true, x: 520, y: 620, vx: 80, vy: -520, beamLife: 0 },
+  ];
+
+  const snap: CoopWorldSnapshot = {
+    session: 142,
+    tick: 42,
+    hostElapsedMs: 2333,
+    upgradesMask,
+    wave: 4,
+    banner: 0,
+    teamScore: 9900,
+    freed: 18,
+    energy: 0.5,
+    paused: false,
+    parked: false,
+    gameOver: false,
+    ships: [],
+    enemies: [],
+    boss: null,
+    tanker: null,
+    field: {
+      seed: 0x1234abcd,
+      front: 720,
+      alert: null,
+      wave: 4,
+      recentBrokenIds: brokenIds,
+    },
+    // Oldest 100 bolts first, enemy bullets + beams/rockets appended at the tail (just like world.shots)
+    shots: [...boltShots, ...enemyShots, ...specialShots],
+    items: [],
+    fx: [],
+  };
+
+  const decoded = decodeWorldSnapshot(encodeWorldSnapshot(snap));
+  assert.ok(decoded);
+  assert.equal(decoded.session, 142);
+  assert.equal(decoded.hostElapsedMs, 2333);
+  assert.equal(decoded.upgradesMask, upgradesMask);
+  assert.deepEqual(decoded.field?.recentBrokenIds, brokenIds);
+  assert.equal(decoded.shots.length, SNAP_MAX_SHOTS);
+  assert.equal(decoded.shots.filter((s) => s.kind === 'enemy').length, 14);
+  assert.equal(decoded.shots.filter((s) => s.kind === 'beam').length, 1);
+  assert.equal(decoded.shots.filter((s) => s.kind === 'rocket').length, 2);
+  // Remaining 35 bolt slots keep the NEWEST bolts (y around 900 - 99*4 = 504), not the oldest!
+  const decodedBolts = decoded.shots.filter((s) => s.kind === 'bolt');
+  assert.equal(decodedBolts.length, SNAP_MAX_SHOTS - 17);
+  assert.equal(decodedBolts[decodedBolts.length - 1]!.y, 900 - 99 * 4);
+});
+
+test('SnapshotInterpolator recovers on the very first frame after Host page reload while still rejecting stale reorders', () => {
+  const period = 1000 / 18;
+  const makeWireSnap = (tick: number, x: number, session?: number): CoopWorldSnapshot =>
+    decodeWorldSnapshot(
+      encodeWorldSnapshot({
+        session,
+        tick: tick & 0xffff,
+        wave: 2,
+        banner: 0,
+        teamScore: 0,
+        freed: 0,
+        energy: 0.5,
+        paused: false,
+        parked: false,
+        gameOver: false,
+        ships: [],
+        enemies: [{ id: 7, kind: 'dart', color: '#ffffff', hp: 1, flash: false, rot: 0, x, y: 300 }],
+        boss: null,
+        tanker: null,
+        field: null,
+        shots: [],
+        items: [],
+        fx: [],
+      }),
+    )!;
+
+  // Duplicate and out-of-order older packets within reorder window are still rejected
+  const reorderIt = new SnapshotInterpolator();
+  assert.equal(reorderIt.push(makeWireSnap(10, 100, 7), 0), true);
+  assert.equal(reorderIt.push(makeWireSnap(11, 110, 7), 55), true);
+  assert.equal(reorderIt.push(makeWireSnap(11, 999, 7), 60), false);
+  assert.equal(reorderIt.push(makeWireSnap(9, 999, 7), 61), false);
+  assert.equal(reorderIt.latest()!.enemies[0]!.x, 110);
+
+  // Host reload from any prior tick (including without session byte AND with session byte) accepts k=1 immediately
+  for (const oldTick of [500, 6000, 21600, 32000, 40000]) {
+    const it = new SnapshotInterpolator();
+    let now = 0;
+    for (let k = oldTick - 10; k <= oldTick; k++) {
+      it.push(makeWireSnap(k, 200), now);
+      now += period;
+    }
+    now += 8000;
+    assert.equal(it.push(makeWireSnap(1, 500), now), true, `oldTick=${oldTick} accepts tick=1 immediately`);
+    assert.equal(it.latest()!.enemies[0]!.x, 500);
+    assert.equal(it.sample(now + 1)!.enemies[0]!.x, 500);
+  }
+
+  // Session change even at low tick (e.g. tick 5 -> tick 1 within < 500ms) resets immediately
+  const sessIt = new SnapshotInterpolator();
+  sessIt.push(makeWireSnap(5, 200, 11), 100);
+  assert.equal(sessIt.push(makeWireSnap(1, 520, 99), 300), true);
+  assert.equal(sessIt.latest()!.enemies[0]!.x, 520);
+});
+
+test('SnapshotInterpolator rides out 250ms network stalls without snap-jumps and plays FX after 200/256-FX gaps', () => {
+  const period = 1000 / 18;
+  const speed = 240;
+  const it = new SnapshotInterpolator();
+
+  // Deterministic pseudo-RNG for 60+-40ms delay + 250ms stall every 3s
+  let seed = 99;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
+
+  const arrivals: Array<{ atMs: number; snap: CoopWorldSnapshot }> = [];
+  let acc = 0;
+  let tick = 0;
+  let lastArr = 0;
+  let nextStall = 3.0;
+  for (let f = 1; f <= 60 * 25; f++) {
+    const hostSec = f / 60;
+    acc += 1 / 60;
+    if (acc >= 1 / 18) {
+      acc -= 1 / 18;
+      tick++;
+      let at = hostSec + 0.02 + rand() * 0.08;
+      if (hostSec >= nextStall && hostSec < nextStall + 0.25) {
+        at = Math.max(at, nextStall + 0.25 + 0.06);
+      }
+      if (hostSec >= nextStall + 0.25) nextStall += 3.0;
+      at = Math.max(at, lastArr + 0.0005);
+      lastArr = at;
+      const x = 60 + ((hostSec * speed) % 600);
+      arrivals.push({
+        atMs: at * 1000,
+        snap: decodeWorldSnapshot(
+          encodeWorldSnapshot({
+            session: 3,
+            tick,
+            hostElapsedMs: Math.round(hostSec * 1000),
+            wave: 2,
+            banner: 0,
+            teamScore: 0,
+            freed: 0,
+            energy: 0.5,
+            paused: false,
+            parked: false,
+            gameOver: false,
+            ships: [],
+            enemies: [{ id: 7, kind: 'dart', color: '#ffffff', hp: 1, flash: false, rot: 0, x, y: 300 }],
+            boss: null,
+            tanker: null,
+            field: null,
+            shots: [],
+            items: [],
+            fx: [],
+          }),
+        )!,
+      });
+    }
+  }
+
+  let ai = 0;
+  let prevX: number | null = null;
+  let jumps = 0;
+  for (let f = 0; f < 60 * 22; f++) {
+    const nowMs = 1500 + f * (1000 / 60);
+    while (ai < arrivals.length && arrivals[ai]!.atMs <= nowMs) {
+      it.push(arrivals[ai]!.snap, arrivals[ai]!.atMs);
+      ai++;
+    }
+    const sampled = it.sample(nowMs);
+    if (!sampled) continue;
+    const x = sampled.enemies[0]!.x;
+    if (prevX !== null) {
+      const d = x - prevX;
+      if (d > -100 && (d > 12 || d < -0.5)) {
+        jumps++;
+      }
+    }
+    prevX = x;
+  }
+  assert.equal(jumps, 0, 'zero snap-jumps (>12px) or backward steps across 250ms stalls');
+
+  // FX dedupe after 200-FX and 256-FX gaps
+  const fxAt = (s: number): CoopSnapFx => ({
+    seq: s & 0xff,
+    kind: 'enemy-burst',
+    color: '#ffffff',
+    enemyKind: 'dart',
+    toughRock: false,
+    x: 100,
+    y: 100,
+  });
+  const fxSnap = (t: number, fxs: CoopSnapFx[]): CoopWorldSnapshot =>
+    decodeWorldSnapshot(
+      encodeWorldSnapshot({
+        tick: t & 0xffff,
+        wave: 1,
+        banner: 0,
+        teamScore: 0,
+        freed: 0,
+        energy: 0.5,
+        paused: false,
+        parked: false,
+        gameOver: false,
+        ships: [],
+        enemies: [],
+        boss: null,
+        tanker: null,
+        field: null,
+        shots: [],
+        items: [],
+        fx: fxs,
+      }),
+    )!;
+
+  const fxIt = new SnapshotInterpolator();
+  let seq = 0;
+  for (let k = 1; k <= 10; k++) {
+    seq++;
+    fxIt.push(fxSnap(k, [fxAt(seq)]), k * period);
+  }
+  fxIt.consumeNewFx();
+  seq += 200; // 200 missed FX during Wi-Fi drop
+  let played = 0;
+  for (let k = 0; k < 40; k++) {
+    seq++;
+    fxIt.push(fxSnap(200 + k, [fxAt(seq)]), (200 + k) * period);
+    played += fxIt.consumeNewFx().length;
+  }
+  assert.equal(played, 40, 'all 40 FX after a 200-FX gap play cleanly');
+
+  const fxIt256 = new SnapshotInterpolator();
+  fxIt256.push(fxSnap(1, [fxAt(10)]), 0);
+  fxIt256.consumeNewFx();
+  fxIt256.push(fxSnap(500, [fxAt(10 + 256)]), 30000);
+  assert.equal(fxIt256.consumeNewFx().length, 1, 'exact 256-FX wrap across gap still plays next FX');
 });

@@ -162,6 +162,8 @@ export interface CoopEventMessage {
   x?: number;
   y?: number;
   values?: number[];
+  /** Packed `u32` broken-rock bitmask words (`<= 16` words = up to `512` rock IDs) for reconnect resync. */
+  bitmap?: number[];
 }
 
 /**

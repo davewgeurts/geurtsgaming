@@ -12,6 +12,7 @@
  */
 
 import type { Kind as EnemyKind } from './enemies';
+import type { UpgradeId } from './upgrades';
 import {
   BIN_FRAME_INPUT,
   BIN_FRAME_SNAP,
@@ -53,6 +54,67 @@ export const SNAP_MAX_SHOTS = 52;
 export const SNAP_MAX_ITEMS = 16;
 export const SNAP_MAX_FX = 16;
 export const SNAP_MAX_BROKEN_ROCKS = 8;
+/** Compact broken-rock bitmap ceiling (`64 B` = `512` rock IDs `0..511`; `0 B` when none broken). */
+export const SNAP_MAX_ROCK_BITMAP_BYTES = 64;
+export const SNAP_MAX_ROCK_BITMAP_BITS = SNAP_MAX_ROCK_BITMAP_BYTES * 8;
+
+export const UPGRADE_WIRE_ORDER: readonly UpgradeId[] = [
+  'rapid',
+  'wide',
+  'shield',
+  'wingmates',
+  'pierce',
+  'guardian',
+  'rockets',
+  'lance',
+  'armour',
+  'nova',
+];
+
+export function encodeUpgradesMask(upgrades: Iterable<UpgradeId>): number {
+  const set = upgrades instanceof Set ? upgrades : new Set(upgrades);
+  let mask = 0;
+  for (let i = 0; i < UPGRADE_WIRE_ORDER.length; i++) {
+    if (set.has(UPGRADE_WIRE_ORDER[i]!)) mask |= 1 << i;
+  }
+  return mask & 0xffff;
+}
+
+export function decodeUpgradesMask(mask: number): UpgradeId[] {
+  const out: UpgradeId[] = [];
+  for (let i = 0; i < UPGRADE_WIRE_ORDER.length; i++) {
+    if ((mask & (1 << i)) !== 0) out.push(UPGRADE_WIRE_ORDER[i]!);
+  }
+  return out;
+}
+
+/** Pack broken rock IDs (`0..511`) into `<= 16` `u32` words so `sanitizeHostEvent` forwards all of them. */
+export function packBrokenRockWords(ids: readonly number[]): number[] {
+  const words = new Uint32Array(16);
+  let highestWord = -1;
+  for (const id of ids) {
+    if (!Number.isInteger(id) || id < 0 || id >= 512) continue;
+    const w = id >>> 5;
+    words[w] = (words[w]! | (1 << (id & 31))) >>> 0;
+    if (w > highestWord) highestWord = w;
+  }
+  return highestWord < 0 ? [] : Array.from(words.subarray(0, highestWord + 1));
+}
+
+export function unpackBrokenRockWords(words: readonly number[]): number[] {
+  const out: number[] = [];
+  const limit = Math.min(16, words.length);
+  for (let w = 0; w < limit; w++) {
+    const raw = words[w];
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) continue;
+    const word = raw >>> 0;
+    if (word === 0) continue;
+    for (let bit = 0; bit < 32; bit++) {
+      if ((word & (1 << bit)) !== 0) out.push(w * 32 + bit);
+    }
+  }
+  return out;
+}
 
 const COORD_OFFSET = 256;
 const COORD_SCALE = 8; // 0.125 px precision over [-256, +1791.875]
@@ -224,6 +286,12 @@ export interface CoopSnapFx {
 
 export interface CoopWorldSnapshot {
   tick: number;
+  /** Random `1..255` Host page-load session byte (`0` when unset) so Host reloads reset Guest interpolators immediately. */
+  session?: number;
+  /** Monotonic Host simulation elapsed time in ms (`undefined` when unset, falling back to `tick * (1000/18)`). */
+  hostElapsedMs?: number;
+  /** Bitmask of all 10 squad `UpgradeId`s (`encodeUpgradesMask`). */
+  upgradesMask?: number;
   wave: number;
   banner: number;
   teamScore: number;
@@ -367,7 +435,27 @@ const FX_KINDS: readonly CoopSnapFxKind[] = [
 export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
   const ships = snap.ships.slice(0, SNAP_MAX_SHIPS);
   const enemies = snap.enemies.slice(0, SNAP_MAX_ENEMIES);
-  const shots = snap.shots.slice(0, SNAP_MAX_SHOTS);
+  let shots: CoopSnapShot[];
+  if (snap.shots.length <= SNAP_MAX_SHOTS) {
+    shots = snap.shots.slice();
+  } else {
+    // Priority order: enemy bullets first (lethal hazards), then beams & rockets, then newest bolts.
+    const enemyShots: CoopSnapShot[] = [];
+    const specialShots: CoopSnapShot[] = [];
+    const boltShots: CoopSnapShot[] = [];
+    for (const sh of snap.shots) {
+      if (sh.kind === 'enemy') enemyShots.push(sh);
+      else if (sh.kind === 'beam' || sh.kind === 'rocket') specialShots.push(sh);
+      else boltShots.push(sh);
+    }
+    shots = enemyShots.slice(0, SNAP_MAX_SHOTS);
+    if (shots.length < SNAP_MAX_SHOTS && specialShots.length > 0) {
+      shots.push(...specialShots.slice(0, SNAP_MAX_SHOTS - shots.length));
+    }
+    if (shots.length < SNAP_MAX_SHOTS && boltShots.length > 0) {
+      shots.push(...boltShots.slice(-(SNAP_MAX_SHOTS - shots.length)));
+    }
+  }
   const items = snap.items.slice(0, SNAP_MAX_ITEMS);
   const fx = snap.fx.slice(-SNAP_MAX_FX);
   const boss = snap.boss;
@@ -381,11 +469,27 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
     : 0;
   const bossBytes = boss ? 12 + bossExtra : 0;
   const tankerBytes = tanker ? 11 : 0;
-  const brokenIds = field ? field.recentBrokenIds.slice(-SNAP_MAX_BROKEN_ROCKS) : [];
-  const fieldBytes = field ? 9 + brokenIds.length * 2 : 0;
+
+  let rockBitmap = new Uint8Array(0);
+  if (field && field.recentBrokenIds.length > 0) {
+    let maxByteIdx = -1;
+    const temp = new Uint8Array(SNAP_MAX_ROCK_BITMAP_BYTES);
+    for (const rawId of field.recentBrokenIds) {
+      if (!Number.isFinite(rawId)) continue;
+      const id = Math.round(rawId);
+      if (id < 0 || id >= SNAP_MAX_ROCK_BITMAP_BYTES * 8) continue;
+      const byteIdx = id >> 3;
+      temp[byteIdx] = (temp[byteIdx] ?? 0) | (1 << (id & 7));
+      if (byteIdx > maxByteIdx) maxByteIdx = byteIdx;
+    }
+    if (maxByteIdx >= 0) {
+      rockBitmap = temp.subarray(0, maxByteIdx + 1);
+    }
+  }
+  const fieldBytes = field ? 9 + rockBitmap.byteLength : 0;
 
   const totalBytes =
-    18 +
+    25 +
     ships.length * 12 +
     enemies.length * 9 +
     bossBytes +
@@ -411,8 +515,22 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
   if (tanker) vFlags |= 0x40;
   if (field) vFlags |= 0x80;
 
+  const sessionByte =
+    snap.session !== undefined && Number.isFinite(snap.session)
+      ? clampNum(Math.round(snap.session), 0, 255)
+      : 0;
+  const upgradesMask =
+    snap.upgradesMask !== undefined && Number.isFinite(snap.upgradesMask)
+      ? clampNum(Math.round(snap.upgradesMask), 0, 0xffff)
+      : 0;
+  const hostElapsedRaw =
+    snap.hostElapsedMs !== undefined && Number.isFinite(snap.hostElapsedMs) && snap.hostElapsedMs >= 0
+      ? clampNum(Math.round(snap.hostElapsedMs), 0, 0xfffffffe) >>> 0
+      : 0xffffffff;
+
   view.setUint8(off++, BIN_FRAME_SNAP);
   view.setUint8(off++, vFlags);
+  view.setUint8(off++, sessionByte);
   view.setUint16(off, snap.tick & 0xffff, true);
   off += 2;
   view.setUint8(off++, clampNum(Math.round(snap.wave), 1, 255));
@@ -422,6 +540,10 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
   view.setUint16(off, clampNum(Math.round(snap.freed), 0, 0xffff), true);
   off += 2;
   view.setUint8(off++, clampNum(Math.round(snap.energy * 255), 0, 255));
+  view.setUint16(off, upgradesMask, true);
+  off += 2;
+  view.setUint32(off, hostElapsedRaw, true);
+  off += 4;
   view.setUint8(off++, ships.length);
   view.setUint8(off++, enemies.length);
   view.setUint8(off++, shots.length);
@@ -548,10 +670,9 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
       field.alert === null ? 255 : clampNum(Math.round(field.alert * 10), 0, 254),
     );
     view.setUint8(off++, clampNum(Math.round(field.wave), 1, 255));
-    view.setUint8(off++, brokenIds.length);
-    for (const id of brokenIds) {
-      view.setUint16(off, clampNum(Math.round(id), 0, 0xffff), true);
-      off += 2;
+    view.setUint8(off++, rockBitmap.byteLength);
+    for (let i = 0; i < rockBitmap.byteLength; i++) {
+      view.setUint8(off++, rockBitmap[i]!);
     }
   }
 
@@ -606,7 +727,7 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
 
 /** Unpack a `0x02` `BIN_FRAME_SNAP` binary snapshot, returning `null` on any truncated or invalid frame. */
 export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 18 || bytes.byteLength > MAX_BINARY_BYTES) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 25 || bytes.byteLength > MAX_BINARY_BYTES) {
     return null;
   }
   if (bytes[0] !== BIN_FRAME_SNAP) return null;
@@ -625,6 +746,7 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
   const hasTanker = (vFlags & 0x40) !== 0;
   const hasField = (vFlags & 0x80) !== 0;
 
+  const session = view.getUint8(off++);
   const tick = view.getUint16(off, true);
   off += 2;
   const wave = view.getUint8(off++);
@@ -634,6 +756,11 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
   const freed = view.getUint16(off, true);
   off += 2;
   const energy = view.getUint8(off++) / 255;
+  const upgradesMask = view.getUint16(off, true);
+  off += 2;
+  const hostElapsedRaw = view.getUint32(off, true);
+  off += 4;
+  const hostElapsedMs = hostElapsedRaw === 0xffffffff ? undefined : hostElapsedRaw;
   const shipCount = view.getUint8(off++);
   const enemyCount = view.getUint8(off++);
   const shotCount = view.getUint8(off++);
@@ -823,12 +950,17 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
     off += 2;
     const alertRaw = view.getUint8(off++);
     const fWave = view.getUint8(off++);
-    const brokenCount = view.getUint8(off++);
-    if (brokenCount > SNAP_MAX_BROKEN_ROCKS || off + brokenCount * 2 > len) return null;
+    const bitmapBytes = view.getUint8(off++);
+    if (bitmapBytes > SNAP_MAX_ROCK_BITMAP_BYTES || off + bitmapBytes > len) return null;
     const recentBrokenIds: number[] = [];
-    for (let i = 0; i < brokenCount; i++) {
-      recentBrokenIds.push(view.getUint16(off, true));
-      off += 2;
+    for (let bIdx = 0; bIdx < bitmapBytes; bIdx++) {
+      const byte = view.getUint8(off++);
+      if (byte === 0) continue;
+      for (let bit = 0; bit < 8; bit++) {
+        if ((byte & (1 << bit)) !== 0) {
+          recentBrokenIds.push(bIdx * 8 + bit);
+        }
+      }
     }
     field = {
       seed,
@@ -938,7 +1070,10 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
   if (off !== len) return null;
 
   return {
+    session,
     tick,
+    hostElapsedMs,
+    upgradesMask,
     wave,
     banner,
     teamScore,
@@ -1000,55 +1135,116 @@ export class SnapshotInterpolator {
   private readonly pendingFx: CoopSnapFx[] = [];
   private lastFxSeq: number | null = null;
   private lastRawTick: number | null = null;
+  private lastSession = 0;
+  private lastPushWallMs: number | null = null;
   private unwrappedTick = 0;
   private clockOffsetMs: number | null = null;
   private lastRenderHostMs: number | null = null;
+  private lastSampleWallMs: number | null = null;
 
   constructor(opts?: { interpDelayMs?: number; maxExtrapolateMs?: number }) {
-    this.interpDelayMs = opts?.interpDelayMs ?? 75;
-    this.maxExtrapolateMs = opts?.maxExtrapolateMs ?? 90;
+    this.interpDelayMs = opts?.interpDelayMs ?? 85;
+    this.maxExtrapolateMs = opts?.maxExtrapolateMs ?? 65;
   }
 
   reset(): void {
-    this.buffer.length = 0;
+    this.resetTimeline();
     this.pendingFx.length = 0;
     this.lastFxSeq = null;
     this.lastRawTick = null;
+    this.lastSession = 0;
+    this.lastPushWallMs = null;
     this.unwrappedTick = 0;
+  }
+
+  private resetTimeline(): void {
+    this.buffer.length = 0;
     this.clockOffsetMs = null;
     this.lastRenderHostMs = null;
+    this.lastSampleWallMs = null;
   }
 
   latest(): CoopWorldSnapshot | null {
     return this.buffer.length > 0 ? this.buffer[this.buffer.length - 1]!.snap : null;
   }
 
-  push(snap: CoopWorldSnapshot, nowMs: number): void {
+  push(snap: CoopWorldSnapshot, nowMs: number): boolean {
+    const safeNow = Number.isFinite(nowMs) ? nowMs : 0;
+    const snapSession = snap.session ?? 0;
+    if (snapSession !== 0 && this.lastSession !== 0 && snapSession !== this.lastSession) {
+      this.reset();
+    }
+
+    const wallGap = this.lastPushWallMs !== null ? Math.max(0, safeNow - this.lastPushWallMs) : 0;
+
     if (this.lastRawTick !== null) {
-      if (snap.tick === this.lastRawTick) return;
-      if (!isNewerTick(this.lastRawTick, snap.tick)) return;
-      const tickDelta = (snap.tick - this.lastRawTick + 65536) & 0xffff;
-      this.unwrappedTick += tickDelta;
+      if (snap.tick === this.lastRawTick) {
+        if (wallGap >= 1000) {
+          this.reset();
+          this.unwrappedTick = snap.tick;
+        } else {
+          return false;
+        }
+      } else if (!isNewerTick(this.lastRawTick, snap.tick)) {
+        const backDelta = (this.lastRawTick - snap.tick + 65536) & 0xffff;
+        if (backDelta <= 32 && wallGap < 1000) {
+          return false;
+        }
+        // Host restarted ticks (e.g., Host page reload) outside the brief reorder window.
+        this.reset();
+        this.unwrappedTick = snap.tick;
+      } else {
+        const tickDelta = (snap.tick - this.lastRawTick + 65536) & 0xffff;
+        if (tickDelta > 1000 && Math.abs(tickDelta * HOST_SNAP_PERIOD_MS - wallGap) > 15000) {
+          this.resetTimeline();
+          this.lastFxSeq = null;
+          this.unwrappedTick = snap.tick;
+        } else {
+          this.unwrappedTick += tickDelta;
+          if (wallGap > 2000) {
+            this.resetTimeline();
+          }
+          if (tickDelta > 8 || wallGap > 500) {
+            this.lastFxSeq = null;
+          }
+        }
+      }
     } else {
       this.unwrappedTick = snap.tick;
     }
-    this.lastRawTick = snap.tick;
 
-    const hostMs = this.unwrappedTick * HOST_SNAP_PERIOD_MS;
-    const measuredOffset = nowMs - hostMs;
-    if (this.clockOffsetMs === null || Math.abs(measuredOffset - this.clockOffsetMs) > 500) {
+    this.lastRawTick = snap.tick;
+    if (snapSession !== 0) this.lastSession = snapSession;
+    this.lastPushWallMs = safeNow;
+
+    let hostMs =
+      snap.hostElapsedMs !== undefined && Number.isFinite(snap.hostElapsedMs)
+        ? snap.hostElapsedMs
+        : this.unwrappedTick * HOST_SNAP_PERIOD_MS;
+    const prevBuf = this.buffer.length > 0 ? this.buffer[this.buffer.length - 1]! : null;
+    if (prevBuf) {
+      if (hostMs < prevBuf.hostMs - 5 || hostMs - prevBuf.hostMs > 5000) {
+        this.resetTimeline();
+      } else if (hostMs <= prevBuf.hostMs) {
+        hostMs = prevBuf.hostMs + 1;
+      }
+    }
+
+    const measuredOffset = safeNow - hostMs;
+    if (this.clockOffsetMs === null || Math.abs(measuredOffset - this.clockOffsetMs) > 1000) {
       this.clockOffsetMs = measuredOffset;
     } else {
-      this.clockOffsetMs += (measuredOffset - this.clockOffsetMs) * 0.12;
+      const gain = measuredOffset < this.clockOffsetMs ? 0.2 : 0.04;
+      this.clockOffsetMs += (measuredOffset - this.clockOffsetMs) * gain;
     }
 
     this.buffer.push({
       unwrappedTick: this.unwrappedTick,
       hostMs,
-      receivedAt: nowMs,
+      receivedAt: safeNow,
       snap,
     });
-    while (this.buffer.length > 8) {
+    while (this.buffer.length > 12) {
       this.buffer.shift();
     }
 
@@ -1067,6 +1263,7 @@ export class SnapshotInterpolator {
     if (this.pendingFx.length > 48) {
       this.pendingFx.splice(0, this.pendingFx.length - 48);
     }
+    return true;
   }
 
   consumeNewFx(): CoopSnapFx[] {
@@ -1075,22 +1272,42 @@ export class SnapshotInterpolator {
   }
 
   sample(nowMs: number): CoopWorldSnapshot | null {
+    const safeNow = Number.isFinite(nowMs) ? nowMs : 0;
     const count = this.buffer.length;
     if (count === 0 || this.clockOffsetMs === null) return null;
     if (count === 1) {
       const only = this.buffer[0]!;
-      const dtSec = clampNum((nowMs - only.receivedAt) / 1000, 0, 0.08);
+      this.lastRenderHostMs = only.hostMs;
+      this.lastSampleWallMs = safeNow;
+      const dtSec = clampNum((safeNow - only.receivedAt) / 1000, 0, 0.065);
       return this.advanceShots(only.snap, dtSec);
     }
 
-    let renderHostMs = nowMs - this.clockOffsetMs - this.interpDelayMs;
-    if (this.lastRenderHostMs !== null && renderHostMs < this.lastRenderHostMs) {
-      renderHostMs = this.lastRenderHostMs;
-    }
-    this.lastRenderHostMs = renderHostMs;
-
     const first = this.buffer[0]!;
     const last = this.buffer[count - 1]!;
+    const targetHostMs = safeNow - this.clockOffsetMs - this.interpDelayMs;
+    const capHostMs = last.hostMs + this.maxExtrapolateMs;
+
+    let renderHostMs: number;
+    if (this.lastRenderHostMs === null || this.lastSampleWallMs === null) {
+      renderHostMs = clampNum(targetHostMs, first.hostMs, capHostMs);
+    } else {
+      const wallDt = clampNum(safeNow - this.lastSampleWallMs, 0, 100);
+      if (targetHostMs - this.lastRenderHostMs > 1500) {
+        renderHostMs = clampNum(targetHostMs, first.hostMs, capHostMs);
+      } else {
+        const lagMs = targetHostMs - this.lastRenderHostMs;
+        let rate = 1.0;
+        if (lagMs > 12) {
+          rate = 1.0 + Math.min(0.25, (lagMs - 12) / 140);
+        } else if (lagMs < -12) {
+          rate = 1.0 - Math.min(0.15, (-lagMs - 12) / 140);
+        }
+        renderHostMs = clampNum(this.lastRenderHostMs + wallDt * rate, this.lastRenderHostMs, capHostMs);
+      }
+    }
+    this.lastRenderHostMs = renderHostMs;
+    this.lastSampleWallMs = safeNow;
 
     if (renderHostMs <= first.hostMs) {
       return first.snap;
@@ -1113,7 +1330,7 @@ export class SnapshotInterpolator {
       return this.interpolatePair(prev.snap, next.snap, alpha, (renderHostMs - next.hostMs) / 1000);
     }
 
-    // Brief network jitter or dropped packet past `last.hostMs`: extrapolate along exact Host dt
+    // Brief network jitter past `last.hostMs`: extrapolate smoothly up to `maxExtrapolateMs`, then hold.
     const prev = this.buffer[count - 2]!;
     const span = Math.max(16, last.hostMs - prev.hostMs);
     const overMs = clampNum(renderHostMs - last.hostMs, 0, this.maxExtrapolateMs);
@@ -1164,8 +1381,10 @@ export class SnapshotInterpolator {
 
     const enemies: CoopSnapEnemy[] = b.enemies.map((nextEnemy) => {
       const prevEnemy = prevEnemies.get(nextEnemy.id);
-      if (!prevEnemy) return nextEnemy;
-      if (Math.hypot(nextEnemy.x - prevEnemy.x, nextEnemy.y - prevEnemy.y) > 240) return nextEnemy;
+      if (!prevEnemy || prevEnemy.kind !== nextEnemy.kind || nextEnemy.hp > prevEnemy.hp) {
+        return nextEnemy;
+      }
+      if (Math.hypot(nextEnemy.x - prevEnemy.x, nextEnemy.y - prevEnemy.y) > 180) return nextEnemy;
       return {
         ...nextEnemy,
         x: lerpScalar(prevEnemy.x, nextEnemy.x, alpha),

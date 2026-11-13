@@ -391,20 +391,24 @@ export class SetPieces {
     env: SetPieceEnv,
   ): void {
     const cleanSeed = seed >>> 0;
+    const cleanWave = Number.isFinite(wave) ? Math.max(1, Math.min(99, Math.round(wave))) : 1;
+    const cleanAlert =
+      alert === null || !Number.isFinite(alert) ? null : Math.max(0, Math.min(20, alert));
     this.fieldSeed = cleanSeed;
-    this.alert = alert;
-    if (front === null) {
+    this.alert = cleanAlert;
+    if (front === null || !Number.isFinite(front)) {
       this.field = null;
       this.near.length = 0;
       return;
     }
+    const cleanFront = Math.max(-2000, Math.min(40000, front));
     if (!this.field || this.field.seed !== cleanSeed) {
       const fEnv = this.fieldEnv(env, cleanSeed);
-      fEnv.wave = wave;
+      fEnv.wave = cleanWave;
       this.field = createField(fEnv);
       this.fieldHits = 0;
     }
-    this.field.front = front;
+    this.field.front = cleanFront;
     if (brokenIds.length > 0) {
       const deadSet = new Set(brokenIds);
       for (const rock of this.field.rocks) {
