@@ -2,6 +2,8 @@
  * Line-art shapes for the hero arcade game. Everything is stroked, never filled,
  * so it reads like an old vector monitor. Coordinates are in px at scale 1, origin at the centre.
  */
+import type { ShipId } from './loadout';
+
 export type Pt = readonly [number, number];
 export interface Poly { pts: readonly Pt[]; closed: boolean }
 export type Shape = readonly Poly[];
@@ -21,11 +23,67 @@ const arc = (r: number, from: number, to: number, steps: number): Pt[] =>
     return [round1(Math.cos(a) * r), round1(Math.sin(a) * r)] as const;
   });
 
-/** Player ship, nose up. The same outline is used for the launch button in the hero. */
+/** Player ship, nose up (Starhawk balanced striker). The same outline is used for the launch button in the hero. */
 export const SHIP: Shape = [
   closed([0, -16], [4, -4], [13, 10], [5, 7], [3, 12], [-3, 12], [-5, 7], [-13, 10], [-4, -4]),
   closed([0, -8], [2, -3], [0, 1], [-2, -3]),
 ];
+
+/** Fast interceptor (Swift): needle nose, forward-swept gull wings and twin nose blasters. */
+export const SHIP_SWIFT: Shape = [
+  closed([0, -19], [2.6, -7], [11.5, -10.5], [13, 2], [4.5, 6], [2.4, 12.5], [-2.4, 12.5], [-4.5, 6], [-13, 2], [-11.5, -10.5], [-2.6, -7]),
+  closed([0, -11], [1.8, -4], [0, 2], [-1.8, -4]),
+  open([-2.6, -7], [-2.6, -12.5]),
+  open([2.6, -7], [2.6, -12.5]),
+];
+
+/** Heavy armoured gunship (Bastion): twin-prong nose, broad wingtip cannon pods and twin engine nacelles. */
+export const SHIP_BASTION: Shape = [
+  closed(
+    [-4.5, -14], [-1.8, -11], [1.8, -11], [4.5, -14], [6.5, -6], [14.5, -2], [14.5, 8.5],
+    [9, 10.5], [7.5, 13], [3.2, 13], [2.2, 9.5], [-2.2, 9.5], [-3.2, 13], [-7.5, 13],
+    [-9, 10.5], [-14.5, 8.5], [-14.5, -2], [-6.5, -6],
+  ),
+  closed([-4, -6.5], [4, -6.5], [5, -0.5], [-5, -0.5]),
+  open([-12, -2], [-12, -8.5]),
+  open([12, -2], [12, -8.5]),
+];
+
+/** Top-down 2D silhouette matching the ship picked in the hangar. */
+export function shipShape(id: ShipId): Shape {
+  if (id === 'swift') return SHIP_SWIFT;
+  if (id === 'bastion') return SHIP_BASTION;
+  return SHIP;
+}
+
+/** Trace the exhaust flame(s) behind the chosen ship's top-down nozzle(s). */
+export function traceShipThrusters(
+  ctx: CanvasRenderingContext2D,
+  id: ShipId,
+  x: number,
+  y: number,
+  s: number,
+  flame: number,
+): void {
+  if (id === 'swift') {
+    ctx.moveTo(x - 2.2 * s, y + 13 * s);
+    ctx.lineTo(x, y + 13 * s + flame * 1.25);
+    ctx.lineTo(x + 2.2 * s, y + 13 * s);
+    return;
+  }
+  if (id === 'bastion') {
+    for (const side of [-1, 1]) {
+      const nx = x + side * 5.35 * s;
+      ctx.moveTo(nx - 2.1 * s, y + 13.5 * s);
+      ctx.lineTo(nx, y + 13.5 * s + flame * 0.9);
+      ctx.lineTo(nx + 2.1 * s, y + 13.5 * s);
+    }
+    return;
+  }
+  ctx.moveTo(x - 3 * s, y + 13 * s);
+  ctx.lineTo(x, y + 13 * s + flame);
+  ctx.lineTo(x + 3 * s, y + 13 * s);
+}
 
 /** Slow enemy that snakes down the screen in a chain. */
 export const DRIFTER: Shape = [
