@@ -20,6 +20,7 @@ import { WORDS } from './lines';
 import {
   PILOTS,
   PILOT_BY_ID,
+  PILOT_IDS,
   SHIPS,
   SHIP_BY_ID,
   THEMES,
@@ -27,6 +28,7 @@ import {
   type HangarHat,
   type PilotId,
   type PilotLoadout,
+  type PilotSpec,
   type ShipId,
   type ThemeId,
 } from './loadout';
@@ -89,6 +91,93 @@ const { cyan: CYAN, lime: LIME, yellow: YELLOW, orange: ORANGE, violet: VIOLET }
 
 const PREVIEW_MOODS: readonly Mood[] = ['happy', 'talk', 'calm', 'laugh', 'worried', 'happy'];
 
+export type DanceMove = 'wave' | 'boogie' | 'starhop' | 'hype';
+export type HangarActivity = 'jacks' | 'dance' | 'sleep' | 'eat' | 'practice' | 'mathExtra';
+export type CatchZone = 'leftApron' | 'rightApron' | 'midRunway';
+
+export interface HangarScenario {
+  readonly seed: number;
+  /** Shuffled order of all 8 pilots; filtering out `loadout.pilot` yields the 7 squadmates in the hangar. */
+  readonly rosterOrder: readonly PilotId[];
+  readonly catchZone: CatchZone;
+  readonly mathSecondSleeps: boolean;
+  readonly antics: readonly [HangarActivity, HangarActivity, HangarActivity];
+  readonly dances: readonly DanceMove[];
+  readonly phases: readonly number[];
+}
+
+const DANCE_MOVES: readonly DanceMove[] = ['wave', 'boogie', 'starhop', 'hype'];
+
+function scenarioRng(seed: number): () => number {
+  let s = seed >>> 0 || 0x9e3779b9;
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function buildScenario(rawSeed?: number): HangarScenario {
+  const seed = (rawSeed ?? Math.floor(Math.random() * 0xffffffff)) >>> 0 || 0x9e3779b9;
+  const rng = scenarioRng(seed);
+
+  const roster = [...PILOT_IDS];
+  for (let i = roster.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [roster[i], roster[j]] = [roster[j]!, roster[i]!];
+  }
+
+  const zones: readonly CatchZone[] = ['leftApron', 'rightApron', 'midRunway'];
+  const catchZone = zones[Math.floor(rng() * zones.length)]!;
+  const mathSecondSleeps = rng() < 0.35;
+
+  // Weighted pool of hangar antics drawn without replacement so every visit feels distinct and lively:
+  const pool: Array<{ kind: HangarActivity; weight: number }> = [
+    { kind: 'jacks', weight: 3.2 },
+    { kind: 'dance', weight: 3.0 },
+    { kind: 'sleep', weight: 2.2 },
+    { kind: 'eat', weight: 2.2 },
+    { kind: 'practice', weight: 2.2 },
+    { kind: 'mathExtra', weight: 1.6 },
+  ];
+  const picked: HangarActivity[] = [];
+  while (picked.length < 3) {
+    const total = pool.reduce((sum, item) => sum + item.weight, 0);
+    let r = rng() * total;
+    let idx = 0;
+    for (let i = 0; i < pool.length; i++) {
+      r -= pool[i]!.weight;
+      if (r <= 0) {
+        idx = i;
+        break;
+      }
+    }
+    picked.push(pool[idx]!.kind);
+    pool.splice(idx, 1);
+  }
+
+  const dances = Array.from({ length: 8 }, () => DANCE_MOVES[Math.floor(rng() * DANCE_MOVES.length)]!);
+  const phases = Array.from({ length: 8 }, () => rng() * 20);
+
+  return {
+    seed,
+    rosterOrder: roster,
+    catchZone,
+    mathSecondSleeps,
+    antics: [picked[0]!, picked[1]!, picked[2]!],
+    dances,
+    phases,
+  };
+}
+
+interface LimbAim {
+  /** Upper-arm direction [x, y, z] in local pilot space (+x right, +y up, +z forward). */
+  upper: [number, number, number];
+  /** Forearm direction [x, y, z] in local pilot space. */
+  fore: [number, number, number];
+}
+
 /** How a person is standing. Angles are in radians; phases run through a step (or a rung) every 2π. */
 interface Pose {
   x: number; y: number; z: number;
@@ -98,6 +187,20 @@ interface Pose {
   /** Walking: where in the stride they are. null stands still. */
   stride: number | null;
   seated: boolean;
+  /** Stretched out horizontally on a bench/cot for a hangar nap. */
+  lying?: boolean;
+  sleeping?: boolean;
+  happy?: boolean;
+  /** Optional named pilot avatar for full 3D head/snout/ears/visor/tail geometry. */
+  pilotId?: PilotId;
+  tailPhase?: number;
+  hipShiftX?: number;
+  squat?: number;
+  legSpread?: number;
+  legKickL?: number;
+  legKickR?: number;
+  armL?: LimbAim;
+  armR?: LimbAim;
   /** How far the right arm is raised forwards, 0 (by their side) to 1 (straight up). */
   reach: number;
   /** Both arms up, as if on a ladder. */
@@ -133,6 +236,7 @@ export interface HangarOptions {
   initialLoadout: PilotLoadout;
   hasSavedLoadout: boolean;
   reduceMotion: boolean;
+  scenarioSeed?: number;
   onCommitLoadout?: (loadout: PilotLoadout) => void;
   onAnnounce?: (message: string) => void;
 }
@@ -152,6 +256,7 @@ export class Hangar {
   done = false;
   stage: HangarStage;
   loadout: PilotLoadout;
+  scenario: HangarScenario;
 
   private focusPilot = 0;
   private focusTheme = 0;
@@ -206,11 +311,17 @@ export class Hangar {
     this.reduceMotion = opts?.reduceMotion ?? false;
     this.onCommit = opts?.onCommitLoadout;
     this.onAnnounce = opts?.onAnnounce;
+    this.scenario = buildScenario(opts?.scenarioSeed);
     this.syncFocusFromLoadout();
     this.stage = opts?.hasSavedLoadout ? 'boarding' : 'avatar';
     if (this.stage === 'avatar') {
       this.announceStage();
     }
+  }
+
+  /** Roll a fresh randomized hangar scenario for the 7 non-selected squadmates. */
+  reseedScenario(seed?: number): void {
+    this.scenario = buildScenario(seed);
   }
 
   /** True while the player is actively choosing their pilot, colour theme or ship. */
@@ -262,6 +373,7 @@ export class Hangar {
 
   /** Re-open the 3-step customiser (e.g. when a player clicks the Hangar button or presses `H`). */
   openCustomizer(): void {
+    this.reseedScenario();
     this.syncFocusFromLoadout();
     this.stage = 'avatar';
     this.stageAge = 0;
@@ -776,87 +888,105 @@ export class Hangar {
     this.aim(w, h);
   }
 
-  // ---------------------------------------------------------------- people
+  // ---------------------------------------------------------------- people & squad antics
 
-  private draw(p: Pose, part: 'body' | 'limbs'): void {
+  private aimVec(dir: [number, number, number], len: number): [number, number, number] {
+    const m = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+    return [(dir[0] / m) * len, (dir[1] / m) * len, (dir[2] / m) * len];
+  }
+
+  private draw(p: Pose, part: 'body' | 'limbs' | 'accent'): void {
     const s = p.scale;
     const cos = Math.cos(p.face);
     const sin = Math.sin(p.face);
-    const L = (ax: number, ay: number, az: number, bx: number, by: number, bz: number): void =>
+    const lie = Boolean(p.lying);
+    const L = (ax: number, ay: number, az: number, bx: number, by: number, bz: number): void => {
+      const y1 = lie ? 0.56 + az * 0.88 : ay;
+      const z1 = lie ? (ay - 0.96) * 0.96 : az;
+      const y2 = lie ? 0.56 + bz * 0.88 : by;
+      const z2 = lie ? (by - 0.96) * 0.96 : bz;
       this.seg(
-        p.x + (ax * cos + az * sin) * s, p.y + ay * s, p.z + (-ax * sin + az * cos) * s,
-        p.x + (bx * cos + bz * sin) * s, p.y + by * s, p.z + (-bx * sin + bz * cos) * s,
+        p.x + (ax * cos + z1 * sin) * s,
+        p.y + y1 * s,
+        p.z + (-ax * sin + z1 * cos) * s,
+        p.x + (bx * cos + z2 * sin) * s,
+        p.y + y2 * s,
+        p.z + (-bx * sin + z2 * cos) * s,
       );
-    const drop = p.seated ? 0.4 : 0;
+    };
+
+    const squat = p.squat ?? 0;
+    const drop = (p.seated ? 0.4 : 0) + squat;
+    const hipX = p.hipShiftX ?? 0;
+    const shX = -hipX * 0.35;
     const hip = 0.94 - drop;
-    const shoulder = 1.46 - drop;
+    const shoulder = 1.46 - drop * 0.92;
+    const chin = shoulder + 0.11;
+    const crown = chin + 0.3;
+    const pid = p.pilotId;
+    const hat = pid ? PILOT_BY_ID[pid].hangarHat : p.hat;
 
     if (part === 'body') {
       for (const z of [0.1, -0.1]) {
-        L(-0.25, shoulder, z, 0.25, shoulder, z);
-        L(0.25, shoulder, z, 0.16, hip, z);
-        L(0.16, hip, z, -0.16, hip, z);
-        L(-0.16, hip, z, -0.25, shoulder, z);
+        L(shX - 0.25, shoulder, z, shX + 0.25, shoulder, z);
+        L(shX + 0.25, shoulder, z, hipX + 0.16, hip, z);
+        L(hipX + 0.16, hip, z, hipX - 0.16, hip, z);
+        L(hipX - 0.16, hip, z, shX - 0.25, shoulder, z);
       }
-      for (const [x, y] of [[-0.25, shoulder], [0.25, shoulder], [0.16, hip], [-0.16, hip]] as const) L(x, y, 0.1, x, y, -0.1);
-      const chin = shoulder + 0.12;
-      const crown = chin + 0.28;
-      L(0, shoulder, 0, 0, chin, 0);
-      for (const z of [0.13, -0.13]) {
-        L(-0.13, chin, z, 0.13, chin, z);
-        L(0.13, chin, z, 0.13, crown, z);
-        L(0.13, crown, z, -0.13, crown, z);
-        L(-0.13, crown, z, -0.13, chin, z);
+      for (const [x, y] of [
+        [shX - 0.25, shoulder],
+        [shX + 0.25, shoulder],
+        [hipX + 0.16, hip],
+        [hipX - 0.16, hip],
+      ] as const) {
+        L(x, y, 0.1, x, y, -0.1);
       }
-      for (const [x, y] of [[-0.13, chin], [0.13, chin], [0.13, crown], [-0.13, crown]] as const) L(x, y, 0.13, x, y, -0.13);
 
-      if (p.hat === 'helmet' || p.hat === 'visor') {
-        L(-0.1, crown - 0.08, 0.135, 0.1, crown - 0.08, 0.135);
-        L(0.1, crown - 0.08, 0.135, 0.1, crown - 0.17, 0.135);
-        L(0.1, crown - 0.17, 0.135, -0.1, crown - 0.17, 0.135);
-        L(-0.1, crown - 0.17, 0.135, -0.1, crown - 0.08, 0.135);
-        L(0, crown, 0.13, 0, crown + 0.04, 0);
-        L(0, crown + 0.04, 0, 0, crown, -0.13);
-      } else if (p.hat === 'cap') {
-        L(-0.15, crown - 0.03, 0.13, -0.12, crown - 0.03, 0.3);
-        L(-0.12, crown - 0.03, 0.3, 0.12, crown - 0.03, 0.3);
-        L(0.12, crown - 0.03, 0.3, 0.15, crown - 0.03, 0.13);
-      } else if (p.hat === 'goggles') {
-        // Spiky crown tufts + forehead goggles.
-        L(-0.08, crown, 0.02, -0.02, crown + 0.11, 0.08);
-        L(-0.02, crown + 0.11, 0.08, 0.04, crown, 0.02);
-        L(0.02, crown, 0, 0.09, crown + 0.09, 0.06);
-        L(-0.12, crown - 0.06, 0.145, 0.12, crown - 0.06, 0.145);
-      } else if (p.hat === 'puffs') {
-        // Twin space-puffs on each side of the crown.
-        for (const side of [-1, 1]) {
-          L(side * 0.13, crown - 0.03, 0, side * 0.22, crown + 0.06, 0);
-          L(side * 0.22, crown + 0.06, 0, side * 0.2, crown - 0.07, 0.06);
-          L(side * 0.2, crown - 0.07, 0.06, side * 0.13, crown - 0.03, 0);
+      // Bevelled low-poly 3D head shell:
+      L(shX, shoulder, 0, shX, chin, 0);
+      const midY = (chin + crown) * 0.5;
+      for (const z of [0.135, -0.125]) {
+        L(shX - 0.1, chin, z, shX + 0.1, chin, z);
+        L(shX + 0.1, chin, z, shX + 0.155, midY, z * 0.92);
+        L(shX + 0.155, midY, z * 0.92, shX + 0.12, crown, z * 0.88);
+        L(shX + 0.12, crown, z * 0.88, shX - 0.12, crown, z * 0.88);
+        L(shX - 0.12, crown, z * 0.88, shX - 0.155, midY, z * 0.92);
+        L(shX - 0.155, midY, z * 0.92, shX - 0.1, chin, z);
+      }
+      for (const [x, y] of [
+        [shX - 0.1, chin],
+        [shX + 0.1, chin],
+        [shX + 0.155, midY],
+        [shX - 0.155, midY],
+        [shX + 0.12, crown],
+        [shX - 0.12, crown],
+      ] as const) {
+        L(x, y, 0.12, x, y, -0.11);
+      }
+
+      // Generic crew hats when `pilotId` is not set (teacher & mechanics):
+      if (!pid) {
+        if (hat === 'helmet') {
+          L(shX - 0.1, crown - 0.08, 0.14, shX + 0.1, crown - 0.08, 0.14);
+          L(shX + 0.1, crown - 0.08, 0.14, shX + 0.1, crown - 0.17, 0.14);
+          L(shX + 0.1, crown - 0.17, 0.14, shX - 0.1, crown - 0.17, 0.14);
+          L(shX - 0.1, crown - 0.17, 0.14, shX - 0.1, crown - 0.08, 0.14);
+        } else if (hat === 'cap') {
+          L(shX - 0.15, crown - 0.03, 0.13, shX - 0.12, crown - 0.03, 0.3);
+          L(shX - 0.12, crown - 0.03, 0.3, shX + 0.12, crown - 0.03, 0.3);
+          L(shX + 0.12, crown - 0.03, 0.3, shX + 0.15, crown - 0.03, 0.13);
         }
-      } else if (p.hat === 'fox' || p.hat === 'cat') {
-        // Pointed 3D animal ears on top of the flight helmet!
-        const tall = p.hat === 'fox' ? 0.17 : 0.13;
-        for (const side of [-1, 1]) {
-          L(side * 0.05, crown, 0.04, side * 0.15, crown + tall, 0.02);
-          L(side * 0.15, crown + tall, 0.02, side * 0.13, crown, -0.04);
-        }
-      } else if (p.hat === 'wolf') {
-        for (const side of [-1, 1]) {
-          L(side * 0.06, crown, 0.04, side * 0.14, crown + 0.13, 0.04);
-          L(side * 0.14, crown + 0.13, 0.04, side * 0.18, crown + 0.05, 0.08);
-        }
-      } else if (p.hat === 'owl') {
-        // Feathered crest tufts + tiny beak.
-        for (const side of [-1, 1]) {
-          L(side * 0.07, crown, 0.04, side * 0.17, crown + 0.12, 0.02);
-          L(side * 0.17, crown + 0.12, 0.02, side * 0.12, crown - 0.02, 0.04);
-        }
-        L(0, chin + 0.14, 0.13, 0, chin + 0.11, 0.22);
       }
 
       if (p.pack) {
-        for (const [x, y, x2, y2] of [[-0.15, hip + 0.14, 0.15, hip + 0.14], [0.15, hip + 0.14, 0.15, shoulder - 0.04], [0.15, shoulder - 0.04, -0.15, shoulder - 0.04], [-0.15, shoulder - 0.04, -0.15, hip + 0.14]] as const) {
+        const px0 = (shX + hipX) * 0.5 - 0.15;
+        const px1 = (shX + hipX) * 0.5 + 0.15;
+        for (const [x, y, x2, y2] of [
+          [px0, hip + 0.14, px1, hip + 0.14],
+          [px1, hip + 0.14, px1, shoulder - 0.04],
+          [px1, shoulder - 0.04, px0, shoulder - 0.04],
+          [px0, shoulder - 0.04, px0, hip + 0.14],
+        ] as const) {
           L(x, y, -0.24, x2, y2, -0.24);
           L(x, y, -0.1, x, y, -0.24);
         }
@@ -864,35 +994,212 @@ export class Hangar {
       return;
     }
 
+    if (part === 'accent') {
+      // Expressive eyes + mouth on the front of the 3D head:
+      const eyeY = chin + 0.17;
+      const fz = 0.145;
+      for (const side of [-1, 1]) {
+        const ex = shX + side * 0.062;
+        if (p.sleeping) {
+          L(ex - 0.026, eyeY - 0.01, fz, ex + 0.026, eyeY - 0.01, fz);
+        } else if (p.happy) {
+          L(ex - 0.026, eyeY - 0.012, fz, ex, eyeY + 0.018, fz);
+          L(ex, eyeY + 0.018, fz, ex + 0.026, eyeY - 0.012, fz);
+        } else {
+          L(ex - 0.02, eyeY, fz, ex + 0.02, eyeY, fz);
+          L(ex, eyeY - 0.016, fz, ex, eyeY + 0.016, fz);
+        }
+      }
+      if (!p.sleeping && pid !== 'owl' && pid !== 'fox' && pid !== 'wolf') {
+        const my = chin + 0.075;
+        L(shX - 0.045, my + (p.happy ? 0.012 : 0), fz, shX, my - 0.014, fz);
+        L(shX, my - 0.014, fz, shX + 0.045, my + (p.happy ? 0.012 : 0), fz);
+      }
+
+      const wag = Math.sin(p.tailPhase ?? 0) * 0.18;
+
+      if (hat === 'visor') {
+        // Nova: swept bangs + glowing wrap-around brow visor.
+        L(shX - 0.13, crown - 0.05, 0.155, shX + 0.13, crown - 0.05, 0.155);
+        L(shX + 0.13, crown - 0.05, 0.155, shX + 0.11, crown - 0.13, 0.155);
+        L(shX + 0.11, crown - 0.13, 0.155, shX - 0.11, crown - 0.13, 0.155);
+        L(shX - 0.11, crown - 0.13, 0.155, shX - 0.13, crown - 0.05, 0.155);
+        L(shX - 0.12, crown, 0.08, shX + 0.04, crown + 0.09, 0.12);
+        L(shX + 0.04, crown + 0.09, 0.12, shX + 0.14, crown - 0.02, 0.09);
+      } else if (hat === 'goggles') {
+        // Leo: bold 3-spike hair crown + twin-lens forehead flight goggles.
+        L(shX - 0.11, crown, 0.02, shX - 0.05, crown + 0.14, 0.07);
+        L(shX - 0.05, crown + 0.14, 0.07, shX, crown + 0.02, 0.03);
+        L(shX, crown + 0.02, 0.03, shX + 0.06, crown + 0.15, 0.06);
+        L(shX + 0.06, crown + 0.15, 0.06, shX + 0.12, crown, 0.02);
+        for (const side of [-1, 1]) {
+          const gx = shX + side * 0.065;
+          L(gx - 0.045, crown - 0.02, 0.155, gx + 0.045, crown - 0.02, 0.155);
+          L(gx + 0.045, crown - 0.02, 0.155, gx + 0.045, crown - 0.08, 0.155);
+          L(gx + 0.045, crown - 0.08, 0.155, gx - 0.045, crown - 0.08, 0.155);
+          L(gx - 0.045, crown - 0.08, 0.155, gx - 0.045, crown - 0.02, 0.155);
+        }
+      } else if (hat === 'puffs') {
+        // Maya: big twin 3D low-poly space-puffs + star hairpins.
+        for (const side of [-1, 1]) {
+          const bx = shX + side * 0.13;
+          const ox = shX + side * 0.27;
+          L(bx, crown - 0.02, 0.04, ox, crown + 0.09, 0.02);
+          L(ox, crown + 0.09, 0.02, ox, crown - 0.08, 0.05);
+          L(ox, crown - 0.08, 0.05, bx, crown - 0.09, -0.02);
+          L(bx, crown - 0.02, -0.05, ox, crown + 0.06, -0.06);
+          L(ox, crown + 0.06, -0.06, ox, crown + 0.09, 0.02);
+        }
+      } else if (hat === 'cap') {
+        // Kai: comet cap visor + wrap-around ear-cup headset & boom mic.
+        L(shX - 0.14, crown - 0.02, 0.13, shX - 0.11, crown - 0.03, 0.29);
+        L(shX - 0.11, crown - 0.03, 0.29, shX + 0.11, crown - 0.03, 0.29);
+        L(shX + 0.11, crown - 0.03, 0.29, shX + 0.14, crown - 0.02, 0.13);
+        L(shX + 0.16, (chin + crown) * 0.5, 0.02, shX + 0.16, chin + 0.07, 0.08);
+        L(shX + 0.16, chin + 0.07, 0.08, shX + 0.05, chin + 0.07, 0.165);
+      } else if (hat === 'fox') {
+        // Rusty the Space Fox: tall pointed 3D fox ears, pointed snout & wagging 3D fox tail!
+        for (const side of [-1, 1]) {
+          L(shX + side * 0.04, crown, 0.04, shX + side * 0.17, crown + 0.23, 0.02);
+          L(shX + side * 0.17, crown + 0.23, 0.02, shX + side * 0.14, crown - 0.01, -0.05);
+          L(shX + side * 0.08, crown, 0.05, shX + side * 0.15, crown + 0.18, 0.03);
+          // Cheek fluff tufts:
+          L(shX + side * 0.15, chin + 0.09, 0.06, shX + side * 0.23, chin + 0.06, 0.04);
+          L(shX + side * 0.23, chin + 0.06, 0.04, shX + side * 0.13, chin + 0.03, 0.08);
+        }
+        // Pointed 3D pyramid snout:
+        L(shX - 0.07, chin + 0.12, 0.14, shX, chin + 0.09, 0.31);
+        L(shX + 0.07, chin + 0.12, 0.14, shX, chin + 0.09, 0.31);
+        L(shX, chin + 0.03, 0.14, shX, chin + 0.09, 0.31);
+        if (!p.seated && !lie) {
+          const tx = hipX + wag;
+          L(hipX, hip + 0.04, -0.12, tx * 0.6 - 0.08, hip + 0.14, -0.34);
+          L(hipX, hip + 0.04, -0.12, tx * 0.6 + 0.08, hip + 0.14, -0.34);
+          L(tx * 0.6 - 0.08, hip + 0.14, -0.34, tx, hip + 0.24, -0.54);
+          L(tx * 0.6 + 0.08, hip + 0.14, -0.34, tx, hip + 0.24, -0.54);
+        }
+      } else if (hat === 'cat') {
+        // Mochi the Star Cat: wide feline ears, 3D side whiskers & swaying cat tail!
+        for (const side of [-1, 1]) {
+          L(shX + side * 0.05, crown, 0.04, shX + side * 0.19, crown + 0.17, 0.03);
+          L(shX + side * 0.19, crown + 0.17, 0.03, shX + side * 0.15, crown - 0.02, -0.04);
+          // 3D whiskers:
+          L(shX + side * 0.11, chin + 0.11, 0.145, shX + side * 0.27, chin + 0.13, 0.12);
+          L(shX + side * 0.11, chin + 0.08, 0.145, shX + side * 0.26, chin + 0.07, 0.12);
+        }
+        if (!p.seated && !lie) {
+          const tx = hipX + wag * 0.9;
+          L(hipX, hip + 0.04, -0.11, hipX + wag * 0.4, hip + 0.22, -0.32);
+          L(hipX + wag * 0.4, hip + 0.22, -0.32, tx, hip + 0.44, -0.28);
+        }
+      } else if (hat === 'wolf') {
+        // Koda the Astro Pup: floppy-tip pup ears, blocky 3D muzzle & fast-wagging pup tail!
+        for (const side of [-1, 1]) {
+          L(shX + side * 0.06, crown, 0.04, shX + side * 0.15, crown + 0.16, 0.04);
+          L(shX + side * 0.15, crown + 0.16, 0.04, shX + side * 0.22, crown + 0.07, 0.09);
+          L(shX + side * 0.22, crown + 0.07, 0.09, shX + side * 0.14, crown, -0.02);
+        }
+        // Blocky 3D pup snout:
+        L(shX - 0.065, chin + 0.12, 0.14, shX - 0.05, chin + 0.11, 0.27);
+        L(shX + 0.065, chin + 0.12, 0.14, shX + 0.05, chin + 0.11, 0.27);
+        L(shX - 0.05, chin + 0.11, 0.27, shX + 0.05, chin + 0.11, 0.27);
+        L(shX - 0.05, chin + 0.11, 0.27, shX, chin + 0.04, 0.25);
+        L(shX + 0.05, chin + 0.11, 0.27, shX, chin + 0.04, 0.25);
+        if (!p.seated && !lie) {
+          const tx = hipX + Math.sin((p.tailPhase ?? 0) * 1.5) * 0.22;
+          L(hipX, hip + 0.05, -0.11, tx, hip + 0.28, -0.36);
+        }
+      } else if (hat === 'owl') {
+        // Pip the Sky Owl: feathered horn-tufts, round 3D spectacle rings & diamond beak!
+        for (const side of [-1, 1]) {
+          L(shX + side * 0.06, crown, 0.04, shX + side * 0.2, crown + 0.16, 0.02);
+          L(shX + side * 0.2, crown + 0.16, 0.02, shX + side * 0.13, crown - 0.02, 0.04);
+          // Round spectacle ring around each eye:
+          const gx = shX + side * 0.064;
+          L(gx - 0.045, eyeY + 0.038, 0.152, gx + 0.045, eyeY + 0.038, 0.152);
+          L(gx + 0.045, eyeY + 0.038, 0.152, gx + 0.045, eyeY - 0.038, 0.152);
+          L(gx + 0.045, eyeY - 0.038, 0.152, gx - 0.045, eyeY - 0.038, 0.152);
+          L(gx - 0.045, eyeY - 0.038, 0.152, gx - 0.045, eyeY + 0.038, 0.152);
+        }
+        // 3D diamond owl beak:
+        L(shX - 0.035, chin + 0.13, 0.15, shX, chin + 0.1, 0.27);
+        L(shX + 0.035, chin + 0.13, 0.15, shX, chin + 0.1, 0.27);
+        L(shX, chin + 0.06, 0.15, shX, chin + 0.1, 0.27);
+      }
+      return;
+    }
+
+    // part === 'limbs'
     const stride = p.stride;
+    const spread = p.legSpread ?? 0;
     for (const side of [-1, 1]) {
-      const hx = side * 0.11;
+      const hx = hipX + side * 0.11;
       if (p.seated) {
         L(hx, hip, 0, hx, hip, 0.44);
         L(hx, hip, 0.44, hx, hip - 0.5, 0.48);
         L(hx, hip - 0.5, 0.48, hx, hip - 0.5, 0.64);
         continue;
       }
+      const kick = side < 0 ? (p.legKickL ?? 0) : (p.legKickR ?? 0);
+      if (spread > 0.001 || kick > 0.001 || squat > 0.01) {
+        const outX = side * Math.sin(spread) * 0.46;
+        const kx = hx + outX * 0.55;
+        const ky = hip - Math.cos(spread) * (0.45 - squat * 0.35) + kick * 0.22;
+        const kz = squat * 0.55 + kick * 0.38;
+        const fx = hx + outX;
+        const fy = Math.max(0, ky - (0.47 - squat * 0.35) + kick * 0.18);
+        const fz = kick * 0.52;
+        L(hx, hip, 0, kx, ky, kz);
+        L(kx, ky, kz, fx, fy, fz);
+        L(fx, fy, fz, fx, fy, fz + 0.16);
+        continue;
+      }
       const phase = stride === null ? 0 : stride + (side > 0 ? Math.PI : 0);
       const swing = stride === null ? 0 : Math.sin(phase) * (p.climbing ? 0.75 : 0.55);
       const bend = stride === null ? 0.04 : 0.2 + (p.climbing ? 0.9 : 0.5) * Math.max(0, Math.cos(phase));
-      const kx = hx, ky = hip - Math.cos(swing) * 0.47, kz = Math.sin(swing) * 0.47;
-      const fy = ky - Math.cos(swing - bend) * 0.47, fz = kz + Math.sin(swing - bend) * 0.47;
+      const kx = hx;
+      const ky = hip - Math.cos(swing) * 0.47;
+      const kz = Math.sin(swing) * 0.47;
+      const fy = ky - Math.cos(swing - bend) * 0.47;
+      const fz = kz + Math.sin(swing - bend) * 0.47;
       L(hx, hip, 0, kx, ky, kz);
       L(kx, ky, kz, kx, fy, fz);
       L(kx, fy, fz, kx, fy, fz + 0.16);
     }
+
     for (const side of [-1, 1]) {
-      const ax = side * 0.29;
+      const ax = shX + side * 0.29;
       const ay = shoulder - 0.04;
+      const customArm = side < 0 ? p.armL : p.armR;
+      if (customArm) {
+        const [ux, uy, uz] = this.aimVec(customArm.upper, 0.3);
+        const [fx, fy, fz] = this.aimVec(customArm.fore, 0.28);
+        const ex = ax + ux;
+        const ey = ay + uy;
+        const ez = uz;
+        const hx = ex + fx;
+        const hy = ey + fy;
+        const hz = ez + fz;
+        L(ax, ay, 0, ex, ey, ez);
+        L(ex, ey, ez, hx, hy, hz);
+        if (side > 0 && p.tool) {
+          const [tx, ty, tz] = this.aimVec(customArm.fore, p.tool);
+          L(hx, hy, hz, hx + tx, hy + ty, hz + tz);
+        }
+        continue;
+      }
+
       let raise: number;
       if (p.climbing) raise = 2 + Math.sin((stride ?? 0) + (side > 0 ? 0 : Math.PI)) * 0.45;
       else if (side > 0 && p.reach > 0) raise = p.reach * Math.PI;
       else if (p.seated) raise = 0.9;
       else raise = stride === null ? 0.05 : -Math.sin(stride + (side > 0 ? Math.PI : 0)) * 0.5;
-      const ex = ax, ey = ay - Math.cos(raise) * 0.3, ez = Math.sin(raise) * 0.3;
+      const ex = ax;
+      const ey = ay - Math.cos(raise) * 0.3;
+      const ez = Math.sin(raise) * 0.3;
       const fore = raise + (p.seated ? 0.5 : 0.35);
-      const hy = ey - Math.cos(fore) * 0.28, hz = ez + Math.sin(fore) * 0.28;
+      const hy = ey - Math.cos(fore) * 0.28;
+      const hz = ez + Math.sin(fore) * 0.28;
       L(ax, ay, 0, ex, ey, ez);
       L(ex, ey, ez, ex, hy, hz);
       if (side > 0 && p.tool) L(ex, hy, hz, ex, hy - Math.cos(fore) * p.tool, hz + Math.sin(fore) * p.tool);
@@ -902,6 +1209,494 @@ export class Hangar {
   private people(ink: HangarInk, color: string, alpha: number, glow: boolean, poses: readonly Pose[]): void {
     ink(color, alpha, 1.1, () => poses.forEach((p) => this.draw(p, 'body')), glow);
     ink(color, alpha, 2, () => poses.forEach((p) => this.draw(p, 'limbs')), glow);
+  }
+
+  /** Draw a named pilot in 3D with their multi-colour low-poly head, ears/visor/snout/tail, and suit! */
+  private drawPilot(
+    ink: HangarInk,
+    spec: PilotSpec,
+    suitColor: string,
+    accentColor: string,
+    alpha: number,
+    glow: boolean,
+    pose: Pose,
+  ): void {
+    const withId: Pose = { ...pose, pilotId: spec.id, hat: spec.hangarHat };
+    ink(suitColor, alpha, 1.15, () => this.draw(withId, 'body'), glow);
+    ink(suitColor, alpha, 1.95, () => this.draw(withId, 'limbs'), glow);
+    ink(accentColor, Math.min(1, alpha + 0.14), 1.45, () => this.draw(withId, 'accent'), glow);
+  }
+
+  /** Build a celebratory cadet dance pose (`wave`, `boogie`, `starhop`, or `hype`) at `x, z`. */
+  private cadetDancePose(
+    move: DanceMove,
+    x: number,
+    z: number,
+    face: number,
+    animTime: number,
+    phase: number,
+  ): Pose {
+    const t = animTime + phase;
+    if (move === 'wave') {
+      // Cosmic Wave: smooth overhead aurora-ribbon wave flowing across both arms.
+      const b = t * 5.8;
+      const s = Math.sin(b);
+      const c = Math.cos(b);
+      return person({
+        x,
+        z,
+        face,
+        pack: true,
+        happy: true,
+        tailPhase: b,
+        hipShiftX: s * 0.13,
+        squat: 0.06 + 0.06 * Math.abs(c),
+        legSpread: 0.18,
+        armL: { upper: [-0.52, 0.38 + s * 0.42, 0.22], fore: [-0.24 + c * 0.38, 0.68 + c * 0.34, 0.28] },
+        armR: { upper: [0.52, 0.38 - s * 0.42, 0.22], fore: [0.24 + c * 0.38, 0.68 - c * 0.34, 0.28] },
+      });
+    }
+    if (move === 'boogie') {
+      // Starlight Boogie: upbeat disco knee-bounce alternating skyward star points with hand-on-hip.
+      const b = t * 6.4;
+      const s = Math.sin(b);
+      const c = Math.cos(b);
+      const liftL = Math.max(0, -s);
+      const liftR = Math.max(0, s);
+      return person({
+        x,
+        z,
+        face: face + s * 0.14,
+        pack: true,
+        happy: true,
+        tailPhase: b,
+        hipShiftX: -s * 0.14,
+        squat: 0.09 + 0.1 * Math.abs(c),
+        legSpread: 0.22,
+        armL: {
+          upper: [-0.46 - liftL * 0.14, -0.34 + liftL * 1.18, 0.18 + liftL * 0.16],
+          fore: [0.22 - liftL * 0.56, -0.26 + liftL * 1.18, 0.22 + liftL * 0.14],
+        },
+        armR: {
+          upper: [0.46 + liftR * 0.14, -0.34 + liftR * 1.18, 0.18 + liftR * 0.16],
+          fore: [-0.22 + liftR * 0.56, -0.26 + liftR * 1.18, 0.22 + liftR * 0.14],
+        },
+      });
+    }
+    if (move === 'starhop') {
+      // Zero-G Star Hop: buoyant low-gravity hop with wide victory-V arms and cheerful heel kicks.
+      const b = t * 5.6;
+      const s = Math.sin(b);
+      const hop = Math.abs(s);
+      return person({
+        x,
+        z,
+        y: hop * 0.22,
+        face,
+        pack: true,
+        happy: true,
+        tailPhase: b,
+        legSpread: 0.16 + 0.14 * hop,
+        legKickL: Math.max(0, s) * 0.52,
+        legKickR: Math.max(0, -s) * 0.52,
+        armL: { upper: [-0.58 - hop * 0.18, 0.52 + hop * 0.34, 0.2], fore: [-0.44 - hop * 0.2, 0.84 + hop * 0.16, 0.22] },
+        armR: { upper: [0.58 + hop * 0.18, 0.52 + hop * 0.34, 0.2], fore: [0.44 + hop * 0.2, 0.84 + hop * 0.16, 0.22] },
+      });
+    }
+    // 'hype' — Cadet Cheer: rhythmic double-pump step bounce.
+    const b = t * 6.2;
+    const s = Math.sin(b);
+    return person({
+      x,
+      z,
+      y: Math.max(0, s) * 0.19,
+      face: face + Math.sin(b * 0.5) * 0.12,
+      pack: true,
+      happy: true,
+      tailPhase: b,
+      legSpread: 0.15,
+      legKickL: Math.max(0, -s) * 0.44,
+      legKickR: Math.max(0, s) * 0.44,
+      armL: { upper: [-0.36, 0.18 - s * 0.46, 0.48], fore: [-0.14, 0.62 - s * 0.36, 0.52] },
+      armR: { upper: [0.36, 0.18 + s * 0.46, 0.48], fore: [0.14, 0.62 + s * 0.36, 0.52] },
+    });
+  }
+
+  private renderFloatingNotes(ink: HangarInk, x: number, z: number, animTime: number, phase: number, color: string): void {
+    if (this.reduceMotion) return;
+    ink(color, 0.75, 1.15, () => {
+      for (let i = 0; i < 2; i++) {
+        const u = ((animTime * 0.75 + phase * 0.17 + i * 0.5) % 1);
+        const nx = x + Math.sin(u * Math.PI * 2 + i * 2.1) * 0.32;
+        const ny = 2.05 + u * 0.75;
+        // Little glowing neon musical eighth-note:
+        this.seg(nx - 0.06, ny, z, nx + 0.04, ny, z);
+        this.seg(nx + 0.04, ny, z, nx + 0.04, ny + 0.22, z);
+        this.seg(nx + 0.04, ny + 0.22, z, nx + 0.14, ny + 0.16, z);
+      }
+    }, false);
+  }
+
+  private renderFloatingZzz(ink: HangarInk, x: number, baseY: number, z: number, animTime: number, phase: number): void {
+    ink(CYAN, 0.78, 1.15, () => {
+      for (let i = 0; i < 3; i++) {
+        const u = this.reduceMotion ? (i + 1) * 0.28 : ((animTime * 0.42 + phase * 0.1 + i * 0.33) % 1);
+        this.label('Z', x + u * 0.38, baseY + 0.25 + u * 1.15, z, 0.22 + u * 0.16);
+      }
+    }, false);
+  }
+
+  /**
+   * Draw all 7 non-selected pilot avatars across the hangar in a randomized scenario:
+   * studying maths & typing, tossing a glowing neon ball back and forth, doing jumping jacks,
+   * napping on benches, munching space pizza, zapping holo-targets, and breaking into cadet dances!
+   */
+  private renderSquadScenario(
+    ink: HangarInk,
+    animTime: number,
+    mathAnswered: boolean,
+    typingFinished: boolean,
+  ): void {
+    const others = this.scenario.rosterOrder
+      .filter((id) => id !== this.loadout.pilot)
+      .map((id) => PILOT_BY_ID[id]);
+    if (others.length < 7) return;
+
+    const { catchZone, mathSecondSleeps, antics, dances, phases } = this.scenario;
+    const seg = (ax: number, ay: number, az: number, bx: number, by: number, bz: number): void =>
+      this.seg(ax, ay, az, bx, by, bz);
+
+    // 1. Typing Lab Cadet (`others[0]` at desk 15.2, 24.5):
+    {
+      const c = others[0]!;
+      const ph = phases[0]!;
+      const tap = Math.sin(animTime * 15 + ph);
+      const pose = typingFinished
+        ? person({
+            x: 15.2,
+            z: 24.5,
+            scale: 0.9,
+            seated: true,
+            pack: true,
+            happy: true,
+            armL: { upper: [-0.42, 0.85, 0.22], fore: [-0.25, 0.95, 0.18] },
+            armR: { upper: [0.42, 0.85, 0.22], fore: [0.25, 0.95, 0.18] },
+          })
+        : person({
+            x: 15.2,
+            z: 24.5,
+            scale: 0.9,
+            seated: true,
+            pack: true,
+            armL: { upper: [-0.15, -0.55, 0.65], fore: [0.1, -0.15 + tap * 0.18, 0.88] },
+            armR: { upper: [0.15, -0.55, 0.65], fore: [-0.1, -0.15 - tap * 0.18, 0.88] },
+          });
+      this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.85, false, pose);
+    }
+
+    // 2. Maths Class Cadet (`others[1]` at front-right desk -14.4, 25.4):
+    {
+      const c = others[1]!;
+      const pose = mathAnswered
+        ? person({
+            x: -14.4,
+            z: 25.4,
+            scale: 0.9,
+            seated: true,
+            pack: true,
+            happy: true,
+            armL: { upper: [-0.38, 0.82, 0.25], fore: [-0.2, 0.92, 0.2] },
+            armR: { upper: [0.38, 0.82, 0.25], fore: [0.2, 0.92, 0.2] },
+          })
+        : person({
+            x: -14.4,
+            z: 25.4,
+            scale: 0.9,
+            seated: true,
+            pack: true,
+            reach: 0.86,
+          });
+      this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.85, false, pose);
+    }
+
+    // Also keep two junior trainees at the back Maths Class row so the classroom stays full:
+    this.people(ink, SAND, 0.42, false, [
+      person({ x: -18.2, z: 28.2, scale: 0.82, seated: true, pack: true }),
+      person({ x: -14.4, z: 28.2, scale: 0.82, seated: true, pack: true, reach: !mathAnswered ? 0.65 : 0 }),
+    ]);
+
+    // 3 & 4. Paired Ball-Throwing Cadets (`others[2]` & `others[3]`):
+    {
+      const cA = others[2]!;
+      const cB = others[3]!;
+      const [spotA, spotB] =
+        catchZone === 'leftApron'
+          ? ([[-8.6, 7.6], [-5.1, 8.3]] as const)
+          : catchZone === 'rightApron'
+            ? ([[5.1, 8.3], [8.6, 7.6]] as const)
+            : ([[-9.1, 19.6], [-4.9, 20.4]] as const);
+
+      const faceAB = Math.atan2(spotB[0] - spotA[0], spotB[1] - spotA[1]);
+      const faceBA = Math.atan2(spotA[0] - spotB[0], spotA[1] - spotB[1]);
+
+      const cycle = (animTime + phases[2]!) / 1.35;
+      const leg = Math.floor(cycle);
+      const u = cycle - leg;
+      const aToB = leg % 2 === 0;
+      const from = aToB ? spotA : spotB;
+      const to = aToB ? spotB : spotA;
+
+      const bx = lerp(from[0], to[0], u);
+      const bz = lerp(from[1], to[1], u);
+      const by = 1.18 + 4 * u * (1 - u) * 1.55;
+
+      // Glowing spinning 3D octahedron space-ball flying in an arc between them:
+      ink(LIME, 0.95, 1.45, () => {
+        const r = 0.2;
+        const spin = animTime * 5.5;
+        const cs = Math.cos(spin) * r;
+        const sn = Math.sin(spin) * r;
+        const pts: readonly [number, number][] = [
+          [cs, sn],
+          [-sn, cs],
+          [-cs, -sn],
+          [sn, -cs],
+        ];
+        for (let i = 0; i < 4; i++) {
+          const [dx0, dz0] = pts[i]!;
+          const [dx1, dz1] = pts[(i + 1) % 4]!;
+          seg(bx + dx0, by, bz + dz0, bx + dx1, by, bz + dz1);
+          seg(bx + dx0, by, bz + dz0, bx, by + r * 1.15, bz);
+          seg(bx + dx0, by, bz + dz0, bx, by - r * 1.15, bz);
+        }
+      });
+
+      const throwerLift = Math.max(0, 1 - u * 2.6);
+      const catcherLift = Math.max(0, (u - 0.55) / 0.45);
+      const hopCatch = Math.max(0, Math.sin(catcherLift * Math.PI)) * 0.18;
+
+      const poseFor = (isThrower: boolean, spot: readonly [number, number], face: number, ph: number): Pose => {
+        const reachAmt = isThrower ? throwerLift : catcherLift;
+        return person({
+          x: spot[0],
+          z: spot[1],
+          y: isThrower ? 0 : hopCatch,
+          face,
+          pack: true,
+          happy: reachAmt > 0.35,
+          tailPhase: animTime * 6 + ph,
+          squat: isThrower ? (1 - throwerLift) * 0.04 : 0.06 * (1 - catcherLift),
+          armL: {
+            upper: [-0.2, -0.25 + reachAmt * 0.78, 0.55 + reachAmt * 0.3],
+            fore: [0.12, 0.15 + reachAmt * 0.72, 0.75],
+          },
+          armR: {
+            upper: [0.2, -0.25 + reachAmt * 0.88, 0.55 + reachAmt * 0.35],
+            fore: [-0.12, 0.2 + reachAmt * 0.78, 0.8],
+          },
+        });
+      };
+
+      this.drawPilot(ink, cA, cA.colors.base, cA.colors.accent, 0.92, false, poseFor(aToB, spotA, faceAB, phases[2]!));
+      this.drawPilot(ink, cB, cB.colors.base, cB.colors.accent, 0.92, false, poseFor(!aToB, spotB, faceBA, phases[3]!));
+    }
+
+    // 5, 6 & 7. Three Randomized Hangar Antics on the open foreground/side spots:
+    const openSpots: readonly [number, number, number][] =
+      catchZone === 'leftApron'
+        ? [
+            [5.5, 7.5, Math.PI + 0.28],
+            [8.6, 8.6, Math.PI + 0.42],
+            [-10.4, 11.4, Math.PI - 0.38],
+          ]
+        : catchZone === 'rightApron'
+          ? [
+              [-5.5, 7.5, Math.PI - 0.28],
+              [-8.6, 8.6, Math.PI - 0.42],
+              [10.4, 11.4, Math.PI + 0.38],
+            ]
+          : [
+              [-7.0, 7.7, Math.PI - 0.32],
+              [5.6, 7.6, Math.PI + 0.28],
+              [8.7, 8.7, Math.PI + 0.42],
+            ];
+
+    antics.forEach((act, idx) => {
+      const c = others[4 + idx]!;
+      const ph = phases[4 + idx]!;
+      const baseMove = dances[4 + idx]!;
+      const [sx, sz, faceCam] = openSpots[idx]!;
+
+      // Spontaneous ~4.2s cadet dance break every ~13.5s for active standing cadets!
+      const danceWindow = !this.reduceMotion && ((animTime + ph * 1.3) % 13.5) < 4.2;
+      const activeMove =
+        DANCE_MOVES[(DANCE_MOVES.indexOf(baseMove) + Math.floor((animTime + ph) / 6.5)) % DANCE_MOVES.length]!;
+
+      if (act === 'dance' || (danceWindow && (act === 'jacks' || act === 'practice'))) {
+        const pose = this.reduceMotion
+          ? person({ x: sx, z: sz, face: faceCam, pack: true, happy: true })
+          : this.cadetDancePose(activeMove, sx, sz, faceCam, animTime, ph);
+        this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.94, false, pose);
+        this.renderFloatingNotes(ink, sx, sz, animTime, ph, c.colors.accent);
+        return;
+      }
+
+      if (act === 'jacks') {
+        const b = animTime * 5.2 + ph;
+        const u = this.reduceMotion ? 0.75 : 0.5 - 0.5 * Math.cos(b);
+        const hop = this.reduceMotion ? 0 : Math.max(0, Math.sin(b - 0.3)) * 0.3;
+        const pose = person({
+          x: sx,
+          z: sz,
+          y: hop,
+          face: faceCam,
+          pack: true,
+          happy: u > 0.55,
+          tailPhase: b,
+          legSpread: u * 0.46,
+          armL: {
+            upper: [lerp(-0.18, -0.58, Math.sin(u * Math.PI * 0.68)), lerp(-1, 0.88, u), 0.06],
+            fore: [lerp(-0.08, 0.32, u), lerp(-1, 0.95, u), 0.08],
+          },
+          armR: {
+            upper: [lerp(0.18, 0.58, Math.sin(u * Math.PI * 0.68)), lerp(-1, 0.88, u), 0.06],
+            fore: [lerp(0.08, -0.32, u), lerp(-1, 0.95, u), 0.08],
+          },
+        });
+        this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.94, false, pose);
+        return;
+      }
+
+      if (act === 'sleep') {
+        // Low-poly hangar nap bench + pillow + stretched-out snoozing cadet + rising Zzzs!
+        const benchFace = sx < 0 ? Math.PI * 0.42 : -Math.PI * 0.42;
+        ink(BLUE, 0.55, 1.1, () => {
+          this.box(sx, 0.36, sz, 2.2, 0.1, 0.85);
+          seg(sx - 0.95, 0, sz - 0.3, sx - 0.95, 0.36, sz - 0.3);
+          seg(sx + 0.95, 0, sz - 0.3, sx + 0.95, 0.36, sz - 0.3);
+          seg(sx - 0.95, 0, sz + 0.3, sx - 0.95, 0.36, sz + 0.3);
+          seg(sx + 0.95, 0, sz + 0.3, sx + 0.95, 0.36, sz + 0.3);
+        }, false);
+        const pose = person({
+          x: sx,
+          z: sz,
+          face: benchFace,
+          lying: true,
+          sleeping: true,
+          pack: false,
+          armL: { upper: [-0.22, -0.62, 0.26], fore: [0.45, -0.22, 0.42] },
+          armR: { upper: [0.22, -0.62, 0.26], fore: [-0.45, -0.22, 0.42] },
+        });
+        this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.9, false, pose);
+        this.renderFloatingZzz(ink, sx + Math.sin(benchFace) * 0.72, 0.82, sz + Math.cos(benchFace) * 0.72, animTime, ph);
+        return;
+      }
+
+      if (act === 'eat') {
+        // Supply crate seat + open space-pizza box + cadet munching a glowing neon pizza slice!
+        ink(ORANGE, 0.62, 1.1, () => {
+          this.box(sx, 0, sz - 0.08, 0.92, 0.54, 0.85);
+          this.box(sx + (sx < 0 ? 0.88 : -0.88), 0, sz + 0.12, 0.68, 0.42, 0.68);
+        }, false);
+        const chomp = this.reduceMotion ? 0.65 : 0.5 + 0.5 * Math.sin(animTime * 4.1 + ph);
+        const pose = person({
+          x: sx,
+          z: sz,
+          face: faceCam,
+          seated: true,
+          pack: true,
+          happy: chomp > 0.6,
+          armL: { upper: [-0.25, -0.6, 0.45], fore: [0.15, -0.25, 0.6] },
+          armR: {
+            upper: [0.22, -0.35 + chomp * 0.52, 0.62],
+            fore: [-0.36, 0.22 + chomp * 0.66, 0.42],
+          },
+        });
+        this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.92, false, pose);
+        // Glowing neon pizza slice near hand/mouth:
+        const sliceY = 1.02 + chomp * 0.22;
+        const sliceX = sx + Math.sin(faceCam) * 0.34;
+        const sliceZ = sz + Math.cos(faceCam) * 0.34;
+        ink(YELLOW, 0.95, 1.35, () => {
+          seg(sliceX - 0.11, sliceY + 0.06, sliceZ, sliceX + 0.11, sliceY + 0.06, sliceZ);
+          seg(sliceX - 0.11, sliceY + 0.06, sliceZ, sliceX, sliceY - 0.12, sliceZ + 0.05);
+          seg(sliceX + 0.11, sliceY + 0.06, sliceZ, sliceX, sliceY - 0.12, sliceZ + 0.05);
+        }, false);
+        return;
+      }
+
+      if (act === 'practice') {
+        // Strafing blaster practice against a spinning 3D holo-bullseye target!
+        const dir = sx < 0 ? -1 : 1;
+        const tx = sx + dir * 2.15;
+        const tz = sz + 0.55;
+        const ty = 1.28 + (this.reduceMotion ? 0 : Math.sin(animTime * 2.8 + ph) * 0.16);
+        const strafe = this.reduceMotion ? 0 : Math.sin(animTime * 2.6 + ph) * 0.32;
+        const px = sx - dir * 0.25;
+        const pz = sz + strafe;
+        const aimFace = Math.atan2(tx - px, tz - pz);
+
+        ink(PINK, 0.85, 1.3, () => {
+          seg(tx, 0, tz, tx, ty - 0.38, tz);
+          for (const r of [0.36, 0.18]) {
+            seg(tx, ty + r, tz, tx, ty, tz + r);
+            seg(tx, ty, tz + r, tx, ty - r, tz);
+            seg(tx, ty - r, tz, tx, ty, tz - r);
+            seg(tx, ty, tz - r, tx, ty + r, tz);
+          }
+        }, false);
+
+        if (!this.reduceMotion) {
+          const shotU = ((animTime * 2.4 + ph) % 1);
+          const bx0 = lerp(px + dir * 0.45, tx, shotU);
+          const bz0 = lerp(pz, tz, shotU);
+          const bx1 = lerp(px + dir * 0.45, tx, Math.min(1, shotU + 0.18));
+          const bz1 = lerp(pz, tz, Math.min(1, shotU + 0.18));
+          ink(SAND, 0.95, 1.5, () => seg(bx0, 1.28, bz0, bx1, ty, bz1));
+        }
+
+        const pose = person({
+          x: px,
+          z: pz,
+          face: aimFace,
+          pack: true,
+          squat: 0.08,
+          legSpread: 0.18,
+          tailPhase: animTime * 6 + ph,
+          armL: { upper: [-0.35, -0.35, 0.45], fore: [0.2, -0.1, 0.55] },
+          armR: { upper: [0.1, 0.08, 0.95], fore: [0, 0.04, 1] },
+          tool: 0.24,
+        });
+        this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.92, false, pose);
+        return;
+      }
+
+      // 'mathExtra': Extra named cadet at front-left Maths Class desk (-18.2, 25.4) — studying or snoozing!
+      const deskPose = mathSecondSleeps
+        ? person({
+            x: -18.2,
+            z: 25.4,
+            scale: 0.9,
+            seated: true,
+            sleeping: true,
+            pack: true,
+            armL: { upper: [-0.2, -0.45, 0.65], fore: [0.25, -0.1, 0.65] },
+            armR: { upper: [0.2, -0.45, 0.65], fore: [-0.25, -0.1, 0.65] },
+          })
+        : person({
+            x: -18.2,
+            z: 25.4,
+            scale: 0.9,
+            seated: true,
+            pack: true,
+            happy: mathAnswered,
+            reach: !mathAnswered ? 0.72 : 0,
+          });
+      this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.85, false, deskPose);
+      if (mathSecondSleeps) {
+        this.renderFloatingZzz(ink, -18.2, 1.35, 25.4, animTime, ph);
+      }
+    });
   }
 
   // ----------------------------------------------------------------- 3D ships
@@ -1205,10 +2000,6 @@ export class Hangar {
         seg(x + 0.7, 0, z + 0.55, x + 0.7, 0.62, z + 0.55);
       }
     }, false);
-    const students = desks.map(([x, z], i) =>
-      person({ x, z, scale: 0.84, seated: true, pack: true, reach: !answered && i === Math.floor(animTime / 4.5) % 4 ? 0.85 : 0 }),
-    );
-    this.people(ink, SAND, 0.58, false, students);
     const teacher = person({ x: -20.8, z: 30.8, face: 1.75, hat: 'cap', reach: 0.52 + Math.sin(animTime * 1.6) * 0.04, tool: 0.75 });
     this.people(ink, CYAN, 0.72, false, [teacher]);
 
@@ -1224,7 +2015,9 @@ export class Hangar {
     }, false);
     ink(SAND, 0.35, 1.2, () => this.label(' '.repeat(typed) + word.slice(typed), desk.x, 2.4, desk.z + 1.45, 0.58), false);
     if (typed) ink(LIME, 0.95, 1.3, () => this.label(word.slice(0, typed) + ' '.repeat(word.length - typed), desk.x, 2.4, desk.z + 1.45, 0.58));
-    this.people(ink, SAND, 0.62, false, [person({ x: desk.x, z: desk.z, scale: 0.84, seated: true, pack: true })]);
+
+    // --- the 7 other named pilot avatars scattered across the hangar in a randomized scenario!
+    this.renderSquadScenario(ink, animTime, answered, typed >= word.length);
 
     // --- far background ships, mechanics, sparks, crate robot and scanning drone
     ink(VIOLET, 0.42, 1.1, () => {
@@ -1320,10 +2113,15 @@ export class Hangar {
       }
     }
 
-    // --- the player's 3D pilot figure (wearing their avatar's headgear & colour-theme suit!)
+    // --- the player's 3D pilot figure (wearing their avatar's 3D head/ears/visor/tail & colour-theme suit!)
     const activeZ = boarding ? selectedShip.bay.z + rolling * rolling * 18 : selectedShip.bay.z;
     const activeX = boarding ? lerp(selectedShip.bay.x, selectedShip.bay.x * 0.5, rolling) : selectedShip.bay.x;
-    this.people(ink, theme.hull, 1, true, [this.pilotPose(selectedShip, activeX, activeZ, pilotSpec.hangarHat)]);
+    const playerPose = {
+      ...this.pilotPose(selectedShip, activeX, activeZ, pilotSpec.hangarHat),
+      happy: true,
+      tailPhase: animTime * 6.5,
+    };
+    this.drawPilot(ink, pilotSpec, theme.hull, pilotSpec.colors.accent, 1, true, playerPose);
 
     // --- UI overlays for each stage
     if (this.stage === 'avatar') {

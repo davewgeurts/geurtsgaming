@@ -54,6 +54,7 @@ const {
   LOADOUT_KEY,
   PILOTS,
   PILOT_BY_ID,
+  PILOT_IDS,
   SHIPS,
   SHIP_BY_ID,
   THEMES,
@@ -947,4 +948,129 @@ test('Game integration: ship speeds (keyboard & touch), weapons, 5-hull 320px HU
     'privacy.astro explicitly states local-only device storage',
   );
   assert.equal(trust.updated, '13 November 2026');
+});
+
+test('hangar living squad scenario: chosen pilot wears avatar head + theme colours, and all 7 other pilots populate randomized antics & cadet dances', () => {
+  // 1. Every chosen pilot walks to their ship wearing their theme hull colour + avatar accent colour,
+  //    while the other 7 named avatars appear in the hangar in their own base + accent colours.
+  for (const chosenId of PILOT_IDS) {
+    const chosenSpec = PILOT_BY_ID[chosenId];
+    const theme = THEME_BY_ID.solar;
+    const hangar = new Hangar(() => {}, {
+      initialLoadout: { pilot: chosenId, theme: 'solar', ship: 'bastion' },
+      hasSavedLoadout: true,
+      reduceMotion: false,
+      scenarioSeed: 4242,
+    });
+    assert.equal(hangar.stage, 'boarding');
+    assert.equal(hangar.scenario.rosterOrder.length, PILOT_IDS.length);
+    assert.deepEqual([...hangar.scenario.rosterOrder].sort(), [...PILOT_IDS].sort());
+
+    hangar.update(2.2); // mid-walk across hangar floor toward Bay 3
+    const { ctx, ink, strokes } = makeRecordingCanvas(1280, 800);
+    hangar.render({
+      ctx,
+      ink,
+      w: 1280,
+      h: 800,
+      inset: { top: 0, right: 0, bottom: 0, left: 0 },
+      time: 2.2,
+      touch: false,
+      reduceMotion: false,
+    });
+
+    const drawnColors = new Set(strokes.map((s) => s.color));
+    assert.ok(drawnColors.has(theme.hull), `boarding ${chosenId} strokes chosen theme hull (${theme.hull})`);
+    assert.ok(
+      drawnColors.has(chosenSpec.colors.accent),
+      `boarding ${chosenId} strokes chosen avatar accent (${chosenSpec.colors.accent})`,
+    );
+
+    const squadmates = PILOTS.filter((p) => p.id !== chosenId);
+    assert.equal(squadmates.length, 7);
+    for (const mate of squadmates) {
+      assert.ok(
+        drawnColors.has(mate.colors.base),
+        `squadmate ${mate.id} base colour (${mate.colors.base}) rendered when ${chosenId} boards`,
+      );
+      assert.ok(
+        drawnColors.has(mate.colors.accent),
+        `squadmate ${mate.id} accent colour (${mate.colors.accent}) rendered when ${chosenId} boards`,
+      );
+    }
+  }
+
+  // 2. Randomized scenarios cover all 6 activities, all 3 catch zones, and all 4 cadet dances cleanly,
+  //    and re-opening the customizer rolls a fresh scenario each visit.
+  const seenActivities = new Set<string>();
+  const seenCatchZones = new Set<string>();
+  const seenDances = new Set<string>();
+  const seenOrders = new Set<string>();
+
+  for (let seed = 1; seed <= 50; seed++) {
+    const hangar = new Hangar(() => {}, {
+      initialLoadout: { pilot: 'fox', theme: 'nebula', ship: 'swift' },
+      hasSavedLoadout: true,
+      reduceMotion: false,
+      scenarioSeed: seed * 7919,
+    });
+    for (const act of hangar.scenario.antics) seenActivities.add(act);
+    seenCatchZones.add(hangar.scenario.catchZone);
+    for (const d of hangar.scenario.dances) seenDances.add(d);
+    seenOrders.add(hangar.scenario.rosterOrder.join(','));
+
+    // Render across multiple timestamps (including spontaneous cadet dance bursts) and with reduceMotion
+    for (const [t, rm] of [
+      [0.8, false],
+      [3.1, false],
+      [8.6, false],
+      [2.0, true],
+    ] as const) {
+      const { ctx, ink, strokes } = makeRecordingCanvas(1280, 800);
+      hangar.render({
+        ctx,
+        ink,
+        w: 1280,
+        h: 800,
+        inset: { top: 0, right: 0, bottom: 0, left: 0 },
+        time: t,
+        touch: false,
+        reduceMotion: rm,
+      });
+      const totalSegments = strokes.reduce((sum, s) => sum + s.lines, 0);
+      assert.ok(
+        strokes.length > 20 && totalSegments > 500,
+        `seed ${seed} renders rich 3D hangar squad at t=${t}, reduceMotion=${rm} (batches=${strokes.length}, segments=${totalSegments})`,
+      );
+    }
+  }
+
+  assert.deepEqual(
+    [...seenActivities].sort(),
+    ['dance', 'eat', 'jacks', 'mathExtra', 'practice', 'sleep'],
+    'all 6 hangar antics appear across random scenarios',
+  );
+  assert.deepEqual(
+    [...seenCatchZones].sort(),
+    ['leftApron', 'midRunway', 'rightApron'],
+    'all 3 ball-toss catch zones appear across random scenarios',
+  );
+  assert.deepEqual(
+    [...seenDances].sort(),
+    ['boogie', 'hype', 'starhop', 'wave'],
+    'all 4 cadet dances appear across random scenarios',
+  );
+  assert.ok(seenOrders.size > 20, 'squadmate roster order shuffles across visits');
+
+  // Re-opening customizer reseeds the scenario
+  const reseedProbe = new Hangar(() => {}, {
+    initialLoadout: DEFAULT_LOADOUT,
+    hasSavedLoadout: true,
+    reduceMotion: false,
+    scenarioSeed: 12345,
+  });
+  const firstSeed = reseedProbe.scenario.seed;
+  reseedProbe.openCustomizer();
+  const secondSeed = reseedProbe.scenario.seed;
+  assert.notEqual(firstSeed, secondSeed, 'openCustomizer() rolls a new hangar scenario');
 });
