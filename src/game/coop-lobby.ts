@@ -450,6 +450,7 @@ export class CoopLobbyController {
 
 export interface CoopLobbyModalOptions {
   root: HTMLElement;
+  controller?: CoopLobbyController;
   initialCallsign?: string;
   onCloseModal: () => void;
   onCoopActiveChange?: (active: boolean) => void;
@@ -477,13 +478,15 @@ export class CoopLobbyModal {
   constructor(opts: CoopLobbyModalOptions) {
     this.root = opts.root;
     this.onCloseModal = opts.onCloseModal;
-    this.controller = new CoopLobbyController({
-      initialCallsign: opts.initialCallsign,
-      onJoinChime: () => this.sound.play('free'),
-      onLaunchChime: () => this.sound.play('start'),
-      onCoopActiveChange: opts.onCoopActiveChange,
-      onSquadLaunched: opts.onSquadLaunched,
-    });
+    this.controller =
+      opts.controller ??
+      new CoopLobbyController({
+        initialCallsign: opts.initialCallsign,
+        onJoinChime: () => this.sound.play('free'),
+        onLaunchChime: () => this.sound.play('start'),
+        onCoopActiveChange: opts.onCoopActiveChange,
+        onSquadLaunched: opts.onSquadLaunched,
+      });
     this.bindEvents();
     this.unsubscribe = this.controller.subscribe((snap) => this.render(snap));
   }
@@ -594,6 +597,9 @@ export class CoopLobbyModal {
     statusSlot: HTMLElement;
     bodySlot: HTMLElement;
   } {
+    if (!panel.hasAttribute('tabindex')) {
+      panel.setAttribute('tabindex', '-1');
+    }
     let headSlot = panel.querySelector<HTMLElement>('[data-coop-head-slot]');
     let alertSlot = panel.querySelector<HTMLElement>('[data-coop-alert-slot]');
     let statusSlot = panel.querySelector<HTMLElement>('[data-coop-status-slot]');
@@ -745,27 +751,7 @@ export class CoopLobbyModal {
       }
     }
 
-    let nextTarget: HTMLElement | null = null;
-    if (saved.wasJoinBtn) {
-      nextTarget = panel.querySelector<HTMLElement>('[data-coop-join-btn]:not([disabled])');
-    } else if (saved.focusedAction) {
-      if (saved.focusedSeat !== null) {
-        nextTarget = panel.querySelector<HTMLElement>(
-          `[data-coop-action="${saved.focusedAction}"][data-seat="${saved.focusedSeat}"]:not([disabled])`,
-        );
-      }
-      if (!nextTarget) {
-        nextTarget = panel.querySelector<HTMLElement>(
-          `[data-coop-action="${saved.focusedAction}"]:not([disabled])`,
-        );
-      }
-    }
-
-    if (!nextTarget) {
-      nextTarget = panel.querySelector<HTMLElement>(
-        '[data-coop-host-btn], [data-coop-copy-link], [data-coop-ready-btn], [data-coop-leave], [data-coop-action="close"]',
-      );
-    }
+    const nextTarget = resolveLobbyFocusTarget(panel, saved);
     nextTarget?.focus({ preventScroll: true });
   }
 
@@ -856,7 +842,7 @@ export class CoopLobbyModal {
         `);
       } else {
         seatCards.push(`
-          <div class="coop-seat empty" style="--seat-color:${color}" data-coop-seat="${s}">
+          <div class="coop-seat empty" style="--seat-color:${color}" data-coop-seat="${s}" tabindex="-1">
             <div class="coop-seat-main">
               <span class="coop-seat-num">P${s + 1}</span>
               <span class="coop-seat-empty">${snap.locked ? 'Empty Wing' : 'Open Wingman Slot'}</span>
@@ -943,6 +929,60 @@ export class CoopLobbyModal {
       }
     `;
   }
+}
+
+export interface SavedLobbyFocus {
+  wasJoinBtn: boolean;
+  focusedAction: string | null;
+  focusedSeat: string | null;
+}
+
+/**
+ * Pick which element inside `panel` should receive keyboard focus after a lobby re-render.
+ *
+ * Safety invariant: NEVER fall back to `kick` (removing another guest) or `leave` (closing the room)
+ * when a previously focused control disappears. Queries run one selector at a time in priority order
+ * rather than a comma-separated list (which `querySelector` evaluates in DOM tree order).
+ */
+export function resolveLobbyFocusTarget(
+  panel: HTMLElement,
+  saved: SavedLobbyFocus,
+): HTMLElement | null {
+  let nextTarget: HTMLElement | null = null;
+  if (saved.wasJoinBtn) {
+    nextTarget = panel.querySelector<HTMLElement>('[data-coop-join-btn]:not([disabled])');
+  } else if (saved.focusedAction === 'kick') {
+    if (saved.focusedSeat !== null) {
+      nextTarget = panel.querySelector<HTMLElement>(
+        `[data-coop-action="kick"][data-seat="${saved.focusedSeat}"]:not([disabled])`,
+      );
+      if (!nextTarget) {
+        nextTarget = panel.querySelector<HTMLElement>(
+          `[data-coop-seat="${saved.focusedSeat}"][tabindex]`,
+        );
+      }
+    }
+  } else if (saved.focusedAction) {
+    if (saved.focusedSeat !== null) {
+      nextTarget = panel.querySelector<HTMLElement>(
+        `[data-coop-action="${saved.focusedAction}"][data-seat="${saved.focusedSeat}"]:not([disabled])`,
+      );
+    }
+    if (!nextTarget) {
+      nextTarget = panel.querySelector<HTMLElement>(
+        `[data-coop-action="${saved.focusedAction}"]:not([disabled])`,
+      );
+    }
+  }
+
+  if (!nextTarget) {
+    nextTarget =
+      panel.querySelector<HTMLElement>('[data-coop-copy-link]:not([disabled])') ??
+      panel.querySelector<HTMLElement>('[data-coop-ready-btn]:not([disabled])') ??
+      panel.querySelector<HTMLElement>('[data-coop-host-btn]:not([disabled])') ??
+      panel;
+  }
+  return nextTarget;
 }
 
 function escapeHtml(raw: string): string {

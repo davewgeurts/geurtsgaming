@@ -5,8 +5,10 @@ import { CoopRoom } from '../relay/room.mjs';
 import { CoopClient, type CoopConnectOptions, type StorageLike } from '../src/game/coop-client';
 import {
   CoopLobbyController,
+  CoopLobbyModal,
   describeRefusalReason,
   loadActiveCoopSession,
+  resolveLobbyFocusTarget,
 } from '../src/game/coop-lobby';
 
 class MemoryStorage implements StorageLike {
@@ -301,4 +303,285 @@ test('Duplicated lobby tab shows friendly "another tab" message and stops, and c
 
   tab2.dispose();
   host.dispose();
+});
+
+test('Removing a guest via keyboard never moves focus onto another Remove button or onto Leave', async () => {
+  // Minimal DOM tree whose `querySelector` walks in strict W3C pre-order document order
+  // (where `Leave` in `headSlot` comes BEFORE `bodySlot` controls, and comma-separated selectors
+  // match whichever node appears earliest in document order).
+  let currentActive: MiniEl | null = null;
+  const getActive = (): MiniEl | null => currentActive;
+
+  class MiniEl {
+    tagName: string;
+    attrs = new Map<string, string>();
+    dataset: Record<string, string> = {};
+    parent: MiniEl | null = null;
+    children: MiniEl[] = [];
+    private listeners = new Map<string, Array<(ev: unknown) => void>>();
+    private rawHtml = '';
+
+    constructor(tagName: string) {
+      this.tagName = tagName.toLowerCase();
+    }
+
+    setAttribute(name: string, value: string): void {
+      const k = name.toLowerCase();
+      this.attrs.set(k, value);
+      if (k.startsWith('data-')) {
+        const camel = k.slice(5).replace(/-([a-z])/g, (_, ch: string) => ch.toUpperCase());
+        this.dataset[camel] = value;
+      }
+    }
+
+    getAttribute(name: string): string | null {
+      return this.attrs.get(name.toLowerCase()) ?? null;
+    }
+
+    hasAttribute(name: string): boolean {
+      return this.attrs.has(name.toLowerCase());
+    }
+
+    get innerHTML(): string {
+      return this.rawHtml;
+    }
+
+    set innerHTML(html: string) {
+      this.rawHtml = html;
+      this.children = parseMiniHtml(html, this);
+    }
+
+    contains(node: unknown): boolean {
+      let cur = node instanceof MiniEl ? (node as MiniEl | null) : null;
+      while (cur) {
+        if (cur === this) return true;
+        cur = cur.parent;
+      }
+      return false;
+    }
+
+    focus(): void {
+      currentActive = this;
+    }
+
+    matches(selectorList: string): boolean {
+      return selectorList
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .some((sel) => matchesSingleSelector(this, sel));
+    }
+
+    closest(selectorList: string): MiniEl | null {
+      let cur: MiniEl | null = this;
+      while (cur) {
+        if (cur.matches(selectorList)) return cur;
+        cur = cur.parent;
+      }
+      return null;
+    }
+
+    querySelector(selectorList: string): MiniEl | null {
+      for (const child of this.children) {
+        if (child.matches(selectorList)) return child;
+        const hit = child.querySelector(selectorList);
+        if (hit) return hit;
+      }
+      return null;
+    }
+
+    addEventListener(type: string, fn: (ev: unknown) => void): void {
+      const arr = this.listeners.get(type) ?? [];
+      arr.push(fn);
+      this.listeners.set(type, arr);
+    }
+
+    click(): void {
+      let cur: MiniEl | null = this;
+      const ev = { target: this, preventDefault() {} };
+      while (cur) {
+        for (const fn of cur.listeners.get('click') ?? []) fn(ev);
+        cur = cur.parent;
+      }
+    }
+  }
+
+  function matchesSingleSelector(el: MiniEl, sel: string): boolean {
+    let rest = sel.trim();
+    if (/^[a-z0-9-]+/i.test(rest)) {
+      const m = rest.match(/^[a-z0-9-]+/i)!;
+      if (el.tagName !== m[0].toLowerCase()) return false;
+      rest = rest.slice(m[0].length);
+    }
+    while (rest.length > 0) {
+      if (rest.startsWith(':not([disabled])')) {
+        if (el.hasAttribute('disabled')) return false;
+        rest = rest.slice(':not([disabled])'.length);
+        continue;
+      }
+      const attrMatch = rest.match(/^\[([a-z0-9-]+)(?:="([^"]*)")?\]/i);
+      if (attrMatch) {
+        const [, attrName, attrVal] = attrMatch;
+        if (!el.hasAttribute(attrName!)) return false;
+        if (attrVal !== undefined && el.getAttribute(attrName!) !== attrVal) return false;
+        rest = rest.slice(attrMatch[0].length);
+        continue;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  function parseMiniHtml(html: string, parent: MiniEl): MiniEl[] {
+    const roots: MiniEl[] = [];
+    const stack: MiniEl[] = [parent];
+    const voidTags = new Set(['input', 'img', 'br', 'hr', 'path', 'circle', 'rect', 'line']);
+    const tagRe = /<\/?([a-zA-Z0-9-]+)([^>]*)>/g;
+    let m: RegExpExecArray | null;
+    while ((m = tagRe.exec(html)) !== null) {
+      const full = m[0];
+      const tag = m[1]!.toLowerCase();
+      const attrPart = m[2] ?? '';
+      if (full.startsWith('</')) {
+        if (stack.length > 1) stack.pop();
+        continue;
+      }
+      const el = new MiniEl(tag);
+      const attrRe = /([a-zA-Z0-9:-]+)(?:="([^"]*)")?/g;
+      let am: RegExpExecArray | null;
+      while ((am = attrRe.exec(attrPart)) !== null) {
+        if (am[1] === '/') continue;
+        el.setAttribute(am[1]!, am[2] ?? '');
+      }
+      const top = stack[stack.length - 1]!;
+      el.parent = top;
+      if (top === parent) roots.push(el);
+      else top.children.push(el);
+      const selfClosing = full.endsWith('/>') || voidTags.has(tag);
+      if (!selfClosing) stack.push(el);
+    }
+    return roots;
+  }
+
+  const g = globalThis as Record<string, unknown>;
+  const prevDoc = g.document;
+  const prevEl = g.HTMLElement;
+  const prevInput = g.HTMLInputElement;
+  class FakeInputEl extends MiniEl {}
+  g.HTMLElement = MiniEl;
+  g.HTMLInputElement = FakeInputEl;
+  g.document = {
+    visibilityState: 'visible',
+    addEventListener() {},
+    removeEventListener() {},
+    get activeElement() {
+      return currentActive;
+    },
+  };
+
+  try {
+    const room = new CoopRoom('PRN689');
+    const WsBridge = createRoomWsConstructor(room);
+    const makeClient = (opts: CoopConnectOptions) =>
+      new CoopClient({
+        ...opts,
+        wsBase: 'ws://localhost:84/relay',
+        WebSocketConstructor: WsBridge,
+        pingIntervalMs: 0,
+      });
+
+    const hostCtrl = new CoopLobbyController({
+      storage: new MemoryStorage(),
+      createRoomFn: async () => ({ code: 'PRN689', formattedCode: 'PRN-689' }),
+      clientFactory: makeClient,
+    });
+    const guest1 = new CoopLobbyController({ storage: new MemoryStorage(), clientFactory: makeClient });
+    const guest2 = new CoopLobbyController({ storage: new MemoryStorage(), clientFactory: makeClient });
+
+    const root = new MiniEl('div');
+    const panel = new MiniEl('div');
+    panel.setAttribute('data-coop-panel', '');
+    panel.parent = root;
+    root.children.push(panel);
+
+    const modal = new CoopLobbyModal({
+      root: root as unknown as HTMLElement,
+      controller: hostCtrl,
+      onCloseModal: () => {},
+    });
+
+    await hostCtrl.hostNewRoom();
+    await flush();
+    guest1.joinRoomByCode('PRN689');
+    guest2.joinRoomByCode('PRN689');
+    await flush();
+
+    assert.equal(hostCtrl.snapshot().seats.length, 3, 'host + 2 guests in hangar');
+    assert.equal(panel.getAttribute('tabindex'), '-1', 'dialog panel gets tabindex="-1"');
+
+    // Focus "Remove seat 1" and trigger kick (while Leave is earlier in DOM order and seat 2 Remove is next)
+    const kickSeat1 = panel.querySelector('[data-coop-action="kick"][data-seat="1"]');
+    assert.ok(kickSeat1, 'Remove seat 1 button exists');
+    kickSeat1.focus();
+    kickSeat1.click();
+    await flush();
+
+    assert.equal(hostCtrl.snapshot().seats.some((s) => s.seat === 1), false, 'seat 1 was removed');
+    assert.equal(hostCtrl.snapshot().seats.some((s) => s.seat === 2), true, 'seat 2 is still connected');
+    const afterKick1 = getActive();
+    assert.ok(afterKick1, 'focus stayed inside the dialog');
+    assert.notEqual(afterKick1.dataset.coopAction, 'kick', 'focus must NOT jump to another guest Remove button');
+    assert.notEqual(afterKick1.dataset.coopAction, 'leave', 'focus must NOT jump to Leave');
+    assert.equal(afterKick1.hasAttribute('data-coop-leave'), false);
+    assert.equal(afterKick1.getAttribute('data-coop-seat'), '1', 'focus lands on now-empty seat 1 card');
+    assert.equal(afterKick1.getAttribute('tabindex'), '-1');
+
+    // Now focus "Remove seat 2" and trigger kick (removing the last guest)
+    const kickSeat2 = panel.querySelector('[data-coop-action="kick"][data-seat="2"]');
+    assert.ok(kickSeat2, 'Remove seat 2 button exists');
+    kickSeat2.focus();
+    kickSeat2.click();
+    await flush();
+
+    const afterKick2 = getActive();
+    assert.ok(afterKick2, 'focus still inside dialog after removing last guest');
+    assert.notEqual(afterKick2.dataset.coopAction, 'kick');
+    assert.notEqual(afterKick2.dataset.coopAction, 'leave');
+    assert.equal(afterKick2.hasAttribute('data-coop-leave'), false);
+
+    // Also verify disappearing action (e.g. Launch Squad -> locked hangar where ONLY Leave remains as a button)
+    // Re-add a guest so host can launch, focus Launch Squad, and click it
+    const guest3 = new CoopLobbyController({ storage: new MemoryStorage(), clientFactory: makeClient });
+    guest3.joinRoomByCode('PRN689');
+    await flush();
+    const activeStartBtn = panel.querySelector('[data-coop-action="start"]');
+    assert.ok(activeStartBtn && !activeStartBtn.hasAttribute('disabled'));
+    activeStartBtn.focus();
+    activeStartBtn.click();
+    await flush();
+
+    assert.equal(hostCtrl.snapshot().locked, true);
+    assert.equal(
+      getActive(),
+      panel,
+      'when all safe controls vanish on launch and only Leave remains, focus falls back to the dialog panel (not Leave)',
+    );
+    assert.notEqual(
+      resolveLobbyFocusTarget(panel as unknown as HTMLElement, {
+        wasJoinBtn: false,
+        focusedAction: 'start',
+        focusedSeat: null,
+      }),
+      panel.querySelector('[data-coop-leave]') as unknown as HTMLElement,
+    );
+
+    guest3.dispose();
+    guest2.dispose();
+    guest1.dispose();
+    modal.destroy();
+  } finally {
+    g.document = prevDoc;
+    g.HTMLElement = prevEl;
+    g.HTMLInputElement = prevInput;
+  }
 });
