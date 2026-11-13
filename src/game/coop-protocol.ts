@@ -1,0 +1,1230 @@
+/**
+ * Compact binary wire protocol and 60fps snapshot interpolator for Co-op Squad mode.
+ *
+ * Frame `0x01` (`BIN_FRAME_INPUT`, 8 bytes fixed, Guest -> Host @ 20 Hz):
+ *   `[0x01, seat, targetX_lo, targetX_hi, targetY_lo, targetY_hi, flags, seq]`
+ *
+ * Frame `0x02` (`BIN_FRAME_SNAP`, < 1.15 KB variable, Host -> Guests @ 18 Hz):
+ *   Authoritative `768 x 1024` (`3:4`) arena state: squad ships, ID-tagged enemies,
+ *   boss (with numeric-only Sum Boss problem encoding), fuel tanker, seeded asteroid
+ *   field progress, projectiles, pickups/mines, and a sequence-deduplicated FX ring
+ *   so hits and explosions ride inside `BIN_FRAME_SNAP` without spending JSON budget.
+ */
+
+import type { Kind as EnemyKind } from './enemies';
+import {
+  BIN_FRAME_INPUT,
+  BIN_FRAME_SNAP,
+  COOP_ARENA_HEIGHT,
+  COOP_ARENA_WIDTH,
+  COOP_SEAT_COLORS,
+  INPUT_FLAG_DOWN,
+  INPUT_FLAG_FIRE,
+  INPUT_FLAG_LEFT,
+  INPUT_FLAG_POINTER,
+  INPUT_FLAG_RIGHT,
+  INPUT_FLAG_TAP,
+  INPUT_FLAG_UP,
+  MAX_BINARY_BYTES,
+  type CoopGuestInput,
+  type CoopSeatIndex,
+} from './coop-types';
+import { NEON, PEBBLE, ROCK, SAND } from './core';
+
+/** Shared logical `3:4` arena dimensions simulated identically across laptops, tablets, and phones. */
+export const COOP_WORLD_W = COOP_ARENA_WIDTH;
+export const COOP_WORLD_H = COOP_ARENA_HEIGHT;
+
+export const INPUT_FLAG_FIRING = INPUT_FLAG_FIRE;
+export {
+  INPUT_FLAG_DOWN,
+  INPUT_FLAG_LEFT,
+  INPUT_FLAG_POINTER,
+  INPUT_FLAG_RIGHT,
+  INPUT_FLAG_TAP,
+  INPUT_FLAG_UP,
+  type CoopGuestInput,
+};
+
+/** Snapshot section caps keeping saturated frames strictly below `MAX_BINARY_BYTES` (1,280 B). */
+export const SNAP_MAX_SHIPS = 4;
+export const SNAP_MAX_ENEMIES = 44;
+export const SNAP_MAX_SHOTS = 52;
+export const SNAP_MAX_ITEMS = 16;
+export const SNAP_MAX_FX = 16;
+export const SNAP_MAX_BROKEN_ROCKS = 8;
+
+const COORD_OFFSET = 256;
+const COORD_SCALE = 8; // 0.125 px precision over [-256, +1791.875]
+const COORD_MAX_Q = 16383;
+
+export const ENEMY_KIND_TABLE: readonly EnemyKind[] = [
+  'drifter',
+  'dart',
+  'hex',
+  'weaver',
+  'mite',
+  'splitter',
+  'shard',
+  'spinner',
+  'saucer',
+];
+
+export const WIRE_COLOR_TABLE: readonly string[] = [
+  NEON.cyan,
+  NEON.lime,
+  NEON.yellow,
+  NEON.orange,
+  NEON.red,
+  NEON.violet,
+  SAND,
+  ROCK,
+  PEBBLE,
+  '#ffffff',
+  COOP_SEAT_COLORS[0],
+  COOP_SEAT_COLORS[1],
+  COOP_SEAT_COLORS[2],
+  COOP_SEAT_COLORS[3],
+];
+
+export const MATH_OP_TABLE = ['+', '-', '×', '÷'] as const;
+export type MathWireOp = (typeof MATH_OP_TABLE)[number];
+
+export interface CoopSnapShip {
+  seat: CoopSeatIndex;
+  connected: boolean;
+  alive: boolean;
+  hull: number;
+  maxHull: number;
+  invulnerable: boolean;
+  shielded: boolean;
+  firing: boolean;
+  spread: boolean;
+  wing: boolean;
+  orbitUpgrade: boolean;
+  x: number;
+  y: number;
+  lean: number;
+  orbit: number;
+  ackSeq: number;
+  respawnSec: number;
+}
+
+export interface CoopSnapEnemy {
+  id: number;
+  kind: EnemyKind;
+  color: string;
+  hp: number;
+  flash: boolean;
+  rot: number;
+  x: number;
+  y: number;
+}
+
+export interface CoopSnapBossArm {
+  dx: number;
+  dy: number;
+  hp: number;
+  maxHp: number;
+  flash: boolean;
+}
+
+export interface CoopSnapBossPod {
+  value: number;
+  hits: number;
+  right: boolean;
+  flash: boolean;
+}
+
+export interface CoopSnapBoss {
+  kind: 'arms' | 'sum';
+  state: 'enter' | 'fight' | 'flee';
+  open: boolean;
+  flash: boolean;
+  clang: boolean;
+  rage: boolean;
+  hp: number;
+  maxHp: number;
+  x: number;
+  y: number;
+  age: number;
+  openTime: number;
+  arms: CoopSnapBossArm[];
+  mathA: number;
+  mathB: number;
+  mathOp: MathWireOp;
+  pods: CoopSnapBossPod[];
+}
+
+export interface CoopSnapTanker {
+  state: 'in' | 'fly' | 'out' | 'gone';
+  hooked: boolean;
+  hookedSeat: CoopSeatIndex;
+  fuel: number;
+  strain: number;
+  x: number;
+  y: number;
+  drogueX: number;
+  drogueY: number;
+}
+
+export interface CoopSnapField {
+  seed: number;
+  /** `null` while only the pre-field Flight Commander warning (`alert`) is active. */
+  front: number | null;
+  alert: number | null;
+  wave: number;
+  recentBrokenIds: number[];
+}
+
+export type CoopSnapShotKind = 'bolt' | 'rocket' | 'enemy' | 'beam';
+
+export interface CoopSnapShot {
+  kind: CoopSnapShotKind;
+  color: string;
+  heavy: boolean;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  /** Normalized `0..1` beam opacity when `kind === 'beam'`. */
+  beamLife: number;
+}
+
+export type CoopSnapItemKind = 'boost' | 'upgrade' | 'shield' | 'hull' | 'bomb';
+
+export interface CoopSnapItem {
+  kind: CoopSnapItemKind;
+  age: number;
+  x: number;
+  y: number;
+}
+
+export type CoopSnapFxKind =
+  | 'spark'
+  | 'enemy-burst'
+  | 'boss-burst'
+  | 'ship-hit'
+  | 'ring'
+  | 'rock-break';
+
+export interface CoopSnapFx {
+  seq: number;
+  kind: CoopSnapFxKind;
+  color: string;
+  enemyKind: EnemyKind;
+  toughRock: boolean;
+  x: number;
+  y: number;
+}
+
+export interface CoopWorldSnapshot {
+  tick: number;
+  wave: number;
+  banner: number;
+  teamScore: number;
+  freed: number;
+  energy: number;
+  paused: boolean;
+  parked: boolean;
+  gameOver: boolean;
+  ships: CoopSnapShip[];
+  enemies: CoopSnapEnemy[];
+  boss: CoopSnapBoss | null;
+  tanker: CoopSnapTanker | null;
+  field: CoopSnapField | null;
+  shots: CoopSnapShot[];
+  items: CoopSnapItem[];
+  fx: CoopSnapFx[];
+}
+
+function clampNum(v: number, min: number, max: number): number {
+  if (!Number.isFinite(v)) return min;
+  return v < min ? min : v > max ? max : v;
+}
+
+export function encodeCoord(v: number): number {
+  const q = Math.round((clampNum(v, -COORD_OFFSET, 1790) + COORD_OFFSET) * COORD_SCALE);
+  return clampNum(q, 0, COORD_MAX_Q);
+}
+
+export function decodeCoord(q: number): number {
+  return (q & 0x3fff) / COORD_SCALE - COORD_OFFSET;
+}
+
+function encodeAngle(rad: number): number {
+  const twoPi = Math.PI * 2;
+  const norm = (((Number.isFinite(rad) ? rad : 0) % twoPi) + twoPi) % twoPi;
+  return Math.round((norm / twoPi) * 255) & 0xff;
+}
+
+function decodeAngle(byte: number): number {
+  return ((byte & 0xff) / 255) * Math.PI * 2;
+}
+
+export function encodeWireColor(color: string): number {
+  const idx = WIRE_COLOR_TABLE.indexOf(color);
+  return idx >= 0 ? idx : 0;
+}
+
+export function decodeWireColor(idx: number): string {
+  return WIRE_COLOR_TABLE[idx] ?? NEON.cyan;
+}
+
+function encodeEnemyKind(kind: EnemyKind): number {
+  const idx = ENEMY_KIND_TABLE.indexOf(kind);
+  return idx >= 0 ? idx : 0;
+}
+
+function decodeEnemyKind(idx: number): EnemyKind {
+  return ENEMY_KIND_TABLE[idx] ?? 'drifter';
+}
+
+/** Parse `"12 + 7"` from `maths.ts` into numeric `(a, op, b)` so zero free-text strings cross the wire. */
+export function parseBossMathQuestion(question: string): {
+  a: number;
+  b: number;
+  op: MathWireOp;
+} {
+  const m = /^\s*(\d+)\s*([+\-×÷])\s*(\d+)\s*$/.exec(question);
+  if (!m) return { a: 1, b: 1, op: '+' };
+  const a = clampNum(Number(m[1]), 0, 255);
+  const b = clampNum(Number(m[3]), 0, 255);
+  const op = (MATH_OP_TABLE.includes(m[2] as MathWireOp) ? m[2] : '+') as MathWireOp;
+  return { a, b, op };
+}
+
+export function formatBossMathQuestion(a: number, op: MathWireOp, b: number): string {
+  return `${a & 0xff} ${op} ${b & 0xff}`;
+}
+
+/** Pack an 8-byte `0x01` `BIN_FRAME_INPUT` frame. */
+export function encodeGuestInput(input: CoopGuestInput): Uint8Array {
+  const buf = new ArrayBuffer(8);
+  const view = new DataView(buf);
+  let flags = 0;
+  if (input.firing) flags |= INPUT_FLAG_FIRING;
+  if (input.hasPointer) flags |= INPUT_FLAG_POINTER;
+  if (input.left) flags |= INPUT_FLAG_LEFT;
+  if (input.right) flags |= INPUT_FLAG_RIGHT;
+  if (input.up) flags |= INPUT_FLAG_UP;
+  if (input.down) flags |= INPUT_FLAG_DOWN;
+  if (input.tap) flags |= INPUT_FLAG_TAP;
+
+  view.setUint8(0, BIN_FRAME_INPUT);
+  view.setUint8(1, input.seat & 0x03);
+  view.setUint16(2, encodeCoord(input.targetX), true);
+  view.setUint16(4, encodeCoord(input.targetY), true);
+  view.setUint8(6, flags);
+  view.setUint8(7, input.seq & 0xff);
+  return new Uint8Array(buf);
+}
+
+/** Unpack an 8-byte `0x01` `BIN_FRAME_INPUT` frame, returning `null` if malformed. */
+export function decodeGuestInput(bytes: Uint8Array): CoopGuestInput | null {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 8) return null;
+  if (bytes[0] !== BIN_FRAME_INPUT) return null;
+  const seatRaw = bytes[1]!;
+  if (seatRaw > 3) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const targetX = decodeCoord(view.getUint16(2, true));
+  const targetY = decodeCoord(view.getUint16(4, true));
+  const flags = view.getUint8(6);
+  const seq = view.getUint8(7);
+  return {
+    seat: seatRaw as CoopSeatIndex,
+    targetX,
+    targetY,
+    firing: (flags & INPUT_FLAG_FIRING) !== 0,
+    hasPointer: (flags & INPUT_FLAG_POINTER) !== 0,
+    left: (flags & INPUT_FLAG_LEFT) !== 0,
+    right: (flags & INPUT_FLAG_RIGHT) !== 0,
+    up: (flags & INPUT_FLAG_UP) !== 0,
+    down: (flags & INPUT_FLAG_DOWN) !== 0,
+    tap: (flags & INPUT_FLAG_TAP) !== 0,
+    seq,
+  };
+}
+
+const BOSS_STATES = ['enter', 'fight', 'flee'] as const;
+const TANKER_STATES = ['in', 'fly', 'out', 'gone'] as const;
+const SHOT_KINDS: readonly CoopSnapShotKind[] = ['bolt', 'rocket', 'enemy', 'beam'];
+const ITEM_KINDS: readonly CoopSnapItemKind[] = ['boost', 'upgrade', 'shield', 'hull', 'bomb'];
+const FX_KINDS: readonly CoopSnapFxKind[] = [
+  'spark',
+  'enemy-burst',
+  'boss-burst',
+  'ship-hit',
+  'ring',
+  'rock-break',
+];
+
+/** Pack an authoritative `0x02` `BIN_FRAME_SNAP` binary snapshot strictly under `MAX_BINARY_BYTES`. */
+export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
+  const ships = snap.ships.slice(0, SNAP_MAX_SHIPS);
+  const enemies = snap.enemies.slice(0, SNAP_MAX_ENEMIES);
+  const shots = snap.shots.slice(0, SNAP_MAX_SHOTS);
+  const items = snap.items.slice(0, SNAP_MAX_ITEMS);
+  const fx = snap.fx.slice(-SNAP_MAX_FX);
+  const boss = snap.boss;
+  const tanker = snap.tanker;
+  const field = snap.field;
+
+  const bossExtra = boss
+    ? boss.kind === 'arms'
+      ? 1 + Math.min(4, boss.arms.length) * 5
+      : 4 + Math.min(4, boss.pods.length) * 4
+    : 0;
+  const bossBytes = boss ? 12 + bossExtra : 0;
+  const tankerBytes = tanker ? 11 : 0;
+  const brokenIds = field ? field.recentBrokenIds.slice(-SNAP_MAX_BROKEN_ROCKS) : [];
+  const fieldBytes = field ? 9 + brokenIds.length * 2 : 0;
+
+  const totalBytes =
+    18 +
+    ships.length * 12 +
+    enemies.length * 9 +
+    bossBytes +
+    tankerBytes +
+    fieldBytes +
+    shots.length * 7 +
+    items.length * 6 +
+    fx.length * 7;
+
+  if (totalBytes > MAX_BINARY_BYTES) {
+    throw new RangeError(`Co-op snapshot (${totalBytes} B) exceeds MAX_BINARY_BYTES (${MAX_BINARY_BYTES} B)`);
+  }
+
+  const buf = new ArrayBuffer(totalBytes);
+  const view = new DataView(buf);
+  let off = 0;
+
+  let vFlags = 0x01; // protocol v1
+  if (snap.paused) vFlags |= 0x04;
+  if (snap.parked) vFlags |= 0x08;
+  if (snap.gameOver) vFlags |= 0x10;
+  if (boss) vFlags |= 0x20;
+  if (tanker) vFlags |= 0x40;
+  if (field) vFlags |= 0x80;
+
+  view.setUint8(off++, BIN_FRAME_SNAP);
+  view.setUint8(off++, vFlags);
+  view.setUint16(off, snap.tick & 0xffff, true);
+  off += 2;
+  view.setUint8(off++, clampNum(Math.round(snap.wave), 1, 255));
+  view.setUint8(off++, clampNum(Math.round(snap.banner * 10), 0, 255));
+  view.setUint32(off, clampNum(Math.round(snap.teamScore), 0, 0xffffffff) >>> 0, true);
+  off += 4;
+  view.setUint16(off, clampNum(Math.round(snap.freed), 0, 0xffff), true);
+  off += 2;
+  view.setUint8(off++, clampNum(Math.round(snap.energy * 255), 0, 255));
+  view.setUint8(off++, ships.length);
+  view.setUint8(off++, enemies.length);
+  view.setUint8(off++, shots.length);
+  view.setUint8(off++, items.length);
+  view.setUint8(off++, fx.length);
+
+  for (const s of ships) {
+    let status = 0;
+    if (s.connected) status |= 0x01;
+    if (s.alive) status |= 0x02;
+    if (s.invulnerable) status |= 0x04;
+    if (s.shielded) status |= 0x08;
+    if (s.firing) status |= 0x10;
+    if (s.spread) status |= 0x20;
+    if (s.wing) status |= 0x40;
+    if (s.orbitUpgrade) status |= 0x80;
+
+    view.setUint8(off++, s.seat & 0x03);
+    view.setUint8(off++, clampNum(Math.round(s.hull), 0, 255));
+    view.setUint8(off++, clampNum(Math.round(s.maxHull), 1, 255));
+    view.setUint8(off++, status);
+    view.setUint16(off, encodeCoord(s.x), true);
+    off += 2;
+    view.setUint16(off, encodeCoord(s.y), true);
+    off += 2;
+    view.setInt8(off++, clampNum(Math.round(s.lean * 100), -100, 100));
+    view.setUint8(off++, encodeAngle(s.orbit));
+    view.setUint8(off++, s.ackSeq & 0xff);
+    view.setUint8(off++, clampNum(Math.round(s.respawnSec * 10), 0, 255));
+  }
+
+  for (const e of enemies) {
+    const kindIdx = encodeEnemyKind(e.kind) & 0x0f;
+    const colorIdx = encodeWireColor(e.color) & 0x0f;
+    const hpByte = (clampNum(Math.round(e.hp), 0, 127) & 0x7f) | (e.flash ? 0x80 : 0);
+
+    view.setUint16(off, e.id & 0xffff, true);
+    off += 2;
+    view.setUint8(off++, kindIdx | (colorIdx << 4));
+    view.setUint8(off++, hpByte);
+    view.setUint8(off++, encodeAngle(e.rot));
+    view.setUint16(off, encodeCoord(e.x), true);
+    off += 2;
+    view.setUint16(off, encodeCoord(e.y), true);
+    off += 2;
+  }
+
+  if (boss) {
+    const stateIdx = Math.max(0, BOSS_STATES.indexOf(boss.state));
+    let bFlags = boss.kind === 'sum' ? 0x01 : 0x00;
+    bFlags |= (stateIdx & 0x03) << 1;
+    if (boss.open) bFlags |= 0x08;
+    if (boss.flash) bFlags |= 0x10;
+    if (boss.clang) bFlags |= 0x20;
+    if (boss.rage) bFlags |= 0x40;
+
+    view.setUint8(off++, bFlags);
+    view.setUint16(off, clampNum(Math.round(boss.hp), 0, 0xffff), true);
+    off += 2;
+    view.setUint16(off, clampNum(Math.round(boss.maxHp), 1, 0xffff), true);
+    off += 2;
+    view.setUint16(off, encodeCoord(boss.x), true);
+    off += 2;
+    view.setUint16(off, encodeCoord(boss.y), true);
+    off += 2;
+    view.setUint16(off, clampNum(Math.round(boss.age * 60), 0, 0xffff), true);
+    off += 2;
+    view.setUint8(off++, clampNum(Math.round(boss.openTime * 10), 0, 255));
+
+    if (boss.kind === 'arms') {
+      const arms = boss.arms.slice(0, 4);
+      view.setUint8(off++, arms.length);
+      for (const arm of arms) {
+        view.setInt8(off++, clampNum(Math.round(arm.dx / 2), -127, 127));
+        view.setInt8(off++, clampNum(Math.round(arm.dy / 2), -127, 127));
+        view.setUint8(off++, clampNum(Math.round(arm.hp), 0, 255));
+        view.setUint8(off++, clampNum(Math.round(arm.maxHp), 1, 255));
+        view.setUint8(off++, arm.flash ? 1 : 0);
+      }
+    } else {
+      const opIdx = Math.max(0, MATH_OP_TABLE.indexOf(boss.mathOp));
+      const pods = boss.pods.slice(0, 4);
+      view.setUint8(off++, clampNum(Math.round(boss.mathA), 0, 255));
+      view.setUint8(off++, clampNum(Math.round(boss.mathB), 0, 255));
+      view.setUint8(off++, opIdx & 0x03);
+      view.setUint8(off++, pods.length);
+      for (const pod of pods) {
+        view.setUint16(off, clampNum(Math.round(pod.value), 0, 0xffff), true);
+        off += 2;
+        view.setUint8(off++, clampNum(Math.round(pod.hits), 0, 255));
+        view.setUint8(off++, (pod.right ? 0x01 : 0) | (pod.flash ? 0x02 : 0));
+      }
+    }
+  }
+
+  if (tanker) {
+    const tStateIdx = Math.max(0, TANKER_STATES.indexOf(tanker.state));
+    const tFlags =
+      (tStateIdx & 0x03) | (tanker.hooked ? 0x04 : 0) | ((tanker.hookedSeat & 0x03) << 3);
+    view.setUint8(off++, tFlags);
+    view.setUint8(off++, clampNum(Math.round(tanker.fuel * 255), 0, 255));
+    view.setUint8(off++, clampNum(Math.round(tanker.strain * 255), 0, 255));
+    view.setUint16(off, encodeCoord(tanker.x), true);
+    off += 2;
+    view.setUint16(off, encodeCoord(tanker.y), true);
+    off += 2;
+    view.setUint16(off, encodeCoord(tanker.drogueX), true);
+    off += 2;
+    view.setUint16(off, encodeCoord(tanker.drogueY), true);
+    off += 2;
+  }
+
+  if (field) {
+    view.setUint32(off, field.seed >>> 0, true);
+    off += 4;
+    view.setInt16(
+      off,
+      field.front === null ? -32768 : clampNum(Math.round(field.front), -32767, 32767),
+      true,
+    );
+    off += 2;
+    view.setUint8(
+      off++,
+      field.alert === null ? 255 : clampNum(Math.round(field.alert * 10), 0, 254),
+    );
+    view.setUint8(off++, clampNum(Math.round(field.wave), 1, 255));
+    view.setUint8(off++, brokenIds.length);
+    for (const id of brokenIds) {
+      view.setUint16(off, clampNum(Math.round(id), 0, 0xffff), true);
+      off += 2;
+    }
+  }
+
+  for (const sh of shots) {
+    const kindIdx = Math.max(0, SHOT_KINDS.indexOf(sh.kind)) & 0x03;
+    const colorIdx = encodeWireColor(sh.color) & 0x0f;
+    const header = kindIdx | (colorIdx << 2) | (sh.heavy ? 0x80 : 0);
+    view.setUint8(off++, header);
+    view.setUint16(off, encodeCoord(sh.x), true);
+    off += 2;
+    view.setUint16(off, encodeCoord(sh.y), true);
+    off += 2;
+    if (sh.kind === 'beam') {
+      view.setInt8(off++, clampNum(Math.round(sh.beamLife * 100), 0, 100));
+      view.setInt8(off++, 0);
+    } else {
+      view.setInt8(off++, clampNum(Math.round(sh.vx / 8), -127, 127));
+      view.setInt8(off++, clampNum(Math.round(sh.vy / 8), -127, 127));
+    }
+  }
+
+  for (const it of items) {
+    const kindIdx = Math.max(0, ITEM_KINDS.indexOf(it.kind));
+    view.setUint8(off++, kindIdx);
+    view.setUint8(off++, clampNum(Math.round((it.age % 12.5) * 20), 0, 255));
+    view.setUint16(off, encodeCoord(it.x), true);
+    off += 2;
+    view.setUint16(off, encodeCoord(it.y), true);
+    off += 2;
+  }
+
+  for (const event of fx) {
+    const fxIdx = Math.max(0, FX_KINDS.indexOf(event.kind));
+    let param = 0;
+    if (event.kind === 'enemy-burst') {
+      param = (encodeEnemyKind(event.enemyKind) & 0x0f) | ((encodeWireColor(event.color) & 0x0f) << 4);
+    } else if (event.kind === 'rock-break') {
+      param = event.toughRock ? 1 : 0;
+    } else {
+      param = encodeWireColor(event.color) & 0x0f;
+    }
+    view.setUint8(off++, event.seq & 0xff);
+    view.setUint8(off++, fxIdx);
+    view.setUint8(off++, param);
+    view.setUint16(off, encodeCoord(event.x), true);
+    off += 2;
+    view.setUint16(off, encodeCoord(event.y), true);
+    off += 2;
+  }
+
+  return new Uint8Array(buf);
+}
+
+/** Unpack a `0x02` `BIN_FRAME_SNAP` binary snapshot, returning `null` on any truncated or invalid frame. */
+export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 18 || bytes.byteLength > MAX_BINARY_BYTES) {
+    return null;
+  }
+  if (bytes[0] !== BIN_FRAME_SNAP) return null;
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const len = bytes.byteLength;
+  let off = 1;
+
+  const vFlags = view.getUint8(off++);
+  if ((vFlags & 0x03) !== 1) return null;
+
+  const paused = (vFlags & 0x04) !== 0;
+  const parked = (vFlags & 0x08) !== 0;
+  const gameOver = (vFlags & 0x10) !== 0;
+  const hasBoss = (vFlags & 0x20) !== 0;
+  const hasTanker = (vFlags & 0x40) !== 0;
+  const hasField = (vFlags & 0x80) !== 0;
+
+  const tick = view.getUint16(off, true);
+  off += 2;
+  const wave = view.getUint8(off++);
+  const banner = view.getUint8(off++) / 10;
+  const teamScore = view.getUint32(off, true);
+  off += 4;
+  const freed = view.getUint16(off, true);
+  off += 2;
+  const energy = view.getUint8(off++) / 255;
+  const shipCount = view.getUint8(off++);
+  const enemyCount = view.getUint8(off++);
+  const shotCount = view.getUint8(off++);
+  const itemCount = view.getUint8(off++);
+  const fxCount = view.getUint8(off++);
+
+  if (
+    shipCount > SNAP_MAX_SHIPS ||
+    enemyCount > SNAP_MAX_ENEMIES ||
+    shotCount > SNAP_MAX_SHOTS ||
+    itemCount > SNAP_MAX_ITEMS ||
+    fxCount > SNAP_MAX_FX
+  ) {
+    return null;
+  }
+
+  const ships: CoopSnapShip[] = [];
+  if (off + shipCount * 12 > len) return null;
+  for (let i = 0; i < shipCount; i++) {
+    const seatRaw = view.getUint8(off++);
+    if (seatRaw > 3) return null;
+    const hull = view.getUint8(off++);
+    const maxHull = Math.max(1, view.getUint8(off++));
+    const status = view.getUint8(off++);
+    const x = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const y = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const lean = clampNum(view.getInt8(off++) / 100, -1, 1);
+    const orbit = decodeAngle(view.getUint8(off++));
+    const ackSeq = view.getUint8(off++);
+    const respawnSec = view.getUint8(off++) / 10;
+    ships.push({
+      seat: seatRaw as CoopSeatIndex,
+      connected: (status & 0x01) !== 0,
+      alive: (status & 0x02) !== 0,
+      hull,
+      maxHull,
+      invulnerable: (status & 0x04) !== 0,
+      shielded: (status & 0x08) !== 0,
+      firing: (status & 0x10) !== 0,
+      spread: (status & 0x20) !== 0,
+      wing: (status & 0x40) !== 0,
+      orbitUpgrade: (status & 0x80) !== 0,
+      x,
+      y,
+      lean,
+      orbit,
+      ackSeq,
+      respawnSec,
+    });
+  }
+
+  const enemies: CoopSnapEnemy[] = [];
+  if (off + enemyCount * 9 > len) return null;
+  for (let i = 0; i < enemyCount; i++) {
+    const id = view.getUint16(off, true);
+    off += 2;
+    const kc = view.getUint8(off++);
+    const hpByte = view.getUint8(off++);
+    const rot = decodeAngle(view.getUint8(off++));
+    const x = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const y = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    enemies.push({
+      id,
+      kind: decodeEnemyKind(kc & 0x0f),
+      color: decodeWireColor((kc >> 4) & 0x0f),
+      hp: hpByte & 0x7f,
+      flash: (hpByte & 0x80) !== 0,
+      rot,
+      x,
+      y,
+    });
+  }
+
+  let boss: CoopSnapBoss | null = null;
+  if (hasBoss) {
+    if (off + 12 > len) return null;
+    const bFlags = view.getUint8(off++);
+    const kind: 'arms' | 'sum' = (bFlags & 0x01) !== 0 ? 'sum' : 'arms';
+    const state = BOSS_STATES[(bFlags >> 1) & 0x03] ?? 'fight';
+    const open = (bFlags & 0x08) !== 0;
+    const flash = (bFlags & 0x10) !== 0;
+    const clang = (bFlags & 0x20) !== 0;
+    const rage = (bFlags & 0x40) !== 0;
+    const hp = view.getUint16(off, true);
+    off += 2;
+    const maxHp = Math.max(1, view.getUint16(off, true));
+    off += 2;
+    const x = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const y = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const age = view.getUint16(off, true) / 60;
+    off += 2;
+    const openTime = view.getUint8(off++) / 10;
+
+    const arms: CoopSnapBossArm[] = [];
+    const pods: CoopSnapBossPod[] = [];
+    let mathA = 0;
+    let mathB = 0;
+    let mathOp: MathWireOp = '+';
+
+    if (kind === 'arms') {
+      if (off + 1 > len) return null;
+      const armCount = view.getUint8(off++);
+      if (armCount > 4 || off + armCount * 5 > len) return null;
+      for (let i = 0; i < armCount; i++) {
+        const dx = view.getInt8(off++) * 2;
+        const dy = view.getInt8(off++) * 2;
+        const armHp = view.getUint8(off++);
+        const armMaxHp = Math.max(1, view.getUint8(off++));
+        const armFlash = view.getUint8(off++) !== 0;
+        arms.push({ dx, dy, hp: armHp, maxHp: armMaxHp, flash: armFlash });
+      }
+    } else {
+      if (off + 4 > len) return null;
+      mathA = view.getUint8(off++);
+      mathB = view.getUint8(off++);
+      mathOp = MATH_OP_TABLE[view.getUint8(off++) & 0x03] ?? '+';
+      const podCount = view.getUint8(off++);
+      if (podCount > 4 || off + podCount * 4 > len) return null;
+      for (let i = 0; i < podCount; i++) {
+        const value = view.getUint16(off, true);
+        off += 2;
+        const hits = view.getUint8(off++);
+        const pFlags = view.getUint8(off++);
+        pods.push({
+          value,
+          hits,
+          right: (pFlags & 0x01) !== 0,
+          flash: (pFlags & 0x02) !== 0,
+        });
+      }
+    }
+
+    boss = {
+      kind,
+      state,
+      open,
+      flash,
+      clang,
+      rage,
+      hp,
+      maxHp,
+      x,
+      y,
+      age,
+      openTime,
+      arms,
+      mathA,
+      mathB,
+      mathOp,
+      pods,
+    };
+  }
+
+  let tanker: CoopSnapTanker | null = null;
+  if (hasTanker) {
+    if (off + 11 > len) return null;
+    const tFlags = view.getUint8(off++);
+    const state = TANKER_STATES[tFlags & 0x03] ?? 'fly';
+    const hooked = (tFlags & 0x04) !== 0;
+    const hookedSeat = ((tFlags >> 3) & 0x03) as CoopSeatIndex;
+    const fuel = view.getUint8(off++) / 255;
+    const strain = view.getUint8(off++) / 255;
+    const x = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const y = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const drogueX = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const drogueY = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    tanker = { state, hooked, hookedSeat, fuel, strain, x, y, drogueX, drogueY };
+  }
+
+  let field: CoopSnapField | null = null;
+  if (hasField) {
+    if (off + 9 > len) return null;
+    const seed = view.getUint32(off, true);
+    off += 4;
+    const frontRaw = view.getInt16(off, true);
+    off += 2;
+    const alertRaw = view.getUint8(off++);
+    const fWave = view.getUint8(off++);
+    const brokenCount = view.getUint8(off++);
+    if (brokenCount > SNAP_MAX_BROKEN_ROCKS || off + brokenCount * 2 > len) return null;
+    const recentBrokenIds: number[] = [];
+    for (let i = 0; i < brokenCount; i++) {
+      recentBrokenIds.push(view.getUint16(off, true));
+      off += 2;
+    }
+    field = {
+      seed,
+      front: frontRaw === -32768 ? null : frontRaw,
+      alert: alertRaw === 255 ? null : alertRaw / 10,
+      wave: fWave,
+      recentBrokenIds,
+    };
+  }
+
+  const shots: CoopSnapShot[] = [];
+  if (off + shotCount * 7 > len) return null;
+  for (let i = 0; i < shotCount; i++) {
+    const header = view.getUint8(off++);
+    const kind = SHOT_KINDS[header & 0x03] ?? 'bolt';
+    const color = decodeWireColor((header >> 2) & 0x0f);
+    const heavy = (header & 0x80) !== 0;
+    const x = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const y = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const b1 = view.getInt8(off++);
+    const b2 = view.getInt8(off++);
+    if (kind === 'beam') {
+      shots.push({
+        kind,
+        color,
+        heavy,
+        x,
+        y,
+        vx: 0,
+        vy: 0,
+        beamLife: clampNum(b1 / 100, 0, 1),
+      });
+    } else {
+      shots.push({
+        kind,
+        color,
+        heavy,
+        x,
+        y,
+        vx: b1 * 8,
+        vy: b2 * 8,
+        beamLife: 0,
+      });
+    }
+  }
+
+  const items: CoopSnapItem[] = [];
+  if (off + itemCount * 6 > len) return null;
+  for (let i = 0; i < itemCount; i++) {
+    const kindIdx = view.getUint8(off++);
+    const kind = ITEM_KINDS[kindIdx] ?? 'boost';
+    const age = view.getUint8(off++) / 20;
+    const x = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const y = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    items.push({ kind, age, x, y });
+  }
+
+  const fx: CoopSnapFx[] = [];
+  if (off + fxCount * 7 > len) return null;
+  for (let i = 0; i < fxCount; i++) {
+    const seq = view.getUint8(off++);
+    const fxIdx = view.getUint8(off++);
+    const param = view.getUint8(off++);
+    const x = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const y = decodeCoord(view.getUint16(off, true));
+    off += 2;
+    const kind = FX_KINDS[fxIdx] ?? 'spark';
+    if (kind === 'enemy-burst') {
+      fx.push({
+        seq,
+        kind,
+        enemyKind: decodeEnemyKind(param & 0x0f),
+        color: decodeWireColor((param >> 4) & 0x0f),
+        toughRock: false,
+        x,
+        y,
+      });
+    } else if (kind === 'rock-break') {
+      fx.push({
+        seq,
+        kind,
+        enemyKind: 'drifter',
+        color: NEON.cyan,
+        toughRock: param !== 0,
+        x,
+        y,
+      });
+    } else {
+      fx.push({
+        seq,
+        kind,
+        enemyKind: 'drifter',
+        color: decodeWireColor(param & 0x0f),
+        toughRock: false,
+        x,
+        y,
+      });
+    }
+  }
+
+  if (off !== len) return null;
+
+  return {
+    tick,
+    wave,
+    banner,
+    teamScore,
+    freed,
+    energy,
+    paused,
+    parked,
+    gameOver,
+    ships,
+    enemies,
+    boss,
+    tanker,
+    field,
+    shots,
+    items,
+    fx,
+  };
+}
+
+function lerpScalar(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function lerpAngle(a: number, b: number, t: number): number {
+  const twoPi = Math.PI * 2;
+  let diff = ((b - a) % twoPi + twoPi) % twoPi;
+  if (diff > Math.PI) diff -= twoPi;
+  return a + diff * t;
+}
+
+function isNewerTick(prevTick: number, nextTick: number): boolean {
+  const delta = (nextTick - prevTick + 65536) & 0xffff;
+  return delta > 0 && delta < 32768;
+}
+
+const HOST_SNAP_PERIOD_MS = 1000 / 18;
+
+interface BufferedSnapshot {
+  unwrappedTick: number;
+  hostMs: number;
+  receivedAt: number;
+  snap: CoopWorldSnapshot;
+}
+
+/**
+ * Host-tick-timeline snapshot interpolator (`~75ms` render delay) for Guest rendering at 60fps.
+ *
+ * - Maps `u16` Host `tick` onto a jitter-free 18 Hz simulation timeline via a smoothed clock offset,
+ *   so Wi-Fi arrival jitter (`+-15ms`) never warps entity velocity or causes micro-rubberbanding.
+ * - Smoothly `lerp`s remote squad ships (by `seat`), enemies (by `id`), boss, tanker, and asteroid `front`.
+ * - Advances projectiles along `(vx, vy)` between 18 Hz snapshots so bolts never stutter.
+ * - Deduplicates `fx` events by wrapping `u8 seq` so redundant FX ring entries across consecutive
+ *   snapshots play once even across dropped/delayed frames.
+ */
+export class SnapshotInterpolator {
+  private readonly interpDelayMs: number;
+  private readonly maxExtrapolateMs: number;
+  private readonly buffer: BufferedSnapshot[] = [];
+  private readonly pendingFx: CoopSnapFx[] = [];
+  private lastFxSeq: number | null = null;
+  private lastRawTick: number | null = null;
+  private unwrappedTick = 0;
+  private clockOffsetMs: number | null = null;
+  private lastRenderHostMs: number | null = null;
+
+  constructor(opts?: { interpDelayMs?: number; maxExtrapolateMs?: number }) {
+    this.interpDelayMs = opts?.interpDelayMs ?? 75;
+    this.maxExtrapolateMs = opts?.maxExtrapolateMs ?? 90;
+  }
+
+  reset(): void {
+    this.buffer.length = 0;
+    this.pendingFx.length = 0;
+    this.lastFxSeq = null;
+    this.lastRawTick = null;
+    this.unwrappedTick = 0;
+    this.clockOffsetMs = null;
+    this.lastRenderHostMs = null;
+  }
+
+  latest(): CoopWorldSnapshot | null {
+    return this.buffer.length > 0 ? this.buffer[this.buffer.length - 1]!.snap : null;
+  }
+
+  push(snap: CoopWorldSnapshot, nowMs: number): void {
+    if (this.lastRawTick !== null) {
+      if (snap.tick === this.lastRawTick) return;
+      if (!isNewerTick(this.lastRawTick, snap.tick)) return;
+      const tickDelta = (snap.tick - this.lastRawTick + 65536) & 0xffff;
+      this.unwrappedTick += tickDelta;
+    } else {
+      this.unwrappedTick = snap.tick;
+    }
+    this.lastRawTick = snap.tick;
+
+    const hostMs = this.unwrappedTick * HOST_SNAP_PERIOD_MS;
+    const measuredOffset = nowMs - hostMs;
+    if (this.clockOffsetMs === null || Math.abs(measuredOffset - this.clockOffsetMs) > 500) {
+      this.clockOffsetMs = measuredOffset;
+    } else {
+      this.clockOffsetMs += (measuredOffset - this.clockOffsetMs) * 0.12;
+    }
+
+    this.buffer.push({
+      unwrappedTick: this.unwrappedTick,
+      hostMs,
+      receivedAt: nowMs,
+      snap,
+    });
+    while (this.buffer.length > 8) {
+      this.buffer.shift();
+    }
+
+    for (const item of snap.fx) {
+      if (this.lastFxSeq === null) {
+        this.lastFxSeq = item.seq;
+        this.pendingFx.push(item);
+      } else {
+        const delta = (item.seq - this.lastFxSeq + 256) & 0xff;
+        if (delta > 0 && delta < 128) {
+          this.lastFxSeq = item.seq;
+          this.pendingFx.push(item);
+        }
+      }
+    }
+    if (this.pendingFx.length > 48) {
+      this.pendingFx.splice(0, this.pendingFx.length - 48);
+    }
+  }
+
+  consumeNewFx(): CoopSnapFx[] {
+    if (this.pendingFx.length === 0) return [];
+    return this.pendingFx.splice(0, this.pendingFx.length);
+  }
+
+  sample(nowMs: number): CoopWorldSnapshot | null {
+    const count = this.buffer.length;
+    if (count === 0 || this.clockOffsetMs === null) return null;
+    if (count === 1) {
+      const only = this.buffer[0]!;
+      const dtSec = clampNum((nowMs - only.receivedAt) / 1000, 0, 0.08);
+      return this.advanceShots(only.snap, dtSec);
+    }
+
+    let renderHostMs = nowMs - this.clockOffsetMs - this.interpDelayMs;
+    if (this.lastRenderHostMs !== null && renderHostMs < this.lastRenderHostMs) {
+      renderHostMs = this.lastRenderHostMs;
+    }
+    this.lastRenderHostMs = renderHostMs;
+
+    const first = this.buffer[0]!;
+    const last = this.buffer[count - 1]!;
+
+    if (renderHostMs <= first.hostMs) {
+      return first.snap;
+    }
+
+    if (renderHostMs <= last.hostMs) {
+      let prev = first;
+      let next = last;
+      for (let i = 0; i < count - 1; i++) {
+        const a = this.buffer[i]!;
+        const b = this.buffer[i + 1]!;
+        if (renderHostMs >= a.hostMs && renderHostMs <= b.hostMs) {
+          prev = a;
+          next = b;
+          break;
+        }
+      }
+      const span = Math.max(1, next.hostMs - prev.hostMs);
+      const alpha = clampNum((renderHostMs - prev.hostMs) / span, 0, 1);
+      return this.interpolatePair(prev.snap, next.snap, alpha, (renderHostMs - next.hostMs) / 1000);
+    }
+
+    // Brief network jitter or dropped packet past `last.hostMs`: extrapolate along exact Host dt
+    const prev = this.buffer[count - 2]!;
+    const span = Math.max(16, last.hostMs - prev.hostMs);
+    const overMs = clampNum(renderHostMs - last.hostMs, 0, this.maxExtrapolateMs);
+    const extraAlpha = 1 + overMs / span;
+    return this.interpolatePair(prev.snap, last.snap, extraAlpha, overMs / 1000);
+  }
+
+  private advanceShots(snap: CoopWorldSnapshot, dtSec: number): CoopWorldSnapshot {
+    if (dtSec === 0 || snap.paused) return snap;
+    return {
+      ...snap,
+      shots: snap.shots.map((sh) =>
+        sh.kind === 'beam'
+          ? sh
+          : {
+              ...sh,
+              x: sh.x + sh.vx * dtSec,
+              y: sh.y + sh.vy * dtSec,
+            },
+      ),
+    };
+  }
+
+  private interpolatePair(
+    a: CoopWorldSnapshot,
+    b: CoopWorldSnapshot,
+    alpha: number,
+    shotDtSec: number,
+  ): CoopWorldSnapshot {
+    const prevShips = new Map<CoopSeatIndex, CoopSnapShip>();
+    for (const s of a.ships) prevShips.set(s.seat, s);
+
+    const ships: CoopSnapShip[] = b.ships.map((nextShip) => {
+      const prevShip = prevShips.get(nextShip.seat);
+      if (!prevShip || !prevShip.alive || !nextShip.alive) return nextShip;
+      if (Math.hypot(nextShip.x - prevShip.x, nextShip.y - prevShip.y) > 240) return nextShip;
+      return {
+        ...nextShip,
+        x: clampNum(lerpScalar(prevShip.x, nextShip.x, alpha), 12, COOP_WORLD_W - 12),
+        y: clampNum(lerpScalar(prevShip.y, nextShip.y, alpha), 12, COOP_WORLD_H - 12),
+        lean: clampNum(lerpScalar(prevShip.lean, nextShip.lean, Math.min(1, alpha)), -1, 1),
+        orbit: lerpAngle(prevShip.orbit, nextShip.orbit, alpha),
+      };
+    });
+
+    const prevEnemies = new Map<number, CoopSnapEnemy>();
+    for (const e of a.enemies) prevEnemies.set(e.id, e);
+
+    const enemies: CoopSnapEnemy[] = b.enemies.map((nextEnemy) => {
+      const prevEnemy = prevEnemies.get(nextEnemy.id);
+      if (!prevEnemy) return nextEnemy;
+      if (Math.hypot(nextEnemy.x - prevEnemy.x, nextEnemy.y - prevEnemy.y) > 240) return nextEnemy;
+      return {
+        ...nextEnemy,
+        x: lerpScalar(prevEnemy.x, nextEnemy.x, alpha),
+        y: lerpScalar(prevEnemy.y, nextEnemy.y, alpha),
+        rot: lerpAngle(prevEnemy.rot, nextEnemy.rot, Math.min(1, alpha)),
+      };
+    });
+
+    let boss: CoopSnapBoss | null = b.boss;
+    if (a.boss && b.boss && a.boss.kind === b.boss.kind) {
+      boss = {
+        ...b.boss,
+        x: lerpScalar(a.boss.x, b.boss.x, alpha),
+        y: lerpScalar(a.boss.y, b.boss.y, alpha),
+        age: lerpScalar(a.boss.age, b.boss.age, alpha),
+      };
+    }
+
+    let tanker: CoopSnapTanker | null = b.tanker;
+    if (a.tanker && b.tanker) {
+      tanker = {
+        ...b.tanker,
+        x: lerpScalar(a.tanker.x, b.tanker.x, alpha),
+        y: lerpScalar(a.tanker.y, b.tanker.y, alpha),
+        drogueX: lerpScalar(a.tanker.drogueX, b.tanker.drogueX, alpha),
+        drogueY: lerpScalar(a.tanker.drogueY, b.tanker.drogueY, alpha),
+        fuel: clampNum(lerpScalar(a.tanker.fuel, b.tanker.fuel, Math.min(1, alpha)), 0, 1),
+        strain: clampNum(lerpScalar(a.tanker.strain, b.tanker.strain, Math.min(1, alpha)), 0, 1),
+      };
+    }
+
+    let field: CoopSnapField | null = b.field;
+    if (
+      a.field &&
+      b.field &&
+      a.field.seed === b.field.seed &&
+      a.field.front !== null &&
+      b.field.front !== null
+    ) {
+      field = {
+        ...b.field,
+        front: lerpScalar(a.field.front, b.field.front, alpha),
+      };
+    }
+
+    const dtShots = b.paused ? 0 : clampNum(shotDtSec, -0.06, 0.08);
+    const shots = b.shots.map((sh) =>
+      sh.kind === 'beam'
+        ? sh
+        : {
+            ...sh,
+            x: sh.x + sh.vx * dtShots,
+            y: sh.y + sh.vy * dtShots,
+          },
+    );
+
+    return {
+      ...b,
+      ships,
+      enemies,
+      boss,
+      tanker,
+      field,
+      shots,
+    };
+  }
+}

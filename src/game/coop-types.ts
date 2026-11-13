@@ -59,9 +59,10 @@ export const VALID_COOP_CALLSIGN_RE =
 export const COOP_ARENA_WIDTH = 768;
 export const COOP_ARENA_HEIGHT = 1024;
 
-/** Binary WebSocket frame discriminators (`byte[0]`). */
+/** Binary WebSocket frame discriminators (`byte[0]`) and relay binary frame ceiling (`relay/room.mjs`). */
 export const BIN_FRAME_INPUT = 0x01;
 export const BIN_FRAME_SNAP = 0x02;
+export const MAX_BINARY_BYTES = 1280;
 
 /** Valid pilot seat indices (`0..3`), or `-1` for a Big-Screen TV spectator host. */
 export type CoopSeatIndex = 0 | 1 | 2 | 3;
@@ -302,16 +303,24 @@ export interface CoopCreateRoomResponse {
 
 /** Input bitflags packed into `byte[6]` of `0x01` `BIN_FRAME_INPUT` (`8 bytes` total). */
 export const INPUT_FLAG_FIRE = 1 << 0;
-export const INPUT_FLAG_BOMB = 1 << 1;
-export const INPUT_FLAG_SHIELDED = 1 << 2;
+export const INPUT_FLAG_POINTER = 1 << 1;
+export const INPUT_FLAG_LEFT = 1 << 2;
+export const INPUT_FLAG_RIGHT = 1 << 3;
+export const INPUT_FLAG_UP = 1 << 4;
+export const INPUT_FLAG_DOWN = 1 << 5;
+export const INPUT_FLAG_TAP = 1 << 6;
 
 export interface CoopGuestInput {
   seat: CoopSeatIndex;
   targetX: number;
   targetY: number;
   firing: boolean;
-  bomb: boolean;
-  shielded: boolean;
+  hasPointer: boolean;
+  left: boolean;
+  right: boolean;
+  up: boolean;
+  down: boolean;
+  tap: boolean;
   seq: number;
 }
 
