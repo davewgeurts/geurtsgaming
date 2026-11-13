@@ -25,6 +25,7 @@ import {
   INPUT_FLAG_LEFT,
   INPUT_FLAG_POINTER,
   INPUT_FLAG_RIGHT,
+  INPUT_FLAG_PICKING,
   INPUT_FLAG_TAP,
   INPUT_FLAG_UP,
   MAX_BINARY_BYTES,
@@ -385,6 +386,7 @@ export function encodeGuestInput(input: CoopGuestInput): Uint8Array {
   if (input.up) flags |= INPUT_FLAG_UP;
   if (input.down) flags |= INPUT_FLAG_DOWN;
   if (input.tap) flags |= INPUT_FLAG_TAP;
+  if (input.picking) flags |= INPUT_FLAG_PICKING;
 
   view.setUint8(0, BIN_FRAME_INPUT);
   view.setUint8(1, input.seat & 0x03);
@@ -417,6 +419,7 @@ export function decodeGuestInput(bytes: Uint8Array): CoopGuestInput | null {
     up: (flags & INPUT_FLAG_UP) !== 0,
     down: (flags & INPUT_FLAG_DOWN) !== 0,
     tap: (flags & INPUT_FLAG_TAP) !== 0,
+    picking: (flags & INPUT_FLAG_PICKING) !== 0,
     seq,
   };
 }

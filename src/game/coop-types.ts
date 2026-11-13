@@ -122,6 +122,8 @@ export type CoopEventKind =
   | 'challenge'
   | 'revive'
   | 'upgrade-offer'
+  /** Host -> one pilot: a question or offer is over (`values: [closeCode, fittedUpgradeIndex?]`, see `coop-quiz.ts`). */
+  | 'challenge-closed'
   | 'wave-clear'
   | 'mission-ended';
 
@@ -313,6 +315,8 @@ export const INPUT_FLAG_RIGHT = 1 << 3;
 export const INPUT_FLAG_UP = 1 << 4;
 export const INPUT_FLAG_DOWN = 1 << 5;
 export const INPUT_FLAG_TAP = 1 << 6;
+/** The pilot's grade picker is up: the host holds that pilot's question clock until a grade is picked. */
+export const INPUT_FLAG_PICKING = 1 << 7;
 
 export interface CoopGuestInput {
   seat: CoopSeatIndex;
@@ -326,6 +330,8 @@ export interface CoopGuestInput {
   down: boolean;
   tap: boolean;
   seq: number;
+  /** Grade picker on screen (never which grade). */
+  picking?: boolean;
 }
 
 export interface CoopMissionSummary {

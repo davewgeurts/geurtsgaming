@@ -172,6 +172,9 @@ export type CoopDeckCardView =
   | {
       kind: 'grade';
       interactive: boolean;
+      /** Seconds until the youngest band is picked for the pilot (absent: no timer shown). */
+      timeLeft?: number;
+      timeLimit?: number;
     }
   | {
       kind: 'choice';
@@ -637,7 +640,10 @@ export class CoopThumbDeck {
       ink(ctx, NEON.cyan, 0.96, 1.5, () => {
         traceText(ctx, title, cx, padRect.y + 8, titleSz, 'center');
       });
-      const sub = 'SETS YOUR QUESTION LEVEL - NEVER SAVED';
+      const sub =
+        card.timeLeft !== undefined
+          ? `SETS YOUR QUESTION LEVEL - NEVER SAVED - ${Math.max(0, Math.ceil(card.timeLeft))}`
+          : 'SETS YOUR QUESTION LEVEL - NEVER SAVED';
       const subSz = fitTo(sub, 6.5, padRect.w - 20);
       ink(ctx, SAND, 0.72, 1.1, () => {
         traceText(ctx, sub, cx, padRect.y + 22, subSz, 'center');

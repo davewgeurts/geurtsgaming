@@ -89,7 +89,7 @@ g.cancelAnimationFrame = () => {};
 
 const { Game } = await import('../src/game/game');
 const { CoopClient } = await import('../src/game/coop-client');
-const { CoopFlightDirector, formationSpawnForSeat } = await import('../src/game/coop-flight');
+const { CoopFlightDirector, formationSpawnForSeat, COOP_QUIZ_TIMEOUT_SEC } = await import('../src/game/coop-flight');
 const { setCoopTabGrade, getCoopTabGrade } = await import('../src/game/coop-quiz');
 const { deckCardBoxes, hitTestDeckCard } = await import('../src/game/coop-thumbdeck');
 const { decodeWorldSnapshot, encodeWorldSnapshot, COOP_WORLD_W, COOP_WORLD_H } = await import('../src/game/coop-protocol');
@@ -820,15 +820,15 @@ test('Phase 3 (2 & 3): Mid-wave challenges keep 1.0x speed, pack Amber Quiz Shie
   assert.equal(p0.jamSec, 0);
   assert.equal(p0.hull, 3);
 
-  // Now clear shelter and trigger a BOMB (`defuse`) on P2, then let 26s timeout expire -> ONLY P2 goes down; P1 keeps flying!
+  // Now clear shelter and trigger a BOMB (`defuse`) on P2, then let the host's question limit expire -> ONLY P2 goes down; P1 keeps flying!
   p1.invulnerable = 0;
   p1.jamSec = 0;
   sq.hostWorld.mines.push({ x: p1.x, y: p1.y, anchorX: p1.x, phase: 0, age: 0, dead: false, thrown: false });
   sq.hostDir.collideHostSquad(sq.hostWorld, 1);
   assert.equal(p1.answering, true);
 
-  // Advance 26.5s on Host (> 26s challenge timeout)
-  for (let i = 0; i < 54; i++) {
+  // Advance just past the host's question limit (and well short of the 6 s reboot that would follow)
+  for (let i = 0; i < Math.ceil((COOP_QUIZ_TIMEOUT_SEC + 0.5) / 0.5); i++) {
     sq.hostDir.step(0.5, 0.5, sq.hostWorld, IDLE_CTRL);
   }
   assert.equal(p1.alive, false);
@@ -1302,4 +1302,308 @@ test('Phase 3 (9 & 10): Reconnect resync restores open challenges/mission summar
   sq.cleanup();
   setCoopTabGrade(null);
   assert.equal(getCoopTabGrade(), null);
+});
+
+// -----------------------------------------------------------------------------------------------------------------
+// Round 15 fixes (Claude): question timing between host and guests, the host's "question closed" message, answers
+// that only say right or wrong (grade privacy), host reloads and lost answers. Each test fails on 473f55e.
+// -----------------------------------------------------------------------------------------------------------------
+
+const quizR15 = await import('../src/game/coop-quiz');
+const questionsR15 = await import('../src/game/questions');
+const { UPGRADES } = await import('../src/game/upgrades');
+const { COOP_OFFER_TIMEOUT_SEC, coopBreakWindowSec } = await import('../src/game/coop-flight');
+
+type LiveSquad = Awaited<ReturnType<typeof createLiveSquad>>;
+type QuizPeek = {
+  stage: string;
+  id?: number;
+  challenge?: { kind: string; correct: number; limit: number; timeLeft: number };
+  headline?: string;
+} | null;
+const quizOf = (d: InstanceType<typeof CoopFlightDirector>): QuizPeek =>
+  (d.quiz as unknown as { active: QuizPeek }).active;
+
+async function answerGuestCard(sq: LiveSquad, gi: number, right: boolean, pointerId: number): Promise<void> {
+  const gd = sq.guestDirs[gi]!;
+  const card = gd.currentDeckCard();
+  assert.ok(card && card.kind === 'choice', `guest ${gi} shows a choice card`);
+  const idx = right ? card.correctIndex : (card.correctIndex + 1) % card.options.length;
+  const boxes = deckCardBoxes(gd.layout, card);
+  gd.handlePointerDown(pointerId, boxes[idx]!.x + 8, boxes[idx]!.y + 8, true);
+  gd.handlePointerUp(pointerId);
+}
+
+test('Round 15 (5.1 privacy): every grade band gets the same clock, and only right or wrong is reported', () => {
+  const { CoopLocalQuizController } = quizR15;
+  const settled: Array<{ verdict: string; quality: number }> = [];
+  const hooks = {
+    play() {},
+    announce() {},
+    onChallengeSettled: (_id: number, _kind: string, verdict: string, quality: number) => {
+      settled.push({ verdict, quality });
+    },
+    onUpgradeChosen() {},
+  };
+  const limitFor = (band: 0 | 1 | 2, kind: 'hull' | 'break', mode: 'keys' | 'touch', wave: number): number => {
+    const q = new CoopLocalQuizController({ isolatedGrade: true, initialGrade: band, initialInputMode: mode });
+    q.openChallenge(7, kind, wave, mode === 'touch', hooks);
+    return q.activeChallenge!.limit;
+  };
+
+  // The moment a question runs out must not depend on the band: the same clock for every band.
+  for (const wave of [1, 2, 3, 5, 8, 12]) {
+    for (const [kind, mode] of [
+      ['hull', 'keys'],
+      ['hull', 'touch'],
+      ['break', 'keys'],
+      ['break', 'touch'],
+    ] as const) {
+      const limits = ([0, 1, 2] as const).map((band) => limitFor(band, kind, mode, wave));
+      assert.equal(new Set(limits).size, 1, `wave ${wave} ${kind}/${mode}: ${limits.join(' / ')}`);
+    }
+  }
+
+  // A quick right answer and a slow one, in every band: the score sent is only ever 0, 0.7 or 1.
+  for (const band of [0, 1, 2] as const) {
+    for (const wait of [0.5, 9]) {
+      const q = new CoopLocalQuizController({ isolatedGrade: true, initialGrade: band, initialInputMode: 'touch' });
+      q.openChallenge(9, 'energy', 4, true, hooks);
+      q.step(wait, true, false, hooks);
+      const c = q.activeChallenge as unknown as { kind: string; correct: number };
+      assert.equal(c.kind, 'choice');
+      q.pickDeckCard(c.correct, true, hooks);
+      q.step(0.016, true, false, hooks);
+    }
+  }
+  assert.equal(settled.length, 6);
+  for (const s of settled) assert.ok([0, 0.7, 1].includes(s.quality), `score ${s.quality} for ${s.verdict}`);
+
+  // The grade picker has its own clock: nobody picks, so the youngest band (never too hard) is picked for them.
+  const idle = new CoopLocalQuizController({ isolatedGrade: true, initialInputMode: 'touch' });
+  idle.openChallenge(10, 'hull', 2, true, hooks);
+  assert.equal(idle.stage, 'grade');
+  idle.step(12.1, true, false, hooks);
+  assert.notEqual(idle.stage, 'grade');
+  assert.equal(idle.getGrade(), 0);
+  assert.ok(idle.activeChallenge);
+
+  // And the clocks are the generous ones, so nobody gets less time than their own band would have.
+  const { coopClock, coopBreakLineClock } = quizR15;
+  const { PROMPT_SECONDS, ROUND_SECONDS, clockFor } = questionsR15;
+  for (const band of [0, 1, 2] as const) {
+    assert.ok(coopClock(PROMPT_SECONDS) >= clockFor(PROMPT_SECONDS, band));
+    assert.ok(coopClock(ROUND_SECONDS) >= clockFor(ROUND_SECONDS, band));
+  }
+  assert.ok(coopBreakLineClock(12) >= coopBreakLineClock(1));
+});
+
+test('Round 15 (4.1): when the host ends a break, every guest card closes at once', async () => {
+  const sq = await createLiveSquad({ guestCount: 1 });
+  sq.hostDir.setGrade(1);
+  sq.guestDirs[0]!.setGrade(0); // K-2: the longest own clock
+  sq.hostDir.beginSquadWaveBreak(4, sq.hostWorld);
+  await sq.tickSquad(42);
+  assert.equal(quizOf(sq.guestDirs[0]!)?.stage, 'break');
+
+  // Nobody answers. Run until the host starts wave 4, then a moment more.
+  for (let i = 0; i < 400 && !sq.hostWorld.startedWaves.includes(4); i++) await sq.tickSquad(1, 0.1);
+  assert.deepEqual(sq.hostWorld.startedWaves, [4]);
+  await sq.tickSquad(5, 0.1);
+  assert.equal(sq.guestDirs[0]!.quiz.isOpen(), false, "the guest's card closed with the host's break");
+  assert.ok(coopBreakWindowSec(4) >= quizR15.coopBreakMaxSec(4) + 2, 'the host waits longer than any own clock');
+  sq.cleanup();
+});
+
+test('Round 15 (4.1): an offer the host fits on time-out closes on the guest and names what was really fitted', async () => {
+  const sq = await createLiveSquad({ guestCount: 1 });
+  sq.hostDir.setGrade(1);
+  sq.guestDirs[0]!.setGrade(1);
+  const p1 = sq.hostDir.pilots[1];
+  p1.invulnerable = 0;
+  sq.hostWorld.pickups.push({ reward: 'upgrade', x: p1.x, y: p1.y, anchorX: p1.x, phase: 0, age: 0, dead: false });
+  sq.hostDir.collideHostSquad(sq.hostWorld, 1);
+  await sq.tickSquad(36);
+  await answerGuestCard(sq, 0, true, 41);
+  await sq.tickSquad(36);
+  const offer = sq.guestDirs[0]!.currentDeckCard();
+  assert.ok(offer && offer.kind === 'offer');
+
+  const before = new Set(sq.hostWorld.upgrades);
+  await sq.tickSquad(Math.ceil((COOP_OFFER_TIMEOUT_SEC + 0.3) / 0.1), 0.1);
+  const fitted = [...sq.hostWorld.upgrades].filter((u) => !before.has(u));
+  assert.equal(fitted.length, 1);
+  const shown = sq.guestDirs[0]!.currentDeckCard();
+  assert.ok(shown && shown.kind === 'result', 'the offer card is closed');
+  assert.equal(shown.headline, `${UPGRADES.find((u) => u.id === fitted[0])!.name} EQUIPPED!`);
+  sq.cleanup();
+});
+
+test("Round 15 (4.1): a pilot picking a grade never runs out the host's clock", async () => {
+  const sq = await createLiveSquad({ guestCount: 1 });
+  sq.hostDir.setGrade(1); // the guest has not picked a grade yet
+  const p1 = sq.hostDir.pilots[1];
+  p1.invulnerable = 0;
+  sq.hostWorld.mines.push({ x: p1.x, y: p1.y, anchorX: p1.x, phase: 0, age: 0, dead: false, thrown: false });
+  sq.hostDir.collideHostSquad(sq.hostWorld, 1);
+  await sq.tickSquad(30);
+  assert.equal(quizOf(sq.guestDirs[0]!)?.stage, 'grade');
+
+  // The child takes 11.5 s over the grade, then most of the bomb's own clock, and answers right in time.
+  await sq.tickSquad(110, 0.1);
+  const gradeCard = sq.guestDirs[0]!.currentDeckCard();
+  assert.ok(gradeCard && gradeCard.kind === 'grade');
+  const gBoxes = deckCardBoxes(sq.guestDirs[0]!.layout, gradeCard);
+  sq.guestDirs[0]!.handlePointerDown(51, gBoxes[0]!.x + 8, gBoxes[0]!.y + 8, true);
+  sq.guestDirs[0]!.handlePointerUp(51);
+  await sq.tickSquad(6);
+  const limit = quizOf(sq.guestDirs[0]!)!.challenge!.limit;
+  await sq.tickSquad(Math.floor((limit - 1) / 0.1), 0.1);
+  assert.equal(p1.alive, true, "not blown up while the bomb's own clock is still running");
+  await answerGuestCard(sq, 0, true, 52);
+  await sq.tickSquad(10);
+  assert.equal(p1.alive, true);
+  assert.equal(p1.answering, false, 'the bomb was defused');
+  sq.cleanup();
+});
+
+test('Round 15 (4.2): after the host page reloads, a guest still gets its next question', async () => {
+  const sq = await createLiveSquad({ guestCount: 1 });
+  sq.hostDir.setGrade(1);
+  sq.guestDirs[0]!.setGrade(1);
+  const p1 = sq.hostDir.pilots[1];
+  p1.invulnerable = 0;
+  sq.hostWorld.pickups.push({ reward: 'energy', x: p1.x, y: p1.y, anchorX: p1.x, phase: 0, age: 0, dead: false });
+  sq.hostDir.collideHostSquad(sq.hostWorld, 1);
+  await sq.tickSquad(36);
+  await answerGuestCard(sq, 0, true, 61);
+  await sq.tickSquad(90);
+  assert.equal(sq.guestDirs[0]!.quiz.isOpen(), false);
+
+  // The host page reloads: a new director, with a different session byte, takes over the room and the world.
+  const oldSession = (sq.hostDir as unknown as { hostSessionId: number }).hostSessionId;
+  const target = oldSession === 255 ? 1 : oldSession + 1;
+  sq.hostDir.dispose();
+  const realRandom = Math.random;
+  Math.random = () => (target - 1 + 0.5) / 255;
+  const host2 = new CoopFlightDirector({
+    client: sq.hostClient,
+    initialSeats: sq.hostClient.seats,
+    storage: sq.hostStorage,
+    now: () => sq.now(),
+  });
+  Math.random = realRandom;
+  host2.bindWorld(sq.hostWorld);
+  host2.setViewport(1280, 800, {}, false);
+  host2.setGrade(1);
+  const tick2 = async (frames: number) => {
+    for (let f = 0; f < frames; f++) {
+      sq.advanceSimMs(1000 / 60);
+      host2.step(1 / 60, 1 / 60, sq.hostWorld, IDLE_CTRL);
+      sq.guestDirs[0]!.step(1 / 60, 1 / 60, sq.guestWorlds[0]!, IDLE_CTRL);
+      await flushMicrotasks(4);
+    }
+  };
+  await tick2(30);
+  const q1 = host2.pilots[1];
+  q1.invulnerable = 0;
+  sq.hostWorld.pickups.push({ reward: 'energy', x: q1.x, y: q1.y, anchorX: q1.x, phase: 0, age: 0, dead: false });
+  host2.collideHostSquad(sq.hostWorld, 1);
+  await tick2(36);
+  const card = sq.guestDirs[0]!.currentDeckCard();
+  assert.ok(card && card.kind === 'choice', "the reloaded host's question reached the guest");
+  host2.dispose();
+  sq.cleanup();
+});
+
+test('Round 15 (4.2): an answer lost on the way is sent again when the host asks again', async () => {
+  const sq = await createLiveSquad({ guestCount: 1 });
+  sq.hostDir.setGrade(1);
+  sq.guestDirs[0]!.setGrade(1);
+  const p1 = sq.hostDir.pilots[1];
+  p1.invulnerable = 0;
+  sq.hostWorld.mines.push({ x: p1.x, y: p1.y, anchorX: p1.x, phase: 0, age: 0, dead: false, thrown: false });
+  sq.hostDir.collideHostSquad(sq.hostWorld, 1);
+  await sq.tickSquad(36);
+
+  // The right answer is lost, say in a socket drop.
+  const client = sq.guestClients[0]!;
+  const realSend = client.sendAnswer.bind(client);
+  let lost = 0;
+  client.sendAnswer = () => {
+    lost += 1;
+    return true;
+  };
+  await answerGuestCard(sq, 0, true, 71);
+  await sq.tickSquad(10);
+  client.sendAnswer = realSend;
+  assert.equal(lost, 1);
+  assert.equal(p1.answering, true, 'the host never heard the answer');
+
+  // The host asks again, as its reconnect resync does; the guest re-sends the answer it already gave.
+  const open = (sq.hostDir as unknown as { hostSeatChallenge: Array<{ id: number; wave: number } | null> })
+    .hostSeatChallenge[1]!;
+  sq.hostClient.sendEvent({ kind: 'challenge', to: 1, id: open.id, wave: open.wave, values: [quizR15.encodeStakeCode('defuse')] });
+  await sq.tickSquad(10);
+  assert.equal(p1.answering, false);
+  assert.equal(p1.alive, true, 'the bomb was defused, not set off');
+  sq.cleanup();
+});
+
+test('Round 15 (5.6): the pre-wave break waits for an open upgrade offer instead of throwing it away', async () => {
+  const sq = await createLiveSquad({ guestCount: 1 });
+  sq.hostDir.setGrade(1);
+  sq.guestDirs[0]!.setGrade(1);
+  const p1 = sq.hostDir.pilots[1];
+  p1.invulnerable = 0;
+  sq.hostWorld.pickups.push({ reward: 'upgrade', x: p1.x, y: p1.y, anchorX: p1.x, phase: 0, age: 0, dead: false });
+  sq.hostDir.collideHostSquad(sq.hostWorld, 1);
+  await sq.tickSquad(36);
+  await answerGuestCard(sq, 0, true, 81);
+  await sq.tickSquad(36);
+  const offer = sq.guestDirs[0]!.currentDeckCard();
+  assert.ok(offer && offer.kind === 'offer');
+  const pick = offer.upgrades[0]!;
+
+  sq.hostDir.beginSquadWaveBreak(3, sq.hostWorld);
+  await sq.tickSquad(4);
+  assert.equal(sq.hostDir.isSquadParked, false, 'the break waits for the offer');
+
+  const oBoxes = deckCardBoxes(sq.guestDirs[0]!.layout, offer);
+  sq.guestDirs[0]!.handlePointerDown(82, oBoxes[0]!.x + 12, oBoxes[0]!.y + 12, true);
+  sq.guestDirs[0]!.handlePointerUp(82);
+  await sq.tickSquad(8);
+  assert.equal(sq.hostWorld.upgrades.has(pick.id), true, 'the chosen upgrade was fitted');
+  assert.equal(sq.hostDir.isSquadParked, true, 'and then the break began');
+  sq.cleanup();
+});
+
+test("Round 15 (5.9): when another pilot took the same upgrade first, the screen names the one really fitted", async () => {
+  const sq = await createLiveSquad({ guestCount: 1 });
+  sq.hostDir.setGrade(1);
+  sq.guestDirs[0]!.setGrade(1);
+  const p1 = sq.hostDir.pilots[1];
+  p1.invulnerable = 0;
+  sq.hostWorld.pickups.push({ reward: 'upgrade', x: p1.x, y: p1.y, anchorX: p1.x, phase: 0, age: 0, dead: false });
+  sq.hostDir.collideHostSquad(sq.hostWorld, 1);
+  await sq.tickSquad(36);
+  await answerGuestCard(sq, 0, true, 91);
+  await sq.tickSquad(36);
+  const offer = sq.guestDirs[0]!.currentDeckCard();
+  assert.ok(offer && offer.kind === 'offer');
+  const taken = offer.upgrades[0]!;
+  sq.hostWorld.equipUpgrade(taken.id); // another pilot got it a moment earlier
+
+  const before = new Set(sq.hostWorld.upgrades);
+  const oBoxes = deckCardBoxes(sq.guestDirs[0]!.layout, offer);
+  sq.guestDirs[0]!.handlePointerDown(92, oBoxes[0]!.x + 12, oBoxes[0]!.y + 12, true);
+  sq.guestDirs[0]!.handlePointerUp(92);
+  await sq.tickSquad(8);
+  const fitted = [...sq.hostWorld.upgrades].filter((u) => !before.has(u));
+  assert.equal(fitted.length, 1);
+  assert.notEqual(fitted[0], taken.id);
+  const shown = sq.guestDirs[0]!.currentDeckCard();
+  assert.ok(shown && shown.kind === 'result');
+  assert.equal(shown.headline, `${UPGRADES.find((u) => u.id === fitted[0])!.name} EQUIPPED!`);
+  sq.cleanup();
 });

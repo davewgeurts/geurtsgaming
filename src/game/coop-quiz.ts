@@ -71,6 +71,49 @@ const CODE_TO_STAKE: readonly CoopStakeOrBreak[] = [
 
 export const COOP_GRADE_GRACE_SEC = 0.3;
 export const COOP_BREAK_TOUCH_ROUNDS = 2;
+/** A pilot who has not picked a grade after this long gets the youngest band, so no question is ever too hard. */
+export const COOP_GRADE_PICK_SEC = 12;
+/** How long an upgrade offer stays open; the host fits the first offer when it runs out. */
+export const COOP_OFFER_SEC = 16;
+/** Pause between the touch break's sums, after a wrong answer (the longest of the two pauses). */
+const BREAK_ROUND_PAUSE_MAX = 1.1;
+
+const ALL_BANDS: readonly GradeBand[] = [0, 1, 2];
+
+/**
+ * Privacy (`/privacy/`: the grade "never leaves" the device). In co-op every band gets the same clock, the most
+ * generous one any band would get, so neither the moment a question runs out nor how a sum is scored tells the
+ * host or the other pilots which band a pilot picked. Nobody gets less time than their own band would.
+ */
+export function coopClock(seconds: number): number {
+  return Math.max(...ALL_BANDS.map((band) => clockFor(seconds, band)));
+}
+
+const longestLine = (pool: readonly string[] | undefined): number =>
+  (pool ?? []).reduce((longest, line) => Math.max(longest, line.length), 0);
+
+/** The typing break's clock at `wave`: what the longest line any band could get would need, the same for all bands. */
+export function coopBreakLineClock(wave: number): number {
+  return Math.max(...ALL_BANDS.map((band) => clockFor(5 + longestLine(LINES[lineTier(wave, band)]) * 0.6, band)));
+}
+
+/** The longest a pilot's own break can run on their device (typed line, or the touch sums with their pauses). */
+export function coopBreakMaxSec(wave: number): number {
+  const touch = COOP_BREAK_TOUCH_ROUNDS * (coopClock(ROUND_SECONDS) + BREAK_ROUND_PAUSE_MAX);
+  return Math.max(coopBreakLineClock(wave), touch);
+}
+
+/** Only right or wrong crosses the wire. A score scaled by a band's clock would reveal the band. */
+export function verdictQuality(verdict: Grade): number {
+  return verdict === 'perfect' ? 1 : verdict === 'good' ? 0.7 : 0;
+}
+
+/** Why the host closed a question on a pilot's screen: `challenge-closed` event, `values[0]`. */
+export const CLOSE_TIMED_OUT = 1;
+export const CLOSE_CANCELLED = 2;
+export const CLOSE_BREAK_OVER = 3;
+/** `values[1]` is the `UPGRADES` index the host actually fitted (or -1 when every upgrade was already owned). */
+export const CLOSE_OFFER_FITTED = 4;
 
 export function encodeStakeCode(kind: CoopStakeOrBreak): number {
   return STAKE_CODES[kind];
@@ -164,6 +207,8 @@ export class CoopLocalQuizController {
   private active: LocalQuizState | null = null;
   private lastText = '';
   private readonly handledIds = new Set<number>();
+  /** The upgrade offer this pilot just picked from, until the host says what it really fitted. */
+  private awaitingOfferBase: number | null = null;
 
   constructor(opts: {
     isolatedGrade: boolean;
@@ -234,7 +279,83 @@ export class CoopLocalQuizController {
 
   clearActive(clearHandled = false): void {
     this.active = null;
+    this.awaitingOfferBase = null;
     if (clearHandled) this.handledIds.clear();
+  }
+
+  /** True while the grade picker is up. The host holds this pilot's question clock until a grade is picked. */
+  isPickingGrade(): boolean {
+    return this.active?.stage === 'grade';
+  }
+
+  /** The squad is flying again: a break card still on screen (unanswered, or standing by) is over. */
+  closeBreakCard(): void {
+    const st = this.active;
+    if (st?.stage === 'break') {
+      this.handledIds.add(st.id);
+      this.active = null;
+    } else if (st?.stage === 'grade' && st.next.kind === 'break') {
+      this.handledIds.add(st.next.id);
+      this.active = null;
+    }
+  }
+
+  /**
+   * The host closed question `id` (or the offer starting at `id`) on this pilot's screen. Whatever this screen
+   * shows next must match what the host decided, because the host's decision is what happened in the squad.
+   */
+  hostClosed(id: number, code: number, extra: number | null, useThumbDeck: boolean, hooks: CoopQuizHooks): void {
+    this.handledIds.add(id);
+    const st = this.active;
+    const hold = useThumbDeck ? 0.9 : 1.4;
+
+    if (code === CLOSE_OFFER_FITTED) {
+      const ours =
+        (st?.stage === 'offer' && st.baseId === id) ||
+        (this.awaitingOfferBase === id && (st === null || st.stage === 'result'));
+      if (!ours) return;
+      const wasOpen = st?.stage === 'offer';
+      this.awaitingOfferBase = null;
+      const fitted = extra !== null && extra >= 0 ? UPGRADES[extra] : undefined;
+      this.active = {
+        stage: 'result',
+        headline: fitted ? `${fitted.name} EQUIPPED!` : 'SQUAD FULLY UPGRADED',
+        subline: wasOpen ? 'PICKED FOR YOU - TIME RAN OUT' : 'ACTIVE FOR ALL SQUAD PILOTS',
+        color: NEON.lime,
+        hold,
+      };
+      if (fitted) hooks.announce(`${fitted.name.toLowerCase()} equipped for the squad.`);
+      return;
+    }
+
+    if (!st) return;
+    const matches =
+      ((st.stage === 'stake' || st.stage === 'break') && st.id === id) || (st.stage === 'grade' && st.next.id === id);
+    if (!matches) return;
+
+    if (code === CLOSE_TIMED_OUT && (st.stage === 'stake' || (st.stage === 'grade' && st.next.kind !== 'break'))) {
+      const stake = st.stage === 'stake' ? st.stake : (st.next.kind as Stake);
+      const late = st.stage === 'stake' && st.settled;
+      this.active = {
+        stage: 'result',
+        headline: late ? 'TOO LATE' : "TIME'S UP",
+        subline: stake === 'defuse' ? 'THE BOMB WENT OFF' : 'CANNONS JAMMED',
+        color: stake === 'defuse' ? NEON.red : PINK,
+        hold,
+      };
+      hooks.play('wrong');
+      hooks.announce(`${late ? 'Too late' : "Time's up"}. ${stake === 'defuse' ? 'The bomb went off' : 'Cannons jammed'}.`);
+      return;
+    }
+
+    if (code === CLOSE_BREAK_OVER || code === CLOSE_TIMED_OUT) {
+      // The break ended for the whole squad; an answer still on this screen no longer counts.
+      this.active = null;
+      return;
+    }
+
+    // CLOSE_CANCELLED, or anything newer this build does not know: close quietly.
+    this.active = null;
   }
 
   openChallenge(
@@ -302,11 +423,23 @@ export class CoopLocalQuizController {
 
     if (st.stage === 'grade') {
       st.age += dt;
+      if (st.age >= COOP_GRADE_PICK_SEC) {
+        // Nobody picked: the youngest band's questions are never too hard, and the clock is the same for every band.
+        const band: GradeBand = 0;
+        this.setGrade(band, hooks.setExternalGrade);
+        hooks.announce('Grades K to 2 picked for you.');
+        this.launchChallengeWithGrade(st.next.id, st.next.kind, st.next.wave, band, useThumbDeck, hooks);
+      }
       return;
     }
 
     if (st.stage === 'offer') {
       st.age += dt;
+      // The host fits the first offer when its own clock runs out and says so; this is only a fallback.
+      if (st.age >= COOP_OFFER_SEC + 3) {
+        this.handledIds.add(st.baseId);
+        this.active = null;
+      }
       return;
     }
 
@@ -329,7 +462,7 @@ export class CoopLocalQuizController {
         this.handledIds.add(st.id);
         const verdict = gradeOf(c) ?? 'failed';
         const ok = c.outcome.success;
-        const quality = c.outcome.quality;
+        const quality = verdictQuality(verdict);
 
         if (st.stake === 'defuse') {
           st.note = ok ? 'BOMB DEFUSED +300' : 'THE BOMB GOES OFF!';
@@ -515,6 +648,8 @@ export class CoopLocalQuizController {
       return {
         kind: 'grade',
         interactive: st.age >= COOP_GRADE_GRACE_SEC,
+        timeLeft: Math.max(0, COOP_GRADE_PICK_SEC - st.age),
+        timeLimit: COOP_GRADE_PICK_SEC,
       };
     }
 
@@ -659,6 +794,8 @@ export class CoopLocalQuizController {
           ink(SAND, alpha * 0.6, 1.2, () => traceText(ctx, String(i + 1), b.x + 12, b.y + (b.h - 9) / 2, 9), false);
         }
       });
+      const left = Math.max(0, Math.ceil(COOP_GRADE_PICK_SEC - st.age));
+      this.drawCentred(ctx, ink, `K-2 IS PICKED IN ${left}`, cx, top + 214, 8, room, alpha * 0.7, SAND);
       return;
     }
 
@@ -764,14 +901,16 @@ export class CoopLocalQuizController {
     const chosen = st.upgrades[index];
     if (!chosen) return false;
     this.handledIds.add(st.baseId);
+    // Shown at once; the host's `challenge-closed` replaces it with what was really fitted (another pilot may
+    // have taken the same upgrade a moment earlier).
+    this.awaitingOfferBase = st.baseId;
     hooks.play('power');
-    hooks.announce(`${chosen.name.toLowerCase()} equipped for the squad.`);
     this.active = {
       stage: 'result',
-      headline: `${chosen.name} EQUIPPED!`,
-      subline: 'ACTIVE FOR ALL SQUAD PILOTS',
+      headline: `${chosen.name} CHOSEN`,
+      subline: 'FITTING IT FOR THE SQUAD',
       color: NEON.lime,
-      hold: useThumbDeck ? 0.55 : 1.0,
+      hold: useThumbDeck ? 0.9 : 1.4,
     };
     hooks.onUpgradeChosen(st.baseId, index, chosen);
     return true;
@@ -791,7 +930,7 @@ export class CoopLocalQuizController {
       let challenge: Challenge;
       if (!touch) {
         const text = this.pickDistinctText(LINES[lineTier(wave, grade)]!);
-        challenge = lineChallenge(text, clockFor(5 + text.length * 0.6, grade), BREAK_GRACE);
+        challenge = lineChallenge(text, coopBreakLineClock(wave), BREAK_GRACE);
       } else {
         challenge = this.makeChoiceSum(wave, ROUND_SECONDS, BREAK_GRACE, grade);
       }
@@ -822,11 +961,11 @@ export class CoopLocalQuizController {
         : roll < 0.7
           ? entryChallenge(
               makeProblem(sumLevel(wave, grade)),
-              clockFor(PROMPT_SECONDS, grade),
+              coopClock(PROMPT_SECONDS),
               PROMPT_GRACE,
               kind === 'defuse' ? 1 : 0,
             )
-          : lineChallenge(this.pickDistinctText(WORDS), clockFor(PROMPT_SECONDS, grade), PROMPT_GRACE);
+          : lineChallenge(this.pickDistinctText(WORDS), coopClock(PROMPT_SECONDS), PROMPT_GRACE);
 
     this.active = {
       stage: 'stake',
@@ -851,7 +990,6 @@ export class CoopLocalQuizController {
     this.handledIds.add(st.id);
 
     const typed = st.challenge.kind === 'line';
-    const quality = clamp(typed ? o.quality : st.earned / Math.max(1, st.total), 0, 1);
     const verdict: Grade = typed
       ? (gradeOf(st.challenge) ?? 'failed')
       : st.right === st.total
@@ -859,6 +997,7 @@ export class CoopLocalQuizController {
         : st.right === 0
           ? 'failed'
           : 'good';
+    const quality = verdictQuality(verdict);
 
     st.headline = `SQUAD CHARGE +${percent(quality)}%`;
     st.subline = `READY FOR WAVE ${st.wave} - STANDING BY FOR WINGMEN`;
@@ -869,7 +1008,7 @@ export class CoopLocalQuizController {
   }
 
   private makeChoiceSum(wave: number, seconds: number, grace: number, grade: GradeBand): ChoiceChallenge {
-    return choiceChallenge(makeProblem(sumLevel(wave, grade)), clockFor(seconds, grade), grace);
+    return choiceChallenge(makeProblem(sumLevel(wave, grade)), coopClock(seconds), grace);
   }
 
   private pickDistinctText(pool: readonly string[]): string {

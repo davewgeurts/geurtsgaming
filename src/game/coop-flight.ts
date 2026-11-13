@@ -47,12 +47,21 @@ import {
   type CoopWorldSnapshot,
 } from './coop-protocol';
 import {
+  CLOSE_BREAK_OVER,
+  CLOSE_CANCELLED,
+  CLOSE_OFFER_FITTED,
+  CLOSE_TIMED_OUT,
+  COOP_GRADE_PICK_SEC,
+  COOP_OFFER_SEC,
   CoopLocalQuizController,
+  coopBreakMaxSec,
+  coopClock,
   decodeStakeCode,
   encodeStakeCode,
   getCoopTabGrade,
   renderSquadMissionSummary,
   setCoopTabGrade,
+  verdictQuality,
   type CoopQuizHooks,
 } from './coop-quiz';
 import {
@@ -85,6 +94,7 @@ import {
   FULL_HULL_BONUS,
   JAM_SECONDS,
   POWER_GAIN,
+  PROMPT_SECONDS,
   type GradeBand,
   type Reward,
   type Stake,
@@ -104,11 +114,25 @@ export const COOP_WINGMAN_RESPAWN_SEC = 6.0;
 export const COOP_WRECK_REVIVE_RADIUS = 34;
 export const COOP_STALE_INPUT_SEC = 0.15;
 export const COOP_ACK_DEADBAND_PX = 24;
-export const COOP_QUIZ_TIMEOUT_SEC = 26.0;
-export const COOP_OFFER_TIMEOUT_SEC = 16.0;
-export const COOP_BREAK_TIMEOUT_SEC = 18.0;
+/**
+ * The host's limits match the pilots' own clocks (`coop-quiz.ts`, the same for every grade band) plus this much
+ * for the answer to cross the network, so a pilot answering in time is never cut off.
+ */
+export const COOP_ANSWER_GRACE_SEC = 2.5;
+export const COOP_QUIZ_TIMEOUT_SEC = coopClock(PROMPT_SECONDS) + COOP_ANSWER_GRACE_SEC;
+export const COOP_OFFER_TIMEOUT_SEC = COOP_OFFER_SEC + 1.0;
+/** How long the host waits for every pilot's pre-wave break answer at `wave`. */
+export function coopBreakWindowSec(wave: number): number {
+  return coopBreakMaxSec(wave) + COOP_ANSWER_GRACE_SEC;
+}
 export const COOP_RESUME_COUNTDOWN_SEC = 3.0;
 export const COOP_HOST_AWAY_MAGIC = 901;
+/** Each host page numbers its questions from `session × CHALLENGE_ID_BLOCK`, so ids never repeat across reloads. */
+const CHALLENGE_ID_BLOCK = 1_000_000;
+/** The `UPGRADES` index of a fitted upgrade, or -1 for none (every upgrade already owned). */
+const upgradeIndexOf = (id: UpgradeId | null): number => (id ? UPGRADES.findIndex((u) => u.id === id) : -1);
+/** How many sent answers a guest keeps, to re-send one the host lost. */
+const ANSWER_CACHE_SIZE = 64;
 const HOST_STATE_PREFIX = 'gg_coop_host_state_';
 const FX_RETENTION_SEC = 0.24;
 const ARM_COLORS = [NEON.lime, NEON.yellow, NEON.orange, NEON.violet] as const;
@@ -325,6 +349,21 @@ export class CoopFlightDirector {
     HostSeatChallengeState | null,
   ] = [null, null, null, null];
   private hostBreak: HostSquadBreakState | null = null;
+  /** A wave whose pre-wave break waits for open questions and offers to finish (they are never thrown away). */
+  private pendingBreakWave: number | null = null;
+  /** Seconds each seat's current question clock has been held while that pilot picks a grade (capped). */
+  private readonly pickingHeldSec: [number, number, number, number] = [0, 0, 0, 0];
+  /** Questions the host closed recently, per seat (id -> close code and extra), to answer a late answer. */
+  private readonly recentClosedBySeat: Map<number, { code: number; extra: number | null }>[] = [
+    new Map(),
+    new Map(),
+    new Map(),
+    new Map(),
+  ];
+  /** Guest: answers already sent (by question or offer id), re-sent if the host asks again after losing one. */
+  private readonly guestAnswerCache = new Map<number, { answerId: number; verdict: Grade; quality: number }>();
+  /** Guest: the host page's session byte, to forget answered question ids when the host page reloads. */
+  private lastHostSession: number | null = null;
   private guestParked = false;
   private mismatchCount = 0;
   private lastSentDiscreteMask = -1;
@@ -354,6 +393,8 @@ export class CoopFlightDirector {
     this.onVersionMismatch = opts.onVersionMismatch;
     this.onStatus = opts.onStatus;
     this.hostSessionId = 1 + Math.floor(Math.random() * 255);
+    // Question ids are unique to this host page, so guests never mistake a reloaded host's question for an old one.
+    this.nextChallengeId = this.hostSessionId * CHALLENGE_ID_BLOCK + 4;
     this.predHistory = Array.from({ length: 256 }, () => ({ seq: 0, x: 0, y: 0, sentAtMs: 0, valid: false }));
     this.quiz = new CoopLocalQuizController({
       isolatedGrade: opts.storage !== undefined || opts.initialGrade !== undefined,
@@ -787,6 +828,8 @@ export class CoopFlightDirector {
 
   /** Reset all present pilots to formation & full hull when the Host starts a fresh squad run. */
   resetSquadForNewRun(): void {
+    this.pendingBreakWave = null;
+    this.pickingHeldSec.fill(0);
     this.guestLocalBolts.length = 0;
     this.guestSendTimesMs.length = 0;
     this.guestSuppressedBullets.length = 0;
@@ -889,18 +932,24 @@ export class CoopFlightDirector {
     if (!this.isHost || world.gameOver || this.squadBreakActive) return;
     const presentPilots = this.pilots.filter((p) => p.present);
     if (presentPilots.length === 0) {
+      this.pendingBreakWave = null;
       world.startWave?.(nextWave);
       return;
     }
 
-    this.hostSeatChallenge[0] = null;
-    this.hostSeatChallenge[1] = null;
-    this.hostSeatChallenge[2] = null;
-    this.hostSeatChallenge[3] = null;
+    // An open question or upgrade offer is never thrown away: the break waits until each one is answered or
+    // runs out (checked every host step in `startPendingBreak`).
+    if (this.hostSeatChallenge.some((ch) => ch !== null)) {
+      this.pendingBreakWave = nextWave;
+      return;
+    }
+    this.pendingBreakWave = null;
+
     for (const p of this.pilots) {
       p.answering = false;
       p.firing = false;
     }
+    this.pickingHeldSec.fill(0);
 
     world.shots.length = 0;
     world.rockets.length = 0;
@@ -915,7 +964,7 @@ export class CoopFlightDirector {
       id: breakId,
       nextWave,
       answered: new Map(),
-      expiresAtSec: this.elapsedSec + COOP_BREAK_TIMEOUT_SEC,
+      expiresAtSec: this.elapsedSec + coopBreakWindowSec(nextWave),
     };
 
     for (const p of presentPilots) {
@@ -1808,6 +1857,14 @@ export class CoopFlightDirector {
     const nowMs = this.nowFn();
     const accepted = this.interpolator.push(snap, nowMs);
     if (!accepted) return;
+    if (!this.isHost && typeof snap.session === 'number' && snap.session > 0) {
+      if (this.lastHostSession !== null && snap.session !== this.lastHostSession) {
+        // A reloaded host numbers its questions afresh: answers to the old page's questions mean nothing now.
+        this.quiz.clearActive(true);
+        this.guestAnswerCache.clear();
+      }
+      this.lastHostSession = snap.session;
+    }
     if (snap.hostElapsedMs !== undefined && Number.isFinite(snap.hostElapsedMs) && this.client.seat >= 0) {
       const wireMe = snap.ships.find((sh) => sh.seat === this.client.seat);
       if (wireMe) {
@@ -1885,7 +1942,9 @@ export class CoopFlightDirector {
           typeof msg.wave === 'number' && Number.isFinite(msg.wave)
             ? clamp(Math.round(msg.wave), 1, 99)
             : clamp(Math.round(w.wave || 1), 1, 99);
-        this.quiz.openChallenge(msg.id, stakeKind, safeWave, this.layout.useThumbDeck, this.quizHooks(w));
+        const opened = this.quiz.openChallenge(msg.id, stakeKind, safeWave, this.layout.useThumbDeck, this.quizHooks(w));
+        // The host asked again for a question this pilot already answered: its answer was lost, so send it again.
+        if (!opened) this.resendCachedAnswer(msg.id);
       }
     } else if (msg.kind === 'upgrade-offer') {
       if (this.client.seat < 0) return;
@@ -1893,7 +1952,15 @@ export class CoopFlightDirector {
         const indices = msg.values.filter(
           (v): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < UPGRADES.length,
         );
-        this.quiz.openUpgradeOffer(msg.id, indices, this.quizHooks(w));
+        const opened = this.quiz.openUpgradeOffer(msg.id, indices, this.quizHooks(w));
+        if (!opened) this.resendCachedAnswer(msg.id);
+      }
+    } else if (msg.kind === 'challenge-closed') {
+      if (this.client.seat < 0) return;
+      if (typeof msg.id === 'number' && Number.isInteger(msg.id) && msg.id > 0 && Array.isArray(msg.values)) {
+        const code = typeof msg.values[0] === 'number' ? msg.values[0] : CLOSE_CANCELLED;
+        const extra = typeof msg.values[1] === 'number' && Number.isInteger(msg.values[1]) ? msg.values[1] : null;
+        this.quiz.hostClosed(msg.id, code, extra, this.layout.useThumbDeck, this.quizHooks(w));
       }
     } else if (msg.kind === 'revive') {
       if (typeof msg.seat === 'number' && Number.isInteger(msg.seat) && msg.seat >= 0 && msg.seat <= 3) {
@@ -1944,11 +2011,13 @@ export class CoopFlightDirector {
     }
 
     if (!world.gameOver && !world.paused) {
+      this.holdClocksWhilePicking(simDt);
       this.checkHostQuizTimeouts(world);
       if (world.gameOver) {
         this.broadcastSnapshotNow(world);
         return;
       }
+      this.startPendingBreak(world);
     }
 
     const anyOtherLiving = this.pilots.some((p) => p.present && p.alive);
@@ -2250,6 +2319,7 @@ export class CoopFlightDirector {
     world.energy = sample.energy;
     const isParkedNow = latestSnap ? latestSnap.parked : sample.parked;
     const isOverNow = latestSnap ? latestSnap.gameOver : sample.gameOver;
+    if (this.guestParked && !isParkedNow) this.quiz.closeBreakCard();
     this.guestParked = isParkedNow;
     world.parked = isParkedNow;
     if (isOverNow && !world.gameOver) {
@@ -2707,6 +2777,7 @@ export class CoopFlightDirector {
       down: ctrl.down > 0,
       tap: Boolean(tap),
       seq: this.inputSeq,
+      picking: this.quiz.isPickingGrade(),
     });
     this.client.sendBinary(frame);
   }
@@ -2759,8 +2830,27 @@ export class CoopFlightDirector {
   private allocateChallengeIds(span = 1): number {
     const base = this.nextChallengeId;
     this.nextChallengeId += Math.max(1, span);
-    if (this.nextChallengeId > 1_000_000_000) this.nextChallengeId = 4;
+    if (this.nextChallengeId >= (this.hostSessionId + 1) * CHALLENGE_ID_BLOCK - 8) {
+      this.nextChallengeId = this.hostSessionId * CHALLENGE_ID_BLOCK + 4;
+    }
     return base;
+  }
+
+  /** Tell a pilot's screen that the host has closed a question or offer, and remember it for late answers. */
+  private sendQuestionClosed(seat: CoopSeatIndex, id: number, code: number, extra: number | null = null): void {
+    const recent = this.recentClosedBySeat[seat]!;
+    recent.set(id, { code, extra });
+    while (recent.size > 8) recent.delete(recent.keys().next().value as number);
+    if (seat === this.client.seat) {
+      this.quiz.hostClosed(id, code, extra, this.layout.useThumbDeck, this.quizHooks(this.activeWorld));
+      return;
+    }
+    this.client.sendEvent({
+      kind: 'challenge-closed',
+      to: seat,
+      id,
+      values: extra === null ? [code] : [code, extra],
+    });
   }
 
   private quizHooks(world: CoopWorldAdapter | null): CoopQuizHooks {
@@ -2784,6 +2874,7 @@ export class CoopFlightDirector {
           } else if (kind !== 'break' && kind !== 'defuse') {
             this.pilots[mySeat].jamSec = JAM_SECONDS;
           }
+          this.cacheGuestAnswer(id, id, verdict, quality);
           this.sendGuestAnswer(id, verdict, quality);
         }
       },
@@ -2794,10 +2885,23 @@ export class CoopFlightDirector {
         if (this.isHost) {
           if (world) this.handlePilotAnswer(mySeat, answerId, 'perfect', 1, world);
         } else {
+          this.cacheGuestAnswer(baseId, answerId, 'perfect', 1);
           this.sendGuestAnswer(answerId, 'perfect', 1);
         }
       },
     };
+  }
+
+  private cacheGuestAnswer(key: number, answerId: number, verdict: Grade, quality: number): void {
+    this.guestAnswerCache.set(key, { answerId, verdict, quality });
+    while (this.guestAnswerCache.size > ANSWER_CACHE_SIZE) {
+      this.guestAnswerCache.delete(this.guestAnswerCache.keys().next().value as number);
+    }
+  }
+
+  private resendCachedAnswer(key: number): void {
+    const cached = this.guestAnswerCache.get(key);
+    if (cached) this.sendGuestAnswer(cached.answerId, cached.verdict, cached.quality);
   }
 
   private sendGuestAnswer(id: number, verdict: Grade, quality: number): void {
@@ -2820,7 +2924,10 @@ export class CoopFlightDirector {
     scale: number,
   ): void {
     if (!this.isHost || world.gameOver || pilot.answering) return;
+    // No new question while the squad is in, or waiting for, its pre-wave break.
+    if (this.squadBreakActive || this.pendingBreakWave !== null) return;
     const id = this.allocateChallengeIds(1);
+    this.pickingHeldSec[pilot.seat] = 0;
     const safeWave = Math.max(1, Math.round(world.wave || 1));
     pilot.answering = true;
     pilot.firing = false;
@@ -2854,8 +2961,8 @@ export class CoopFlightDirector {
     if (typeof msg.id !== 'number' || !Number.isInteger(msg.id) || msg.id <= 0) return;
     const verdict: Grade =
       msg.verdict === 'perfect' || msg.verdict === 'good' || msg.verdict === 'failed' ? msg.verdict : 'failed';
-    const quality = typeof msg.quality === 'number' && Number.isFinite(msg.quality) ? clamp(msg.quality, 0, 1) : 0;
-    this.handlePilotAnswer(msg.seat as CoopSeatIndex, msg.id, verdict, quality, w);
+    // Only right or wrong counts: the guest's score is ignored (a band-scaled score would reveal the grade band).
+    this.handlePilotAnswer(msg.seat as CoopSeatIndex, msg.id, verdict, verdictQuality(verdict), w);
   }
 
   private handlePilotAnswer(
@@ -2887,7 +2994,10 @@ export class CoopFlightDirector {
 
     // 2. Active mid-wave Stake or Upgrade Offer for `seat`
     const ch = this.hostSeatChallenge[seat];
-    if (!ch || !p.alive) return;
+    if (!ch || !p.alive) {
+      this.replyToLateAnswer(seat, id);
+      return;
+    }
 
     if (ch.mode === 'offer') {
       const offers = ch.offerIndices ?? [];
@@ -2897,12 +3007,16 @@ export class CoopFlightDirector {
       this.hostSeatChallenge[seat] = null;
       p.answering = false;
       p.invulnerable = Math.max(p.invulnerable, 1.0);
-      this.equipSquadUpgrade(chosen?.id ?? null, p, world, ch.scale);
+      const fitted = this.equipSquadUpgrade(chosen?.id ?? null, p, world, ch.scale);
+      this.sendQuestionClosed(seat, ch.id, CLOSE_OFFER_FITTED, upgradeIndexOf(fitted));
       this.broadcastSnapshotNow(world);
       return;
     }
 
-    if (id !== ch.id) return;
+    if (id !== ch.id) {
+      this.replyToLateAnswer(seat, id);
+      return;
+    }
 
     if (verdict === 'failed') {
       this.hostSeatChallenge[seat] = null;
@@ -3047,6 +3161,57 @@ export class CoopFlightDirector {
     return revivedCount;
   }
 
+  /** While a pilot's grade picker is up, their question clock (and the break's) waits; at most COOP_GRADE_PICK_SEC. */
+  private holdClocksWhilePicking(dt: number): void {
+    let breakHeld = false;
+    for (let i = 0; i < 4; i++) {
+      const seat = i as CoopSeatIndex;
+      const p = this.pilots[seat];
+      if (!p.present) continue;
+      const picking =
+        seat === this.client.seat
+          ? this.quiz.isPickingGrade()
+          : Boolean(p.latestInput?.picking) && this.elapsedSec - this.lastInputAtSec[seat]! <= 0.4;
+      if (!picking || this.pickingHeldSec[seat]! >= COOP_GRADE_PICK_SEC + 1) continue;
+      const ch = this.hostSeatChallenge[seat];
+      const inBreak = this.hostBreak !== null && !this.hostBreak.answered.has(seat);
+      if (!ch && !inBreak) continue;
+      this.pickingHeldSec[seat] += dt;
+      if (ch) ch.expiresAtSec += dt;
+      if (inBreak && !breakHeld) {
+        this.hostBreak!.expiresAtSec += dt;
+        breakHeld = true;
+      }
+    }
+  }
+
+  /** A break that waited for open questions starts as soon as none is left. */
+  private startPendingBreak(world: CoopWorldAdapter): void {
+    if (this.pendingBreakWave === null || this.squadBreakActive || world.gameOver) return;
+    if (this.hostSeatChallenge.some((ch) => ch !== null)) return;
+    const wave = this.pendingBreakWave;
+    this.pendingBreakWave = null;
+    this.beginSquadWaveBreak(wave, world);
+  }
+
+  /** An answer for a question the host already closed: tell that screen again what really happened. */
+  private replyToLateAnswer(seat: CoopSeatIndex, id: number): void {
+    if (seat === this.client.seat) return;
+    const recent = this.recentClosedBySeat[seat]!;
+    for (let k = 0; k < 4; k++) {
+      const closed = recent.get(id - k);
+      if (!closed) continue;
+      if (k > 0 && closed.code !== CLOSE_OFFER_FITTED) continue;
+      this.client.sendEvent({
+        kind: 'challenge-closed',
+        to: seat,
+        id: id - k,
+        values: closed.extra === null ? [closed.code] : [closed.code, closed.extra],
+      });
+      return;
+    }
+  }
+
   private checkHostQuizTimeouts(world: CoopWorldAdapter): void {
     for (let i = 0; i < 4; i++) {
       const seat = i as CoopSeatIndex;
@@ -3056,7 +3221,8 @@ export class CoopFlightDirector {
       if (!p.present || !p.alive) {
         this.hostSeatChallenge[seat] = null;
         p.answering = false;
-        if (seat === this.client.seat) this.quiz.clearActive();
+        if (p.present) this.sendQuestionClosed(seat, ch.id, CLOSE_CANCELLED);
+        else if (seat === this.client.seat) this.quiz.clearActive();
         continue;
       }
       if (this.elapsedSec < ch.expiresAtSec) continue;
@@ -3067,11 +3233,11 @@ export class CoopFlightDirector {
         this.hostSeatChallenge[seat] = null;
         p.answering = false;
         p.invulnerable = Math.max(p.invulnerable, 1.0);
-        if (seat === this.client.seat) this.quiz.clearActive();
-        this.equipSquadUpgrade(firstId, p, world, ch.scale);
+        const fitted = this.equipSquadUpgrade(firstId, p, world, ch.scale);
+        this.sendQuestionClosed(seat, ch.id, CLOSE_OFFER_FITTED, upgradeIndexOf(fitted));
       } else {
-        if (seat === this.client.seat) this.quiz.clearActive();
         this.handlePilotAnswer(seat, ch.id, 'failed', 0, world);
+        this.sendQuestionClosed(seat, ch.id, CLOSE_TIMED_OUT);
         if (world.gameOver) return;
       }
     }
@@ -3081,9 +3247,6 @@ export class CoopFlightDirector {
         this.hostBreak.answered.size > 0 &&
         this.pilots.every((p) => !p.present || !p.connected || this.hostBreak!.answered.has(p.seat));
       if (allConnectedDone || this.elapsedSec >= this.hostBreak.expiresAtSec) {
-        if (this.client.seat >= 0 && !this.hostBreak.answered.has(this.client.seat as CoopSeatIndex)) {
-          this.quiz.clearActive();
-        }
         this.finishHostSquadBreak(world);
       }
     }
@@ -3128,6 +3291,9 @@ export class CoopFlightDirector {
     }
 
     this.reviveDownedWingmen(null, world, 1);
+    for (const p of this.pilots) {
+      if (p.present) this.sendQuestionClosed(p.seat, brk.id, CLOSE_BREAK_OVER);
+    }
     world.startWave?.(brk.nextWave);
     this.broadcastSnapshotNow(world);
   }
@@ -3162,7 +3328,7 @@ export class CoopFlightDirector {
     collector: CoopPilotShip,
     world: CoopWorldAdapter,
     scale: number,
-  ): void {
+  ): UpgradeId | null {
     const chosenId =
       preferred && !world.upgrades.has(preferred)
         ? preferred
@@ -3189,10 +3355,12 @@ export class CoopFlightDirector {
     world.ring(collector.x, collector.y, NEON.lime, 105 * scale);
     this.recordHostFx('ring', collector.x, collector.y, NEON.lime);
     world.play('power');
+    return chosenId;
   }
 
   private endSquadMission(world: CoopWorldAdapter): void {
     this.clearSavedHostProgress();
+    this.pendingBreakWave = null;
     this.squadBreakActive = false;
     this.hostBreak = null;
     this.hostSeatChallenge[0] = null;
