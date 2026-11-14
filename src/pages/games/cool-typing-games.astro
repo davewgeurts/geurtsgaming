@@ -1,0 +1,2237 @@
+---
+import Base from '../../layouts/Base.astro';
+import {
+  CTG_PLAY_URL,
+  CTG_SIGNUP_URL,
+  CTG_SMALL_LOGO,
+  CTG_ROBOT_HEAD,
+  CTG_HERO_VIDEO,
+  CTG_CATEGORIES,
+  CTG_RACERS,
+  CTG_FISH_HEROES,
+  CTG_GAMES,
+  DASH_PROMPTS,
+} from '../../data/ctg-showcase';
+
+const initialRacer = CTG_RACERS[0];
+const initialGame = CTG_GAMES[0];
+const initialPrompt = DASH_PROMPTS[0];
+
+const pageDescription =
+  'Play 10 free multiplayer typing games for kids and classrooms! Race up to 25 classmates in Track Meet, clash in Battle Botz, and boost your WPM right in the browser with zero ads.';
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'VideoGame',
+  name: 'Cool Typing Games',
+  description: pageDescription,
+  url: 'https://geurtsgaming.com/games/cool-typing-games/',
+  image: 'https://geurtsgaming.com/games/cool-typing-games/games/battle_botz.png',
+  genre: ['Educational Game', 'Typing Game', 'Multiplayer Arcade'],
+  gamePlatform: ['Web Browser', 'Chromebook', 'Desktop', 'Tablet'],
+  applicationCategory: 'Game',
+  isAccessibleForFree: true,
+  offers: {
+    '@type': 'Offer',
+    price: '0',
+    priceCurrency: 'USD',
+  },
+  sameAs: [CTG_PLAY_URL],
+};
+---
+
+<Base
+  title="Cool Typing Games"
+  description={pageDescription}
+  image="/games/cool-typing-games/games/battle_botz.png"
+>
+  <script slot="head" type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <div
+    class="ctg-page"
+    id="ctg-root"
+    style={`--ctg-accent: #3be7ff; --ctg-glow-low: ${initialRacer.glowLow}; --ctg-glow-high: ${initialRacer.glowHigh};`}
+  >
+    <!-- ==================== 1. COSMIC KEYBOARD SKIRMISH HERO ==================== -->
+    <section class="ctg-hero" id="ctg-hero" aria-labelledby="ctg-page-title">
+      <canvas id="ctg-skirmish-canvas" class="skirmish-canvas" aria-hidden="true"></canvas>
+
+      <div class="wrap hero-inner">
+        <div class="hero-topbar">
+          <a href="/games/" class="crumb">
+            <span aria-hidden="true">←</span> All Games
+          </a>
+          <div class="hero-badges">
+            <span class="pill highlight-pill">100% Free to Play</span>
+            <span class="pill">Ages 6–14</span>
+            <span class="pill">Up to 25 Players</span>
+            <span class="pill">Browser · Zero Ads</span>
+          </div>
+          <button type="button" class="sfx-toggle" data-sfx-toggle aria-pressed="false">
+            <span data-sfx-icon aria-hidden="true">🔇</span>
+            <span data-sfx-label>Arcade SFX: Off</span>
+          </button>
+        </div>
+
+        <div class="hero-grid">
+          <div class="hero-copy">
+            <h1 id="ctg-page-title" class="visually-hidden">
+              Cool Typing Games — Free Multiplayer Typing Games for Kids &amp; Classrooms
+            </h1>
+            <img
+              src={CTG_SMALL_LOGO}
+              alt="Cool Typing Games official logo"
+              class="ctg-logo"
+              width="621"
+              height="150"
+              fetchpriority="high"
+            />
+            <p class="hero-kicker">Race Classmates. Battle Robots. Type at Warp Speed.</p>
+            <p class="hero-lede">
+              Turn typing practice into the loudest, happiest five minutes of class! Jump straight into{' '}
+              <strong>10 colorful multiplayer arcade games</strong>—from 25-player <em>Track Meet</em> sprints to{' '}
+              <em>Battle Botz</em> and <em>Cookies for Fish</em>—right in your browser with no downloads and no ads.
+            </p>
+
+            <!-- Interactive 3D Tactile Keycaps -->
+            <div class="hero-keydeck" aria-label="Interactive Space Word Zapper Keycaps">
+              <div class="keycap-row">
+                {['C', 'O', 'O', 'L'].map((letter, i) => (
+                  <button
+                    type="button"
+                    class="keycap-3d"
+                    data-hero-key={letter}
+                    data-key-slot={i}
+                    aria-label={`Zap a cosmic word with key ${letter}`}
+                  >
+                    <span>{letter}</span>
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  class="keycap-3d zap-cap"
+                  data-hero-key="ZAP"
+                  aria-label="Fire laser at floating cosmic word"
+                >
+                  <span>⚡ ZAP</span>
+                </button>
+              </div>
+              <p class="keydeck-status">
+                <span>Press any letter key or tap a keycap to zap drifting space words!</span>
+                <strong id="zap-counter">Zapped: 0</strong>
+              </p>
+            </div>
+
+            <div class="cta-row">
+              <a href={CTG_PLAY_URL} target="_blank" rel="noopener" class="arcade-btn ctg-primary">
+                <span>Play Free Now</span>
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M5 11L11 5M11 5H6M11 5v5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </a>
+              <a href="#turbo-dash" class="arcade-btn ctg-gold">
+                <span aria-hidden="true">🏁</span>
+                <span>Play 15s Turbo Dash</span>
+              </a>
+              <a href="#arcade-wall" class="arcade-btn ctg-ghost">
+                <span>All 10 Games ↓</span>
+              </a>
+            </div>
+          </div>
+
+          <!-- Tobor Animated Portal -->
+          <div class="portal-col">
+            <div class="portal-frame" id="tobor-portal">
+              <div class="portal-ring" aria-hidden="true"></div>
+              <a
+                href={CTG_PLAY_URL}
+                target="_blank"
+                rel="noopener"
+                class="portal-link"
+                aria-label="Play Cool Typing Games free in a new tab"
+              >
+                <video
+                  id="ctg-hero-video"
+                  class="portal-video"
+                  src={CTG_HERO_VIDEO}
+                  poster="/games/cool-typing-games/games/turbo_racers.png"
+                  autoplay
+                  loop
+                  muted
+                  playsinline
+                  preload="metadata"
+                ></video>
+              </a>
+              <div class="portal-chip">
+                <img src={CTG_ROBOT_HEAD} alt="" width="34" height="34" aria-hidden="true" />
+                <div>
+                  <strong>Instant Nickname Play</strong>
+                  <span>Click Tobor’s portal to jump straight into live heats</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 2. PLAYABLE TURBO WPM DASH ==================== -->
+    <section class="section dash-section" id="turbo-dash" aria-labelledby="dash-heading">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow ctg-eyebrow">Playable Mini-Challenge · Right on This Page</p>
+          <h2 id="dash-heading">15-Second Turbo WPM Dash</h2>
+          <p class="muted">
+            Click the track below and type the glowing phrase (or tap the quick-keys on mobile/tablet) to boost{' '}
+            <strong id="dash-intro-racer">{initialRacer.name}</strong> past Rival Tobor!
+          </p>
+        </div>
+
+        <div class="dash-cabinet">
+          <div class="dash-telemetry" aria-live="polite">
+            <div class="tele-box">
+              <span class="tele-label">Speed</span>
+              <strong class="tele-val"><span id="dash-wpm">0</span> <small>WPM</small></strong>
+            </div>
+            <div class="tele-box">
+              <span class="tele-label">Accuracy</span>
+              <strong class="tele-val"><span id="dash-acc">100</span><small>%</small></strong>
+            </div>
+            <div class="tele-box">
+              <span class="tele-label">Streak</span>
+              <strong class="tele-val streak"><span id="dash-streak">0</span> <small>🔥</small></strong>
+            </div>
+            <button type="button" class="arcade-btn ctg-mini" id="dash-new-phrase">
+              New Phrase ↻
+            </button>
+          </div>
+
+          <!-- 2-Lane Stadium Race Track -->
+          <div class="race-stadium">
+            <div class="race-lane player-lane">
+              <div class="lane-meta">
+                <span class="lane-badge you">YOU · <span id="dash-player-name">{initialRacer.name}</span></span>
+                <span class="lane-pct" id="dash-player-pct">0%</span>
+              </div>
+              <div class="track-rail">
+                <div class="nitro-trail" id="dash-player-trail" style="width: 0%"></div>
+                <img
+                  src={initialRacer.img}
+                  alt={initialRacer.name}
+                  class="racer-token"
+                  id="dash-player-sprite"
+                  style="left: 0%"
+                  width="64"
+                  height="64"
+                />
+                <span class="finish-flag" aria-hidden="true">🏁</span>
+              </div>
+            </div>
+
+            <div class="race-lane rival-lane">
+              <div class="lane-meta">
+                <span class="lane-badge rival">RIVAL · Tobor Bot</span>
+                <span class="lane-pct" id="dash-rival-pct">0%</span>
+              </div>
+              <div class="track-rail">
+                <div class="nitro-trail rival-trail" id="dash-rival-trail" style="width: 0%"></div>
+                <img
+                  src="/games/cool-typing-games/avatars/tobor_robot.png"
+                  alt="Rival Tobor"
+                  class="racer-token"
+                  id="dash-rival-sprite"
+                  style="left: 0%"
+                  width="64"
+                  height="64"
+                />
+                <span class="finish-flag" aria-hidden="true">🏁</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Focusable Typing Prompt Surface -->
+          <div
+            class="prompt-surface"
+            id="dash-board"
+            tabindex="0"
+            role="region"
+            aria-label="Turbo WPM Dash typing track — type the highlighted letters"
+          >
+            <div class="prompt-hint" id="dash-status-hint">
+              ⌨️ Start typing on your keyboard—or tap the glowing quick-keys below!
+            </div>
+            <div class="prompt-chars" id="dash-chars" aria-live="off">
+              {initialPrompt.split('').map((ch, idx) => (
+                <span class:list={['char-tile', { current: idx === 0, space: ch === ' ' }]}>
+                  {ch === ' ' ? '␣' : ch}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <!-- Touch / Tablet Quick-Key Deck -->
+          <div class="quick-keys-wrap">
+            <span class="quick-label">Touch / Quick Keys:</span>
+            <div class="quick-keys" id="dash-quick-keys" role="group" aria-label="On-screen typing buttons"></div>
+          </div>
+
+          <!-- Finish Podium Banner -->
+          <div class="dash-finish" id="dash-finish" hidden>
+            <div class="medal-badge" id="dash-medal">🥇 GOLD MEDAL</div>
+            <div class="finish-copy">
+              <h3 id="dash-finish-title">Photo Finish Victory!</h3>
+              <p id="dash-finish-summary">
+                Awesome sprint! Ready to test your speed against real classmates across 10 full games?
+              </p>
+            </div>
+            <div class="finish-actions">
+              <button type="button" class="arcade-btn ctg-mini" id="dash-replay">
+                Race Again ↻
+              </button>
+              <a href={CTG_PLAY_URL} target="_blank" rel="noopener" class="arcade-btn ctg-primary">
+                Race Live on CoolTypingGames.com ↗
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 3. CHOOSE YOUR RACER POD SELECTOR ==================== -->
+    <section class="section racers-section" id="racer-pods" aria-labelledby="racers-heading">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow ctg-eyebrow">Color-Shifting Character Pods</p>
+          <h2 id="racers-heading">Choose Your Cosmic Racer</h2>
+          <p class="muted">
+            Click any pod to shift the page’s neon theme, inspect their trading-card stats, and put them into Lane 1 of
+            your Turbo Dash above!
+          </p>
+        </div>
+
+        <div class="pods-grid" role="group" aria-label="Select a Cool Typing Games character">
+          {CTG_RACERS.map((racer, idx) => (
+            <button
+              type="button"
+              class:list={['racer-pod', { active: idx === 0, mystery: Boolean(racer.mystery) }]}
+              data-racer-pod
+              data-racer-id={racer.id}
+              style={`--pod-accent: ${racer.accent}`}
+              aria-pressed={idx === 0 ? 'true' : 'false'}
+            >
+              <span class="pod-ring">
+                <img src={racer.img} alt={racer.name} width="96" height="96" loading="lazy" />
+              </span>
+              <strong class="pod-name">{racer.name}</strong>
+              <span class="pod-species">{racer.species}</span>
+            </button>
+          ))}
+        </div>
+
+        <!-- Holographic Trading Card -->
+        <div class="bio-card" id="racer-bio-card">
+          <div class="bio-art">
+            <img
+              src={initialRacer.img}
+              alt={initialRacer.name}
+              id="bio-img"
+              width="240"
+              height="240"
+              loading="lazy"
+            />
+          </div>
+          <div class="bio-details">
+            <div class="bio-header">
+              <span class="bio-tag" id="bio-species">{initialRacer.species} · {initialRacer.homeworld}</span>
+              <h3 id="bio-name">{initialRacer.name}</h3>
+            </div>
+            <p class="bio-cheer" id="bio-cheer">“{initialRacer.cheer}”</p>
+            <div class="bio-traits">
+              <div class="trait-box">
+                <span class="trait-label">❤️ Loves</span>
+                <div class="trait-pills" id="bio-likes">
+                  {initialRacer.likes.map((item) => <span class="trait-pill good">{item}</span>)}
+                </div>
+              </div>
+              <div class="trait-box">
+                <span class="trait-label">⚡ Avoids</span>
+                <div class="trait-pills" id="bio-dislikes">
+                  {initialRacer.dislikes.map((item) => <span class="trait-pill warn">{item}</span>)}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cookies for Fish Cameo Strip -->
+        <div class="fish-cameo">
+          <div class="fish-copy">
+            <span class="fish-tag">BONUS AQUATIC SQUAD</span>
+            <strong>Meet the Stars of <em>Cookies for Fish</em></strong>
+            <p class="muted">Swim through kitchen mazes chomping warm chocolate-chip cookies!</p>
+          </div>
+          <div class="fish-avatars">
+            {CTG_FISH_HEROES.map((fish) => (
+              <figure class="fish-chip">
+                <img src={fish.img} alt={fish.name} width="64" height="64" loading="lazy" />
+                <figcaption>{fish.name}</figcaption>
+              </figure>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 4. 10-GAME FILTERABLE ARCADE WALL ==================== -->
+    <section class="section wall-section" id="arcade-wall" aria-labelledby="wall-heading">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow ctg-eyebrow">Official 10-Game Lineup</p>
+          <h2 id="wall-heading">Explore Every Typing Arena</h2>
+          <p class="muted">
+            Filter by classroom size or typing skill, preview the live game stage, and launch straight into any mode for
+            free.
+          </p>
+        </div>
+
+        <!-- Stage Spotlight Preview -->
+        <div class="stage-spotlight" id="stage-spotlight">
+          <img
+            src={initialGame.bgImg}
+            alt=""
+            class="stage-bg"
+            id="spotlight-bg"
+            width="1200"
+            height="420"
+            loading="lazy"
+            aria-hidden="true"
+          />
+          <div class="stage-scrim" aria-hidden="true"></div>
+          <div class="stage-inner">
+            <img
+              src={initialGame.cardImg}
+              alt={`${initialGame.title} preview`}
+              class="stage-thumb"
+              id="spotlight-card"
+              width="340"
+              height="204"
+              loading="lazy"
+            />
+            <div class="stage-info">
+              <div class="stage-pills">
+                <span class="pill highlight-pill" id="spotlight-players">{initialGame.players}</span>
+                <span class="pill" id="spotlight-mode">{initialGame.modeBadge}</span>
+                <span class="pill" id="spotlight-skill">Skill: {initialGame.skillFocus}</span>
+              </div>
+              <h3 id="spotlight-title">{initialGame.title}</h3>
+              <p id="spotlight-desc">{initialGame.description}</p>
+              <a
+                href={CTG_PLAY_URL}
+                target="_blank"
+                rel="noopener"
+                class="arcade-btn ctg-primary"
+                id="spotlight-cta"
+              >
+                Launch {initialGame.title} Free ↗
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <!-- Category Filters -->
+        <div class="filter-bar" role="group" aria-label="Filter typing games by mode">
+          {CTG_CATEGORIES.map((cat, idx) => (
+            <button
+              type="button"
+              class:list={['filter-btn', { active: idx === 0 }]}
+              data-ctg-filter={cat.id}
+              aria-pressed={idx === 0 ? 'true' : 'false'}
+            >
+              {cat.label}
+            </button>
+          ))}
+        </div>
+
+        <!-- 10 Arcade Cabinets Grid -->
+        <div class="cabinets-grid" id="cabinets-grid">
+          {CTG_GAMES.map((g, idx) => (
+            <article
+              class:list={['cabinet-card', { selected: idx === 0 }]}
+              data-game-card
+              data-game-id={g.id}
+              data-categories={g.categories.join(',')}
+              style={`--cab-accent: ${g.accent}`}
+            >
+              <button
+                type="button"
+                class="cab-media-btn"
+                data-preview-game={g.id}
+                aria-label={`Preview ${g.title} stage`}
+              >
+                <img src={g.cardImg} alt={`${g.title} game artwork`} width="460" height="276" loading="lazy" />
+                <span class="cab-players">{g.players}</span>
+                <span class="cab-mode">{g.modeBadge}</span>
+              </button>
+              <div class="cab-body">
+                <div class="cab-skill">{g.skillFocus}</div>
+                <h3>{g.title}</h3>
+                <p class="muted">{g.description}</p>
+                <div class="cab-actions">
+                  <button type="button" class="cab-preview-link" data-preview-game={g.id}>
+                    Preview Stage ↑
+                  </button>
+                  <a href={CTG_PLAY_URL} target="_blank" rel="noopener" class="cab-play-link">
+                    Play Free ↗
+                  </a>
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 5. TEACHERS, PARENTS & CROSS-LINK ==================== -->
+    <section class="section trust-section" aria-labelledby="trust-heading">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow ctg-eyebrow">Built for Classrooms &amp; Curious Kids</p>
+          <h2 id="trust-heading">Zero Setup. Whole-Class Smiles.</h2>
+        </div>
+
+        <div class="trust-grid">
+          <div class="trust-card">
+            <span class="trust-icon" aria-hidden="true">💻</span>
+            <h3>Chromebook &amp; Browser Ready</h3>
+            <p class="muted">
+              Nothing to install or whitelist beyond the web page. Students can pick a fun nickname and click
+              <strong>“Let’s Play!”</strong> in seconds—or <a href={CTG_SIGNUP_URL} target="_blank" rel="noopener" class="inline-link">create a free account</a> to save XP and unlockable avatars.
+            </p>
+          </div>
+
+          <div class="trust-card">
+            <span class="trust-icon" aria-hidden="true">🏆</span>
+            <h3>1-to-25 Player Classroom Heats</h3>
+            <p class="muted">
+              Run whole-class sprints in <em>Track Meet</em>, team relays in <em>Tug of War</em>, or calm accuracy
+              sessions in <em>Gone Fishing</em> where careful spelling beats button-mashing.
+            </p>
+          </div>
+
+          <div class="trust-card">
+            <span class="trust-icon" aria-hidden="true">🛡️</span>
+            <h3>Kid-Safe &amp; Ad-Free</h3>
+            <p class="muted">
+              No behavioral ad trackers, no noisy pop-ups, and clear family commitments. Read our plain-English{' '}
+              <a href="/privacy/" class="inline-link">Privacy &amp; COPPA Policy</a> and{' '}
+              <a href="/security/" class="inline-link">Security</a> pages anytime.
+            </p>
+          </div>
+        </div>
+
+        <div class="ctg-finale">
+          <h2>Ready to Set a New Words-Per-Minute Record?</h2>
+          <p class="muted">Pick your racer, invite your friends or class, and jump into all 10 typing games free.</p>
+          <div class="cta-row center">
+            <a href={CTG_PLAY_URL} target="_blank" rel="noopener" class="arcade-btn ctg-primary">
+              Launch CoolTypingGames.com ↗
+            </a>
+            <a href={CTG_SIGNUP_URL} target="_blank" rel="noopener" class="arcade-btn ctg-ghost">
+              Free XP Account Sign-Up ↗
+            </a>
+          </div>
+        </div>
+
+        <div class="cross-link-bar">
+          <div>
+            <span class="cross-eyebrow">TEENS &amp; STEAM PLAYERS</span>
+            <h3>Craving high-octane wasteland action?</h3>
+            <p class="muted">
+              Check out <strong>Earl vs. The Mutants</strong> — our post-apocalyptic driving survivor roguelite out now
+              on PC &amp; Steam Deck.
+            </p>
+          </div>
+          <a href="/games/earl-vs-the-mutants/" class="btn">
+            Explore Earl vs. The Mutants →
+          </a>
+        </div>
+      </div>
+    </section>
+  </div>
+</Base>
+
+<script>
+  import {
+    CTG_RACERS,
+    CTG_GAMES,
+    DASH_PROMPTS,
+    createDashState,
+    pressDashKey,
+    computeDashStats,
+    type CtgCategory,
+  } from '../../data/ctg-showcase';
+  import {
+    isSfxEnabled,
+    toggleSfx,
+    sfxClick,
+    sfxKey,
+    sfxLaser,
+    sfxFanfare,
+  } from '../../components/games/ArcadeAudio';
+
+  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const rootEl = document.getElementById('ctg-root');
+
+  // --- 1. SFX Toggle ---
+  const sfxBtn = document.querySelector<HTMLButtonElement>('[data-sfx-toggle]');
+  const sfxIcon = document.querySelector<HTMLElement>('[data-sfx-icon]');
+  const sfxLabel = document.querySelector<HTMLElement>('[data-sfx-label]');
+
+  function renderSfxToggle(on: boolean) {
+    if (!sfxBtn || !sfxIcon || !sfxLabel) return;
+    sfxBtn.setAttribute('aria-pressed', String(on));
+    sfxIcon.textContent = on ? '🔊' : '🔇';
+    sfxLabel.textContent = on ? 'Arcade SFX: On' : 'Arcade SFX: Off';
+  }
+  renderSfxToggle(isSfxEnabled());
+  sfxBtn?.addEventListener('click', () => {
+    renderSfxToggle(toggleSfx());
+  });
+
+  // --- 2. Hero Cosmic Word-Zapper Canvas + Tactile 3D Keycaps ---
+  const heroEl = document.getElementById('ctg-hero');
+  const heroVideo = document.getElementById('ctg-hero-video') as HTMLVideoElement | null;
+  const skirmishCanvas = document.getElementById('ctg-skirmish-canvas') as HTMLCanvasElement | null;
+  const zapCounterEl = document.getElementById('zap-counter');
+  const heroKeyBtns = document.querySelectorAll<HTMLButtonElement>('[data-hero-key]');
+
+  let zappedCount = 0;
+  let triggerZapWord: ((letterHint?: string) => void) | null = null;
+
+  function pulseHeroKeycap(rawKey: string) {
+    const upper = rawKey.toUpperCase();
+    let matched = false;
+    heroKeyBtns.forEach((btn) => {
+      if (btn.dataset.heroKey === upper && !matched) {
+        matched = true;
+        btn.classList.add('pressed');
+        window.setTimeout(() => btn.classList.remove('pressed'), 180);
+      }
+    });
+    if (!matched) {
+      const zapBtn = document.querySelector<HTMLButtonElement>('[data-hero-key="ZAP"]');
+      zapBtn?.classList.add('pressed');
+      window.setTimeout(() => zapBtn?.classList.remove('pressed'), 180);
+    }
+  }
+
+  heroKeyBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const k = btn.dataset.heroKey ?? 'ZAP';
+      pulseHeroKeycap(k);
+      if (triggerZapWord) {
+        triggerZapWord(k === 'ZAP' ? undefined : k);
+      } else {
+        zappedCount += 1;
+        if (zapCounterEl) zapCounterEl.textContent = `Zapped: ${zappedCount}`;
+        sfxLaser();
+      }
+    });
+  });
+
+  if (skirmishCanvas && !prefersReducedMotion.matches) {
+    const ctx = skirmishCanvas.getContext('2d');
+    const WORDS = ['TURBO', 'ROBOT', 'BOOST', 'COOKIE', 'LASER', 'ORBIT', 'RACER', 'GOLD', 'COMBO', 'NITRO'];
+    interface FloatingWord {
+      text: string;
+      x: number;
+      y: number;
+      vx: number;
+      hue: number;
+    }
+    interface LaserBeam {
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+      life: number;
+    }
+    interface Spark {
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      life: number;
+      color: string;
+    }
+
+    let width = 0;
+    let height = 0;
+    let heroVisible = true;
+    let rafId = 0;
+    const stars: { x: number; y: number; r: number; a: number }[] = [];
+    const floatingWords: FloatingWord[] = [];
+    const beams: LaserBeam[] = [];
+    const sparks: Spark[] = [];
+
+    const resize = () => {
+      const rect = skirmishCanvas.getBoundingClientRect();
+      width = Math.max(320, rect.width);
+      height = Math.max(360, rect.height);
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      skirmishCanvas.width = Math.floor(width * dpr);
+      skirmishCanvas.height = Math.floor(height * dpr);
+      ctx?.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    resize();
+    window.addEventListener('resize', resize, { passive: true });
+
+    for (let i = 0; i < 55; i++) {
+      stars.push({
+        x: Math.random() * width,
+        y: Math.random() * height,
+        r: 0.8 + Math.random() * 1.8,
+        a: 0.2 + Math.random() * 0.65,
+      });
+    }
+    for (let i = 0; i < 6; i++) {
+      floatingWords.push({
+        text: WORDS[i % WORDS.length],
+        x: Math.random() * width,
+        y: 85 + Math.random() * (height - 150),
+        vx: 0.35 + Math.random() * 0.55,
+        hue: 175 + i * 28,
+      });
+    }
+
+    triggerZapWord = (letterHint?: string) => {
+      let target = floatingWords.find((w) => letterHint && w.text.includes(letterHint));
+      if (!target) {
+        target = floatingWords[Math.floor(Math.random() * floatingWords.length)];
+      }
+      if (!target) return;
+
+      const originX = width * 0.72;
+      const originY = height * 0.52;
+      beams.push({ x1: originX, y1: originY, x2: target.x + 28, y2: target.y - 4, life: 1 });
+      for (let s = 0; s < 14; s++) {
+        const angle = (Math.PI * 2 * s) / 14;
+        const speed = 1.5 + Math.random() * 3.2;
+        sparks.push({
+          x: target.x + 24,
+          y: target.y - 4,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 1,
+          color: s % 2 === 0 ? '#3be7ff' : '#ffd137',
+        });
+      }
+
+      target.text = WORDS[Math.floor(Math.random() * WORDS.length)];
+      target.x = -90 - Math.random() * 80;
+      target.y = 85 + Math.random() * Math.max(140, height - 160);
+
+      zappedCount += 1;
+      if (zapCounterEl) zapCounterEl.textContent = `Zapped: ${zappedCount}`;
+      sfxLaser();
+    };
+
+    const draw = () => {
+      if (!ctx || !heroVisible || document.hidden) {
+        rafId = 0;
+        return;
+      }
+      ctx.clearRect(0, 0, width, height);
+
+      for (const st of stars) {
+        ctx.fillStyle = `rgba(236, 223, 210, ${st.a})`;
+        ctx.beginPath();
+        ctx.arc(st.x, st.y, st.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.font = '800 13px system-ui, -apple-system, sans-serif';
+      for (const w of floatingWords) {
+        w.x += w.vx;
+        if (w.x > width + 80) {
+          w.x = -90;
+          w.y = 85 + Math.random() * Math.max(140, height - 160);
+        }
+        ctx.fillStyle = `hsla(${w.hue}, 95%, 72%, 0.24)`;
+        ctx.fillText(w.text, w.x, w.y);
+      }
+
+      for (let i = beams.length - 1; i >= 0; i--) {
+        const b = beams[i];
+        b.life -= 0.08;
+        if (b.life <= 0) {
+          beams.splice(i, 1);
+          continue;
+        }
+        ctx.strokeStyle = `rgba(59, 231, 255, ${b.life})`;
+        ctx.lineWidth = 3.5 * b.life;
+        ctx.beginPath();
+        ctx.moveTo(b.x1, b.y1);
+        ctx.lineTo(b.x2, b.y2);
+        ctx.stroke();
+      }
+
+      for (let i = sparks.length - 1; i >= 0; i--) {
+        const sp = sparks[i];
+        sp.x += sp.vx;
+        sp.y += sp.vy;
+        sp.life -= 0.045;
+        if (sp.life <= 0) {
+          sparks.splice(i, 1);
+          continue;
+        }
+        ctx.globalAlpha = sp.life;
+        ctx.fillStyle = sp.color;
+        ctx.beginPath();
+        ctx.arc(sp.x, sp.y, 2.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      rafId = window.requestAnimationFrame(draw);
+    };
+
+    const ensureLoop = () => {
+      if (!rafId && heroVisible && !document.hidden && !prefersReducedMotion.matches) {
+        rafId = window.requestAnimationFrame(draw);
+      }
+    };
+
+    if (heroEl) {
+      const io = new IntersectionObserver(
+        (entries) => {
+          heroVisible = entries[0]?.isIntersecting ?? true;
+          if (heroVisible) {
+            heroVideo?.play().catch(() => {});
+            ensureLoop();
+          } else {
+            heroVideo?.pause();
+          }
+        },
+        { threshold: 0.05 },
+      );
+      io.observe(heroEl);
+    }
+    document.addEventListener('visibilitychange', ensureLoop);
+    ensureLoop();
+  } else if (prefersReducedMotion.matches) {
+    heroVideo?.pause();
+  }
+
+  // --- 3. Playable 15-Second Turbo WPM Dash ---
+  let promptIdx = 0;
+  let dashState = createDashState(DASH_PROMPTS[promptIdx]);
+  let rivalPct = 0;
+  let rivalTimer: number | null = null;
+  let dashVisible = false;
+
+  const dashSection = document.getElementById('turbo-dash');
+  const dashBoard = document.getElementById('dash-board');
+  const dashCharsEl = document.getElementById('dash-chars');
+  const dashQuickKeysEl = document.getElementById('dash-quick-keys');
+  const dashWpmEl = document.getElementById('dash-wpm');
+  const dashAccEl = document.getElementById('dash-acc');
+  const dashStreakEl = document.getElementById('dash-streak');
+  const dashPlayerPctEl = document.getElementById('dash-player-pct');
+  const dashPlayerTrailEl = document.getElementById('dash-player-trail');
+  const dashPlayerSpriteEl = document.getElementById('dash-player-sprite') as HTMLImageElement | null;
+  const dashPlayerNameEl = document.getElementById('dash-player-name');
+  const dashIntroRacerEl = document.getElementById('dash-intro-racer');
+  const dashRivalPctEl = document.getElementById('dash-rival-pct');
+  const dashRivalTrailEl = document.getElementById('dash-rival-trail');
+  const dashRivalSpriteEl = document.getElementById('dash-rival-sprite');
+  const dashFinishEl = document.getElementById('dash-finish');
+  const dashMedalEl = document.getElementById('dash-medal');
+  const dashFinishTitleEl = document.getElementById('dash-finish-title');
+  const dashFinishSummaryEl = document.getElementById('dash-finish-summary');
+  const dashStatusHintEl = document.getElementById('dash-status-hint');
+
+  if (dashSection) {
+    const dashIo = new IntersectionObserver(
+      (entries) => {
+        dashVisible = entries[0]?.isIntersecting ?? false;
+      },
+      { threshold: 0.35 },
+    );
+    dashIo.observe(dashSection);
+  }
+
+  function stopRivalTicker() {
+    if (rivalTimer !== null) {
+      window.clearInterval(rivalTimer);
+      rivalTimer = null;
+    }
+  }
+
+  function startRivalTicker() {
+    if (rivalTimer !== null) return;
+    rivalTimer = window.setInterval(() => {
+      if (dashState.finishedAtMs !== null) {
+        stopRivalTicker();
+        return;
+      }
+      rivalPct = Math.min(98, rivalPct + 1.35);
+      if (dashRivalPctEl) dashRivalPctEl.textContent = `${Math.round(rivalPct)}%`;
+      if (dashRivalTrailEl) dashRivalTrailEl.style.width = `${rivalPct}%`;
+      if (dashRivalSpriteEl) dashRivalSpriteEl.style.left = `${rivalPct}%`;
+
+      const stats = computeDashStats(dashState, performance.now());
+      if (dashWpmEl) dashWpmEl.textContent = String(stats.wpm);
+    }, 200);
+  }
+
+  function renderQuickKeys() {
+    if (!dashQuickKeysEl) return;
+    dashQuickKeysEl.innerHTML = '';
+    if (dashState.finishedAtMs !== null) return;
+
+    const needed = dashState.prompt[dashState.index] ?? ' ';
+    const pool = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const choices = new Set<string>([needed]);
+    choices.add(' ');
+    let guard = 0;
+    while (choices.size < 6 && guard < 40) {
+      choices.add(pool[( dashState.index * 7 + guard * 5 ) % pool.length]);
+      guard += 1;
+    }
+
+    const ordered = Array.from(choices).sort((a, b) => {
+      if (a === ' ') return 1;
+      if (b === ' ') return -1;
+      return a.localeCompare(b);
+    });
+
+    for (const key of ordered) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = key === needed ? 'qkey next-needed' : 'qkey';
+      btn.textContent = key === ' ' ? '␣ SPACE' : key;
+      btn.setAttribute('aria-label', key === ' ' ? 'Type Space' : `Type letter ${key}`);
+      btn.addEventListener('click', () => handleDashInput(key));
+      dashQuickKeysEl.appendChild(btn);
+    }
+  }
+
+  function renderDash() {
+    const now = performance.now();
+    const stats = computeDashStats(dashState, now);
+
+    if (dashWpmEl) dashWpmEl.textContent = String(stats.wpm);
+    if (dashAccEl) dashAccEl.textContent = String(stats.accuracyPct);
+    if (dashStreakEl) dashStreakEl.textContent = String(dashState.streak);
+
+    if (dashPlayerPctEl) dashPlayerPctEl.textContent = `${stats.progressPct}%`;
+    if (dashPlayerTrailEl) dashPlayerTrailEl.style.width = `${stats.progressPct}%`;
+    if (dashPlayerSpriteEl) dashPlayerSpriteEl.style.left = `${stats.progressPct}%`;
+
+    if (dashCharsEl) {
+      dashCharsEl.innerHTML = '';
+      dashState.prompt.split('').forEach((ch, idx) => {
+        const span = document.createElement('span');
+        span.className = 'char-tile';
+        if (idx < dashState.index) span.classList.add('typed');
+        else if (idx === dashState.index) span.classList.add('current');
+        if (ch === ' ') span.classList.add('space');
+        span.textContent = ch === ' ' ? '␣' : ch;
+        dashCharsEl.appendChild(span);
+      });
+    }
+
+    renderQuickKeys();
+
+    if (dashState.finishedAtMs !== null) {
+      stopRivalTicker();
+      if (dashFinishEl) dashFinishEl.hidden = false;
+      const beatTobor = rivalPct < 100;
+      const medalMap = {
+        gold: '🥇 GOLD MEDAL',
+        silver: '🥈 SILVER MEDAL',
+        bronze: '🥉 BRONZE MEDAL',
+      } as const;
+      if (dashMedalEl) dashMedalEl.textContent = medalMap[stats.medal];
+      if (dashFinishTitleEl) {
+        dashFinishTitleEl.textContent = beatTobor
+          ? `You Beat Rival Tobor at ${stats.wpm} WPM!`
+          : `Finished Strong at ${stats.wpm} WPM!`;
+      }
+      if (dashFinishSummaryEl) {
+        dashFinishSummaryEl.textContent = `Accuracy: ${stats.accuracyPct}% · Best Streak: ${dashState.bestStreak} keys. Jump into CoolTypingGames.com for 25-player Track Meet heats!`;
+      }
+      if (dashStatusHintEl) {
+        dashStatusHintEl.textContent = '🏁 Finish line crossed! Hit Race Again for a new phrase.';
+      }
+    }
+  }
+
+  function resetDash(advancePhrase: boolean) {
+    stopRivalTicker();
+    if (advancePhrase) {
+      promptIdx = (promptIdx + 1) % DASH_PROMPTS.length;
+    }
+    dashState = createDashState(DASH_PROMPTS[promptIdx]);
+    rivalPct = 0;
+    if (dashRivalPctEl) dashRivalPctEl.textContent = '0%';
+    if (dashRivalTrailEl) dashRivalTrailEl.style.width = '0%';
+    if (dashRivalSpriteEl) dashRivalSpriteEl.style.left = '0%';
+    if (dashFinishEl) dashFinishEl.hidden = true;
+    if (dashStatusHintEl) {
+      dashStatusHintEl.textContent = '⌨️ Start typing on your keyboard—or tap the glowing quick-keys below!';
+    }
+    renderDash();
+  }
+
+  function handleDashInput(key: string) {
+    if (dashState.finishedAtMs !== null) return;
+    const step = pressDashKey(dashState, key, performance.now());
+    if (step.state === dashState) return;
+    dashState = step.state;
+
+    if (dashState.startedAtMs !== null && dashState.finishedAtMs === null) {
+      startRivalTicker();
+      if (dashStatusHintEl) {
+        dashStatusHintEl.textContent = '🔥 Boost active! Keep typing cleanly to stay ahead of Tobor!';
+      }
+    }
+
+    if (!step.hit) {
+      dashBoard?.classList.remove('typo-shake');
+      void dashBoard?.offsetWidth;
+      dashBoard?.classList.add('typo-shake');
+    }
+
+    if (step.completedNow) {
+      sfxFanfare();
+    } else {
+      sfxKey(step.hit);
+    }
+    renderDash();
+  }
+
+  renderDash();
+
+  document.getElementById('dash-new-phrase')?.addEventListener('click', () => {
+    sfxClick();
+    resetDash(true);
+    dashBoard?.focus();
+  });
+  document.getElementById('dash-replay')?.addEventListener('click', () => {
+    sfxClick();
+    resetDash(true);
+    dashBoard?.focus();
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const activeTag = (document.activeElement as HTMLElement | null)?.tagName;
+    if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') return;
+
+    const boardFocused = document.activeElement === dashBoard;
+    const raceInProgress = dashState.startedAtMs !== null && dashState.finishedAtMs === null;
+
+    if (e.key.length === 1 && /^[a-zA-Z ]$/.test(e.key)) {
+      if (boardFocused || (dashVisible && (raceInProgress || e.key !== ' '))) {
+        if (e.key === ' ') e.preventDefault();
+        handleDashInput(e.key);
+        return;
+      }
+      if (/^[a-zA-Z]$/.test(e.key)) {
+        pulseHeroKeycap(e.key);
+        if (triggerZapWord) triggerZapWord(e.key.toUpperCase());
+      }
+    }
+  });
+
+  // --- 4. Color-Shifting Racer Pod Selector ---
+  const podBtns = document.querySelectorAll<HTMLButtonElement>('[data-racer-pod]');
+  const bioImg = document.getElementById('bio-img') as HTMLImageElement | null;
+  const bioSpecies = document.getElementById('bio-species');
+  const bioName = document.getElementById('bio-name');
+  const bioCheer = document.getElementById('bio-cheer');
+  const bioLikes = document.getElementById('bio-likes');
+  const bioDislikes = document.getElementById('bio-dislikes');
+
+  podBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const racer = CTG_RACERS.find((r) => r.id === btn.dataset.racerId);
+      if (!racer) return;
+      sfxClick();
+
+      podBtns.forEach((b) => {
+        const active = b === btn;
+        b.classList.toggle('active', active);
+        b.setAttribute('aria-pressed', String(active));
+      });
+
+      if (rootEl) {
+        rootEl.style.setProperty('--ctg-accent', racer.accent);
+        rootEl.style.setProperty('--ctg-glow-low', racer.glowLow);
+        rootEl.style.setProperty('--ctg-glow-high', racer.glowHigh);
+      }
+
+      if (bioImg) {
+        bioImg.src = racer.img;
+        bioImg.alt = racer.name;
+      }
+      if (bioSpecies) bioSpecies.textContent = `${racer.species} · ${racer.homeworld}`;
+      if (bioName) bioName.textContent = racer.name;
+      if (bioCheer) bioCheer.textContent = `“${racer.cheer}”`;
+
+      if (bioLikes) {
+        bioLikes.innerHTML = '';
+        racer.likes.forEach((item) => {
+          const span = document.createElement('span');
+          span.className = 'trait-pill good';
+          span.textContent = item;
+          bioLikes.appendChild(span);
+        });
+      }
+      if (bioDislikes) {
+        bioDislikes.innerHTML = '';
+        racer.dislikes.forEach((item) => {
+          const span = document.createElement('span');
+          span.className = 'trait-pill warn';
+          span.textContent = item;
+          bioDislikes.appendChild(span);
+        });
+      }
+
+      // Sync active racer right into Lane 1 of Turbo WPM Dash!
+      if (dashPlayerSpriteEl) {
+        dashPlayerSpriteEl.src = racer.img;
+        dashPlayerSpriteEl.alt = racer.name;
+      }
+      if (dashPlayerNameEl) dashPlayerNameEl.textContent = racer.name;
+      if (dashIntroRacerEl) dashIntroRacerEl.textContent = racer.name;
+    });
+  });
+
+  // --- 5. 10-Game Filterable Arcade Wall + Stage Spotlight ---
+  const filterBtns = document.querySelectorAll<HTMLButtonElement>('[data-ctg-filter]');
+  const cabinetCards = document.querySelectorAll<HTMLElement>('[data-game-card]');
+  const spotlightBg = document.getElementById('spotlight-bg') as HTMLImageElement | null;
+  const spotlightCard = document.getElementById('spotlight-card') as HTMLImageElement | null;
+  const spotlightPlayers = document.getElementById('spotlight-players');
+  const spotlightMode = document.getElementById('spotlight-mode');
+  const spotlightSkill = document.getElementById('spotlight-skill');
+  const spotlightTitle = document.getElementById('spotlight-title');
+  const spotlightDesc = document.getElementById('spotlight-desc');
+  const spotlightCta = document.getElementById('spotlight-cta');
+  const spotlightEl = document.getElementById('stage-spotlight');
+
+  function selectSpotlightGame(gameId: string, scrollIntoStage: boolean) {
+    const g = CTG_GAMES.find((item) => item.id === gameId);
+    if (!g) return;
+    if (spotlightBg) spotlightBg.src = g.bgImg;
+    if (spotlightCard) {
+      spotlightCard.src = g.cardImg;
+      spotlightCard.alt = `${g.title} preview`;
+    }
+    if (spotlightPlayers) spotlightPlayers.textContent = g.players;
+    if (spotlightMode) spotlightMode.textContent = g.modeBadge;
+    if (spotlightSkill) spotlightSkill.textContent = `Skill: ${g.skillFocus}`;
+    if (spotlightTitle) spotlightTitle.textContent = g.title;
+    if (spotlightDesc) spotlightDesc.textContent = g.description;
+    if (spotlightCta) spotlightCta.textContent = `Launch ${g.title} Free ↗`;
+
+    cabinetCards.forEach((card) => {
+      card.classList.toggle('selected', card.dataset.gameId === g.id);
+    });
+
+    if (scrollIntoStage && spotlightEl) {
+      spotlightEl.scrollIntoView({ behavior: prefersReducedMotion.matches ? 'auto' : 'smooth', block: 'nearest' });
+    }
+  }
+
+  document.querySelectorAll<HTMLButtonElement>('[data-preview-game]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sfxClick();
+      selectSpotlightGame(btn.dataset.previewGame ?? '', true);
+    });
+  });
+
+  filterBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const cat = (btn.dataset.ctgFilter ?? 'all') as CtgCategory;
+      sfxClick();
+
+      filterBtns.forEach((b) => {
+        const active = b === btn;
+        b.classList.toggle('active', active);
+        b.setAttribute('aria-pressed', String(active));
+      });
+
+      let firstVisibleId: string | null = null;
+      cabinetCards.forEach((card) => {
+        const cats = (card.dataset.categories ?? '').split(',');
+        const show = cat === 'all' || cats.includes(cat);
+        card.hidden = !show;
+        if (show && !firstVisibleId) {
+          firstVisibleId = card.dataset.gameId ?? null;
+        }
+      });
+
+      if (firstVisibleId) {
+        selectSpotlightGame(firstVisibleId, false);
+      }
+    });
+  });
+</script>
+
+<style>
+  .ctg-page {
+    --ctg-gold: #ffd137;
+    --ctg-orange: #ff8907;
+    background:
+      radial-gradient(ellipse 75% 32% at 50% 10%, color-mix(in srgb, var(--ctg-accent) 22%, transparent), transparent 72%),
+      linear-gradient(180deg, #06133b 0%, var(--navy) 48%, #07143d 100%);
+  }
+
+  .ctg-eyebrow {
+    color: var(--ctg-accent);
+  }
+
+  /* ---- 1. Hero ---- */
+  .ctg-hero {
+    position: relative;
+    padding-top: clamp(104px, 13vw, 136px);
+    padding-bottom: clamp(54px, 8vw, 92px);
+    overflow: hidden;
+    border-bottom: 2px solid color-mix(in srgb, var(--ctg-accent) 38%, transparent);
+    background:
+      radial-gradient(circle at 75% 48%, color-mix(in srgb, var(--ctg-accent) 24%, transparent), transparent 52%),
+      linear-gradient(180deg, #040d2b 0%, #081849 100%);
+  }
+
+  .skirmish-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  .hero-inner {
+    position: relative;
+    z-index: 1;
+  }
+
+  .hero-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: clamp(22px, 3.5vw, 36px);
+  }
+
+  .crumb {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: rgba(8, 20, 62, 0.8);
+    border: 1px solid color-mix(in srgb, var(--ctg-accent) 45%, transparent);
+    font-family: var(--font-display);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--sand);
+  }
+  .crumb:hover {
+    border-color: var(--ctg-accent);
+    color: var(--ctg-accent);
+  }
+
+  .hero-badges {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .pill {
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    background: rgba(11, 25, 74, 0.82);
+    border: 1px solid rgba(236, 223, 210, 0.24);
+    color: var(--sand);
+  }
+  .highlight-pill {
+    background: color-mix(in srgb, var(--ctg-accent) 22%, rgba(8, 24, 73, 0.9));
+    border-color: var(--ctg-accent);
+    color: #fff;
+  }
+
+  .sfx-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    padding: 7px 14px;
+    border-radius: 999px;
+    background: rgba(11, 25, 74, 0.86);
+    border: 1px solid color-mix(in srgb, var(--ctg-accent) 48%, transparent);
+    color: var(--sand);
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .sfx-toggle[aria-pressed='true'] {
+    background: color-mix(in srgb, var(--ctg-accent) 28%, #081849);
+    border-color: var(--ctg-gold);
+    color: #fff;
+  }
+
+  .hero-grid {
+    display: grid;
+    grid-template-columns: 1.15fr 0.85fr;
+    gap: clamp(24px, 4vw, 48px);
+    align-items: center;
+  }
+
+  .ctg-logo {
+    width: min(100%, 460px);
+    height: auto;
+    filter: drop-shadow(0 12px 24px rgba(0, 0, 0, 0.55));
+    margin-bottom: 16px;
+  }
+
+  .hero-kicker {
+    font-family: var(--font-display);
+    font-size: clamp(1rem, 1.85vw, 1.28rem);
+    font-weight: 900;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ctg-gold);
+    margin-bottom: 12px;
+  }
+
+  .hero-lede {
+    font-size: clamp(1rem, 1.4vw, 1.12rem);
+    color: #f4ebe0;
+    max-width: 58ch;
+    margin-bottom: 20px;
+  }
+
+  /* 3D Keycaps */
+  .hero-keydeck {
+    padding: 14px 16px;
+    margin-bottom: 22px;
+    border-radius: 16px;
+    background: rgba(7, 17, 54, 0.78);
+    border: 1px solid color-mix(in srgb, var(--ctg-accent) 36%, transparent);
+    max-width: 540px;
+  }
+  .keycap-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+  .keycap-3d {
+    min-width: 52px;
+    height: 50px;
+    padding: 0 14px;
+    border-radius: 12px;
+    background: linear-gradient(180deg, #1d398f 0%, #10225e 100%);
+    border: 2px solid color-mix(in srgb, var(--ctg-accent) 60%, #fff);
+    box-shadow: 0 5px 0 #071133, 0 8px 18px rgba(0, 0, 0, 0.4);
+    color: #fff;
+    font-family: var(--font-display);
+    font-size: 0.95rem;
+    font-weight: 900;
+    cursor: pointer;
+    transition: transform 0.08s ease, box-shadow 0.08s ease, background 0.15s ease;
+  }
+  .keycap-3d.zap-cap {
+    background: linear-gradient(180deg, #ffd137 0%, #ff8907 100%);
+    color: #081849;
+    border-color: #fff3b0;
+    box-shadow: 0 5px 0 #8c4300;
+  }
+  .keycap-3d:active,
+  .keycap-3d.pressed {
+    transform: translateY(4px);
+    box-shadow: 0 1px 0 #071133, 0 0 20px var(--ctg-accent);
+  }
+  .keydeck-status {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--silver);
+  }
+  .keydeck-status strong {
+    font-family: var(--font-display);
+    color: var(--ctg-accent);
+  }
+
+  /* Arcade Buttons */
+  .cta-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .cta-row.center {
+    justify-content: center;
+  }
+
+  .arcade-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    min-height: 48px;
+    padding: 12px 20px;
+    border-radius: 14px;
+    font-family: var(--font-display);
+    font-size: 0.84rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: transform 0.1s ease, filter 0.15s ease;
+    user-select: none;
+  }
+  .ctg-primary {
+    background: linear-gradient(180deg, var(--ctg-accent) 0%, color-mix(in srgb, var(--ctg-accent) 70%, #0a48b5) 100%);
+    color: #041226;
+    border-color: #d6fbff;
+    box-shadow: 0 5px 0 rgba(5, 32, 74, 0.95), 0 14px 28px color-mix(in srgb, var(--ctg-accent) 38%, transparent);
+  }
+  .ctg-gold {
+    background: linear-gradient(180deg, #ffd84d 0%, #ff8907 100%);
+    color: #1a0d00;
+    border-color: #fff2b2;
+    box-shadow: 0 5px 0 #8a4300, 0 14px 28px rgba(255, 160, 24, 0.35);
+  }
+  .ctg-ghost {
+    background: rgba(12, 27, 82, 0.82);
+    color: var(--sand);
+    border-color: rgba(236, 223, 210, 0.36);
+    box-shadow: 0 5px 0 #050d2e;
+  }
+  .ctg-mini {
+    min-height: 42px;
+    padding: 8px 15px;
+    font-size: 0.75rem;
+    background: rgba(16, 35, 98, 0.9);
+    color: var(--sand);
+    border-color: color-mix(in srgb, var(--ctg-accent) 55%, transparent);
+    box-shadow: 0 4px 0 #050d2e;
+  }
+  @media (hover: hover) {
+    .arcade-btn:hover {
+      filter: brightness(1.07);
+      transform: translateY(-2px);
+    }
+  }
+  .arcade-btn:active {
+    transform: translateY(3px);
+  }
+
+  /* Tobor Portal */
+  .portal-frame {
+    position: relative;
+    border-radius: 28px;
+    padding: 14px;
+    background: linear-gradient(145deg, rgba(16, 38, 108, 0.9), rgba(8, 18, 56, 0.95));
+    border: 2px solid color-mix(in srgb, var(--ctg-accent) 65%, transparent);
+    box-shadow: 0 26px 60px rgba(0, 0, 0, 0.55), 0 0 42px color-mix(in srgb, var(--ctg-accent) 26%, transparent);
+  }
+  .portal-link {
+    display: block;
+    border-radius: 18px;
+    overflow: hidden;
+    transition: transform 0.2s ease;
+  }
+  @media (hover: hover) {
+    .portal-link:hover {
+      transform: scale(1.015);
+    }
+  }
+  .portal-video {
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+    border-radius: 18px;
+    background: #061238;
+  }
+  .portal-chip {
+    margin-top: 12px;
+    padding: 10px 14px;
+    border-radius: 14px;
+    background: rgba(6, 15, 48, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .portal-chip strong {
+    display: block;
+    font-family: var(--font-display);
+    font-size: 0.8rem;
+    color: var(--ctg-gold);
+  }
+  .portal-chip span {
+    font-size: 0.82rem;
+    color: var(--silver);
+  }
+
+  /* ---- 2. Playable Turbo WPM Dash ---- */
+  .dash-cabinet {
+    margin-top: 28px;
+    padding: clamp(18px, 3.5vw, 30px);
+    border-radius: 24px;
+    background: linear-gradient(180deg, rgba(12, 28, 86, 0.92), rgba(7, 17, 54, 0.96));
+    border: 2px solid color-mix(in srgb, var(--ctg-accent) 55%, rgba(255, 255, 255, 0.16));
+    box-shadow: 0 28px 60px rgba(0, 0, 0, 0.45);
+  }
+
+  .dash-telemetry {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding-bottom: 18px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  }
+  .tele-box {
+    display: flex;
+    flex-direction: column;
+  }
+  .tele-label {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .tele-val {
+    font-family: var(--font-display);
+    font-size: 1.55rem;
+    color: #fff;
+  }
+  .tele-val.streak {
+    color: var(--ctg-gold);
+  }
+  .tele-val small {
+    font-size: 0.8rem;
+    color: var(--ctg-accent);
+  }
+
+  .race-stadium {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 18px;
+    border-radius: 18px;
+    background:
+      linear-gradient(90deg, rgba(6, 15, 48, 0.88), rgba(8, 22, 66, 0.78)),
+      url('/games/cool-typing-games/games/turbo_racers_bg.png') center / cover no-repeat;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    margin-bottom: 20px;
+  }
+
+  .lane-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+    font-family: var(--font-display);
+    font-size: 0.74rem;
+    letter-spacing: 0.1em;
+  }
+  .lane-badge.you {
+    color: var(--ctg-gold);
+  }
+  .lane-badge.rival {
+    color: #9beeff;
+  }
+
+  .track-rail {
+    position: relative;
+    height: 52px;
+    border-radius: 999px;
+    background: rgba(4, 10, 32, 0.82);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    display: flex;
+    align-items: center;
+    padding-inline: 12px 44px;
+  }
+  .nitro-trail {
+    height: 14px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--ctg-gold), var(--ctg-accent));
+    transition: width 0.14s ease;
+  }
+  .rival-trail {
+    background: linear-gradient(90deg, #5f3475, #3be7ff);
+  }
+  .racer-token {
+    position: absolute;
+    top: 50%;
+    transform: translate(-12%, -50%);
+    width: 52px;
+    height: 52px;
+    object-fit: contain;
+    filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.65));
+    transition: left 0.14s ease;
+  }
+  .finish-flag {
+    position: absolute;
+    right: 14px;
+    font-size: 1.25rem;
+  }
+
+  .prompt-surface {
+    padding: 18px 20px;
+    border-radius: 18px;
+    background: rgba(5, 12, 40, 0.9);
+    border: 2px solid color-mix(in srgb, var(--ctg-accent) 45%, transparent);
+    cursor: text;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .prompt-surface:focus {
+    outline: none;
+    border-color: var(--ctg-gold);
+    box-shadow: 0 0 0 4px rgba(255, 209, 55, 0.22);
+  }
+  .prompt-surface.typo-shake {
+    animation: typoWiggle 0.22s ease;
+    border-color: #ff5d6c;
+  }
+  @keyframes typoWiggle {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-5px); }
+    75% { transform: translateX(5px); }
+  }
+
+  .prompt-hint {
+    font-size: 0.84rem;
+    color: var(--silver);
+    margin-bottom: 12px;
+    text-align: center;
+  }
+
+  .prompt-chars {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+  }
+  :global(.char-tile) {
+    display: inline-grid;
+    place-items: center;
+    min-width: 34px;
+    height: 42px;
+    padding: 0 6px;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    font-family: var(--font-display);
+    font-size: 0.98rem;
+    font-weight: 800;
+    color: var(--sand);
+  }
+  :global(.char-tile.space) {
+    min-width: 44px;
+    color: var(--text-muted);
+  }
+  :global(.char-tile.typed) {
+    background: rgba(99, 232, 132, 0.22);
+    border-color: #63e884;
+    color: #9effb4;
+  }
+  :global(.char-tile.current) {
+    background: var(--ctg-gold);
+    border-color: #fff6c2;
+    color: #081849;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 14px rgba(255, 209, 55, 0.45);
+  }
+
+  .quick-keys-wrap {
+    margin-top: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .quick-label {
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .quick-keys {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  :global(.qkey) {
+    min-width: 48px;
+    min-height: 44px;
+    padding: 8px 14px;
+    border-radius: 10px;
+    background: rgba(24, 46, 122, 0.9);
+    border: 1.5px solid rgba(255, 255, 255, 0.25);
+    box-shadow: 0 4px 0 #061033;
+    color: #fff;
+    font-family: var(--font-display);
+    font-size: 0.85rem;
+    font-weight: 800;
+    cursor: pointer;
+  }
+  :global(.qkey.next-needed) {
+    border-color: var(--ctg-gold);
+    background: linear-gradient(180deg, #2852d6, #173391);
+    box-shadow: 0 4px 0 #061033, 0 0 16px rgba(255, 209, 55, 0.45);
+  }
+
+  .dash-finish {
+    margin-top: 20px;
+    padding: 20px 24px;
+    border-radius: 18px;
+    background: linear-gradient(135deg, rgba(59, 231, 255, 0.2), rgba(255, 209, 55, 0.22));
+    border: 2px solid var(--ctg-gold);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    flex-wrap: wrap;
+  }
+  .dash-finish[hidden] {
+    display: none;
+  }
+  .medal-badge {
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: var(--ctg-gold);
+    color: #081849;
+    font-family: var(--font-display);
+    font-size: 0.82rem;
+    font-weight: 900;
+  }
+  .finish-copy {
+    flex: 1;
+    min-width: 220px;
+  }
+  .finish-copy h3 {
+    margin-bottom: 4px;
+  }
+  .finish-copy p {
+    margin: 0;
+  }
+  .finish-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  /* ---- 3. Racer Pod Selector ---- */
+  .pods-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 12px;
+    margin: 28px 0 24px;
+  }
+  .racer-pod {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 8px;
+    border-radius: 18px;
+    background: rgba(12, 26, 78, 0.72);
+    border: 2px solid rgba(255, 255, 255, 0.14);
+    color: var(--sand);
+    cursor: pointer;
+    transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+  }
+  @media (hover: hover) {
+    .racer-pod:hover {
+      transform: translateY(-4px);
+      border-color: var(--pod-accent);
+    }
+  }
+  .racer-pod.active {
+    background: color-mix(in srgb, var(--pod-accent) 22%, rgba(8, 20, 64, 0.92));
+    border-color: var(--pod-accent);
+    box-shadow: 0 14px 30px -14px var(--pod-accent);
+  }
+  .pod-ring {
+    width: 78px;
+    height: 78px;
+    border-radius: 50%;
+    padding: 6px;
+    background: radial-gradient(circle, color-mix(in srgb, var(--pod-accent) 36%, transparent), rgba(5, 12, 40, 0.9));
+    border: 2px solid color-mix(in srgb, var(--pod-accent) 65%, transparent);
+    display: grid;
+    place-items: center;
+  }
+  .pod-ring img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+  .pod-name {
+    font-family: var(--font-display);
+    font-size: 0.74rem;
+    text-align: center;
+  }
+  .pod-species {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+  }
+
+  .bio-card {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    gap: 26px;
+    align-items: center;
+    padding: 26px;
+    border-radius: 24px;
+    background: linear-gradient(135deg, var(--ctg-glow-low), color-mix(in srgb, var(--ctg-glow-high) 55%, #081849));
+    border: 2px solid var(--ctg-accent);
+    box-shadow: 0 24px 55px -25px var(--ctg-accent);
+    transition: background 0.3s ease, border-color 0.25s ease;
+  }
+  .bio-art {
+    display: grid;
+    place-items: center;
+    padding: 14px;
+    border-radius: 20px;
+    background: radial-gradient(circle, color-mix(in srgb, var(--ctg-accent) 30%, transparent), rgba(4, 10, 32, 0.65));
+  }
+  .bio-art img {
+    max-height: 200px;
+    width: auto;
+    object-fit: contain;
+  }
+  .bio-tag {
+    display: inline-block;
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ctg-accent);
+    margin-bottom: 4px;
+  }
+  .bio-cheer {
+    font-size: 1.1rem;
+    font-weight: 800;
+    color: #fff;
+    margin-bottom: 16px;
+  }
+  .bio-traits {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .trait-label {
+    display: block;
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--silver);
+    margin-bottom: 8px;
+  }
+  .trait-pills {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  :global(.trait-pill) {
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 800;
+  }
+  :global(.trait-pill.good) {
+    background: rgba(99, 232, 132, 0.18);
+    border: 1px solid rgba(99, 232, 132, 0.55);
+    color: #c8ffd6;
+  }
+  :global(.trait-pill.warn) {
+    background: rgba(255, 137, 7, 0.18);
+    border: 1px solid rgba(255, 137, 7, 0.55);
+    color: #ffe0bd;
+  }
+
+  .fish-cameo {
+    margin-top: 20px;
+    padding: 18px 24px;
+    border-radius: 20px;
+    background: rgba(11, 27, 82, 0.74);
+    border: 1px solid rgba(59, 231, 255, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+  .fish-tag {
+    display: block;
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    color: #3be7ff;
+  }
+  .fish-copy p {
+    margin: 4px 0 0;
+    font-size: 0.88rem;
+  }
+  .fish-avatars {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .fish-chip {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: rgba(6, 15, 48, 0.8);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+  }
+  .fish-chip img {
+    width: 42px;
+    height: 42px;
+    object-fit: contain;
+  }
+  .fish-chip figcaption {
+    font-size: 0.82rem;
+    font-weight: 800;
+  }
+
+  /* ---- 4. 10-Game Arcade Wall ---- */
+  .stage-spotlight {
+    position: relative;
+    margin: 28px 0 22px;
+    border-radius: 24px;
+    overflow: hidden;
+    border: 2px solid color-mix(in srgb, var(--ctg-accent) 55%, transparent);
+  }
+  .stage-bg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    filter: brightness(0.45) saturate(1.15);
+  }
+  .stage-scrim {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, rgba(5, 13, 44, 0.92) 0%, rgba(7, 18, 58, 0.76) 60%, rgba(5, 13, 44, 0.88) 100%);
+  }
+  .stage-inner {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 26px;
+    align-items: center;
+    padding: clamp(20px, 3.5vw, 32px);
+  }
+  .stage-thumb {
+    width: 100%;
+    border-radius: 16px;
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    box-shadow: 0 18px 36px rgba(0, 0, 0, 0.5);
+  }
+  .stage-pills {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+  .stage-info h3 {
+    font-size: clamp(1.35rem, 2.5vw, 1.85rem);
+    margin-bottom: 8px;
+  }
+  .stage-info p {
+    max-width: 60ch;
+    margin-bottom: 16px;
+  }
+
+  .filter-bar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-bottom: 24px;
+  }
+  .filter-btn {
+    min-height: 42px;
+    padding: 9px 16px;
+    border-radius: 999px;
+    background: rgba(14, 30, 88, 0.78);
+    border: 1.5px solid rgba(255, 255, 255, 0.18);
+    color: var(--sand);
+    font-weight: 800;
+    font-size: 0.86rem;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .filter-btn.active {
+    background: color-mix(in srgb, var(--ctg-accent) 26%, #0b1c56);
+    border-color: var(--ctg-accent);
+    color: #fff;
+  }
+
+  .cabinets-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 22px;
+  }
+  @media (max-width: 680px) {
+    .cabinets-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+  .cabinet-card {
+    display: flex;
+    flex-direction: column;
+    border-radius: 20px;
+    background: rgba(12, 26, 78, 0.84);
+    border: 1.5px solid rgba(255, 255, 255, 0.14);
+    overflow: hidden;
+    transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  .cabinet-card[hidden] {
+    display: none;
+  }
+  .cabinet-card.selected {
+    border-color: var(--cab-accent);
+    box-shadow: 0 20px 44px -24px var(--cab-accent);
+  }
+  @media (hover: hover) {
+    .cabinet-card:hover {
+      transform: translateY(-4px);
+      border-color: var(--cab-accent);
+    }
+  }
+
+  .cab-media-btn {
+    position: relative;
+    padding: 0;
+    border: 0;
+    background: #061138;
+    cursor: pointer;
+    aspect-ratio: 16 / 9.6;
+    overflow: hidden;
+  }
+  .cab-media-btn img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.35s ease;
+  }
+  @media (hover: hover) {
+    .cab-media-btn:hover img {
+      transform: scale(1.04);
+    }
+  }
+  .cab-players {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--cab-accent);
+    color: #06122e;
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    font-weight: 900;
+  }
+  .cab-mode {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(5, 12, 38, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    color: var(--sand);
+    font-size: 0.72rem;
+    font-weight: 800;
+  }
+
+  .cab-body {
+    padding: 18px 20px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1;
+  }
+  .cab-skill {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--cab-accent);
+  }
+  .cab-body h3 {
+    margin: 0;
+    font-size: 1.15rem;
+  }
+  .cab-body p {
+    font-size: 0.9rem;
+    margin: 0 0 12px;
+    flex: 1;
+  }
+  .cab-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  .cab-preview-link {
+    background: none;
+    border: 0;
+    padding: 6px 0;
+    color: var(--silver);
+    font-weight: 800;
+    font-size: 0.84rem;
+    cursor: pointer;
+  }
+  .cab-preview-link:hover {
+    color: #fff;
+  }
+  .cab-play-link {
+    padding: 7px 14px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--cab-accent) 22%, rgba(8, 20, 64, 0.9));
+    border: 1px solid var(--cab-accent);
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    font-weight: 800;
+    color: #fff;
+  }
+
+  /* ---- 5. Trust & Finale ---- */
+  .trust-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    margin-top: 28px;
+  }
+  .trust-card {
+    padding: 24px;
+    border-radius: 20px;
+    background: var(--surface);
+    border: 1px solid var(--surface-border);
+  }
+  .trust-icon {
+    display: inline-block;
+    font-size: 1.8rem;
+    margin-bottom: 10px;
+  }
+  .trust-card p {
+    margin: 0;
+    font-size: 0.94rem;
+  }
+  .inline-link {
+    color: var(--ctg-accent);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    font-weight: 800;
+  }
+
+  .ctg-finale {
+    margin-top: 32px;
+    padding: clamp(32px, 5vw, 52px) 24px;
+    border-radius: 24px;
+    text-align: center;
+    background:
+      radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--ctg-accent) 28%, transparent), transparent 70%),
+      linear-gradient(180deg, rgba(16, 36, 104, 0.9), rgba(8, 20, 62, 0.95));
+    border: 2px solid color-mix(in srgb, var(--ctg-accent) 50%, transparent);
+  }
+  .ctg-finale p {
+    max-width: 54ch;
+    margin: 0 auto 22px;
+  }
+
+  .cross-link-bar {
+    margin-top: 28px;
+    padding: 26px 30px;
+    border-radius: 20px;
+    background: var(--surface);
+    border: 1px solid var(--surface-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+  .cross-eyebrow {
+    display: block;
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    letter-spacing: 0.2em;
+    color: #ff9929;
+    margin-bottom: 6px;
+  }
+  .cross-link-bar h3 {
+    margin-bottom: 4px;
+  }
+  .cross-link-bar p {
+    margin: 0;
+    max-width: 58ch;
+  }
+
+  /* Responsive */
+  @media (max-width: 980px) {
+    .hero-grid,
+    .stage-inner,
+    .trust-grid {
+      grid-template-columns: 1fr;
+    }
+    .pods-grid {
+      grid-template-columns: repeat(4, 1fr);
+    }
+  }
+
+  @media (max-width: 680px) {
+    .pods-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+    .bio-card,
+    .bio-traits {
+      grid-template-columns: 1fr;
+    }
+    .cta-row .arcade-btn {
+      width: 100%;
+    }
+  }
+</style>

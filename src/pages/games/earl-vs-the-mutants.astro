@@ -1,0 +1,2286 @@
+---
+import Base from '../../layouts/Base.astro';
+import {
+  STEAM_URL,
+  TRAILER_URL,
+  DISCORD_URL,
+  EARL_LOGO,
+  EARL_HERO_KEY_ART,
+  EARL_HERO_BANNER,
+  FALLING_STATE_LOGO,
+  EARL_ACTION_GIF,
+  EARL_BIOMES,
+  MUTANT_BOSSES,
+  EARL_POSES,
+  EDNA_POSES,
+  BANTER_SCENARIOS,
+  RIG_WEAPONS,
+  RIG_DRONES,
+  RIG_POWERUPS,
+  WASTELAND_SHOTS,
+  computeRigSynergy,
+} from '../../data/earl-showcase';
+
+const initialBiome = EARL_BIOMES[0];
+const initialScenario = BANTER_SCENARIOS[0];
+const initialEarlPose = EARL_POSES.find((p) => p.id === initialScenario.earlPoseId) ?? EARL_POSES[0];
+const initialEdnaPose = EDNA_POSES.find((p) => p.id === initialScenario.ednaPoseId) ?? EDNA_POSES[0];
+const initialRig = computeRigSynergy(RIG_WEAPONS[0].id, RIG_DRONES[0].id, RIG_POWERUPS[0].id);
+const totalBounty = MUTANT_BOSSES.reduce((sum, b) => sum + b.bounty, 0);
+
+const pageDescription =
+  'Drive, drift, and blast through mutant hordes in Earl vs. The Mutants — an action-packed post-apocalyptic driving roguelite out now on PC & Steam Deck.';
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'VideoGame',
+  name: 'Earl vs. The Mutants',
+  description: pageDescription,
+  url: 'https://geurtsgaming.com/games/earl-vs-the-mutants/',
+  image: `https://geurtsgaming.com${EARL_HERO_KEY_ART}`,
+  genre: ['Action Roguelite', 'Vehicular Combat', 'Survivors-like'],
+  gamePlatform: ['PC', 'Steam', 'Steam Deck'],
+  operatingSystem: 'Windows, SteamOS',
+  applicationCategory: 'Game',
+  author: {
+    '@type': 'Organization',
+    name: 'Falling State',
+  },
+  sameAs: [STEAM_URL, 'https://earlvsthemutants.com', DISCORD_URL],
+};
+---
+
+<Base title="Earl vs. The Mutants" description={pageDescription} image={EARL_HERO_KEY_ART}>
+  <script slot="head" type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <div class="earl-page">
+    <!-- ==================== 1. WASTELAND OVERDRIVE HERO ==================== -->
+    <section class="earl-hero" id="earl-hero" aria-labelledby="earl-page-title">
+      <div class="hero-media" aria-hidden="true">
+        <video
+          id="earl-hero-video"
+          class="hero-video"
+          autoplay
+          loop
+          muted
+          playsinline
+          preload="metadata"
+          poster={initialBiome.poster}
+          src={initialBiome.video}
+        ></video>
+        <div class="hero-scrim"></div>
+        <canvas id="earl-ember-canvas" class="ember-canvas"></canvas>
+      </div>
+
+      <div class="wrap hero-inner">
+        <div class="hero-topbar">
+          <a href="/games/" class="crumb">
+            <span aria-hidden="true">←</span> All Games
+          </a>
+          <div class="hero-badges">
+            <span class="pill live-pill">Out Now on Steam</span>
+            <span class="pill">Very Positive Reviews</span>
+            <span class="pill">Steam Deck Ready</span>
+            <span class="pill">Teens &amp; Up</span>
+          </div>
+          <button type="button" class="sfx-toggle" data-sfx-toggle aria-pressed="false">
+            <span data-sfx-icon aria-hidden="true">🔇</span>
+            <span data-sfx-label>Arcade SFX: Off</span>
+          </button>
+        </div>
+
+        <div class="hero-grid">
+          <div class="hero-copy">
+            <h1 id="earl-page-title" class="visually-hidden">
+              Earl vs. The Mutants — Post-Apocalyptic Driving Survivor Roguelite
+            </h1>
+            <img
+              src={EARL_LOGO}
+              alt="Earl vs. The Mutants official logo"
+              class="earl-logo"
+              width="620"
+              height="282"
+              fetchpriority="high"
+            />
+            <p class="hero-kicker">Clock In. Weld Guns to the Roof. Flatten the Horde.</p>
+            <p class="hero-lede">
+              Civilization crumbled, but <strong>Edna’s Pest Control</strong> never closed. Step into the boots of
+              37-time Employee of the Month <strong>Earl</strong>, bolt absurd weapons and attack drones onto armored
+              wasteland rigs, and carve through waves of hundreds of mutants in fast 5–10 minute survival runs.
+            </p>
+
+            <div class="cta-row">
+              <a href={STEAM_URL} target="_blank" rel="noopener" class="arcade-btn steam-btn">
+                <span>Get on Steam</span>
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M5 11L11 5M11 5H6M11 5v5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </a>
+
+              <button type="button" id="overdrive-btn" class="arcade-btn overdrive-btn" aria-pressed="false">
+                <span aria-hidden="true">🔥</span>
+                <span id="overdrive-btn-label">Rev Overdrive</span>
+                <kbd class="key-hint" aria-hidden="true">R</kbd>
+              </button>
+
+              <a href={TRAILER_URL} target="_blank" rel="noopener" class="arcade-btn trailer-btn">
+                <span aria-hidden="true">▶</span>
+                <span>Official Trailer</span>
+              </a>
+            </div>
+          </div>
+
+          <!-- Interactive Wasteland Dashboard HUD -->
+          <aside class="dash-hud" id="dash-hud" aria-label="Interactive Wasteland Rig Dashboard">
+            <div class="dash-header">
+              <span class="dash-tag">EDNA’S PEST-RIG TELEMETRY</span>
+              <span class="dash-status" id="speedo-state">CRUISE GEAR</span>
+            </div>
+
+            <div class="speedo-row">
+              <div class="gauge-wrap">
+                <svg viewBox="0 0 220 132" class="speedo-svg" aria-hidden="true">
+                  <defs>
+                    <linearGradient id="earlGaugeArc" x1="0%" y1="0%" x2="100%" y2="0%">
+                      <stop offset="0%" stop-color="#ffd137" />
+                      <stop offset="55%" stop-color="#ff7a1a" />
+                      <stop offset="100%" stop-color="#ff2e4c" />
+                    </linearGradient>
+                  </defs>
+                  <path
+                    d="M 24 114 A 86 86 0 0 1 196 114"
+                    fill="none"
+                    stroke="rgba(236, 223, 210, 0.14)"
+                    stroke-width="14"
+                    stroke-linecap="round"
+                  />
+                  <path
+                    d="M 24 114 A 86 86 0 0 1 196 114"
+                    fill="none"
+                    stroke="url(#earlGaugeArc)"
+                    stroke-width="14"
+                    stroke-linecap="round"
+                    stroke-dasharray="270"
+                    stroke-dashoffset="155"
+                    id="speedo-arc"
+                  />
+                  <g id="speedo-needle" style="transform-origin: 110px 114px; transform: rotate(-22deg);">
+                    <line x1="110" y1="114" x2="110" y2="36" stroke="#fff3d6" stroke-width="4" stroke-linecap="round" />
+                    <circle cx="110" cy="114" r="9" fill="#ff7a1a" stroke="#fff3d6" stroke-width="3" />
+                  </g>
+                </svg>
+                <div class="speedo-readout">
+                  <strong id="speedo-mph">{initialBiome.cruiseMph}</strong>
+                  <span>MPH</span>
+                </div>
+              </div>
+
+              <div class="biome-readout">
+                <div class="readout-label">ACTIVE SECTOR</div>
+                <div class="readout-sector" id="biome-name">{initialBiome.name}</div>
+                <div class="readout-hazard" id="biome-hazard">⚠️ {initialBiome.hazard}</div>
+                <p class="readout-blurb" id="biome-blurb">{initialBiome.blurb}</p>
+              </div>
+            </div>
+
+            <div class="gear-shifter" role="group" aria-label="Shift Wasteland Biome Gear">
+              {EARL_BIOMES.map((biome, idx) => (
+                <button
+                  type="button"
+                  class:list={['gear-btn', { active: idx === 0 }]}
+                  data-biome-btn
+                  data-biome-id={biome.id}
+                  aria-pressed={idx === 0 ? 'true' : 'false'}
+                >
+                  <span class="gear-num">G{idx + 1}</span>
+                  <span class="gear-text">{biome.gearLabel.split('·')[1]?.trim() ?? biome.name}</span>
+                </button>
+              ))}
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 2. MUTANT BOSS BOUNTY ARENA ==================== -->
+    <section class="section arena-section" id="bounty-arena" aria-labelledby="arena-heading">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow earl-eyebrow">Interactive Target Range · Click to Exterminate</p>
+          <h2 id="arena-heading">Mutant Boss Bounty Board</h2>
+          <p class="muted">
+            Hover a wasteland boss to hear ’em gloat—then <strong>click or tap repeatedly</strong> to test Edna’s roof
+            turrets, trigger critical hits, and collect every bounty on the board.
+          </p>
+        </div>
+
+        <div class="bounty-hud" aria-live="polite">
+          <div class="bounty-stat">
+            <span class="stat-label">Bounty Collected</span>
+            <strong class="stat-val cash" id="bounty-cash">$0 <small>/ ${totalBounty.toLocaleString()}</small></strong>
+          </div>
+          <div class="bounty-stat">
+            <span class="stat-label">Bosses Cleared</span>
+            <strong class="stat-val" id="bounty-count">0 <small>/ {MUTANT_BOSSES.length}</small></strong>
+          </div>
+          <button type="button" class="arcade-btn mini-btn" id="bounty-reset">
+            Respawn Bosses ↻
+          </button>
+        </div>
+
+        <div class="eotm-banner" id="eotm-banner" hidden>
+          <img
+            src="/games/earl-vs-the-mutants/poses/earl_godmode.png"
+            alt="Earl celebrating in God Mode"
+            width="132"
+            height="132"
+            loading="lazy"
+          />
+          <div class="eotm-copy">
+            <span class="eotm-badge">🏆 NEW COMPANY RECORD UNLOCKED</span>
+            <h3>38× Employee of the Month!</h3>
+            <p>
+              Edna says: <em>“Full board wiped clean! Take five minutes to scrape the ooze off the bumper, sugar—the real
+              horde is waiting on Steam.”</em>
+            </p>
+          </div>
+          <a href={STEAM_URL} target="_blank" rel="noopener" class="arcade-btn steam-btn">
+            Claim Full Arsenal on Steam ↗
+          </a>
+        </div>
+
+        <div class="boss-grid">
+          {MUTANT_BOSSES.map((boss) => (
+            <article
+              class="boss-card"
+              data-boss-card
+              data-boss-id={boss.id}
+              style={`--boss-accent: ${boss.accent}`}
+            >
+              <div class="boss-top">
+                <span class="bounty-tag">${boss.bounty} BOUNTY</span>
+                <span class="boss-role">{boss.title}</span>
+              </div>
+
+              <button
+                type="button"
+                class="boss-hit-zone"
+                data-boss-trigger
+                aria-label={`Blast ${boss.name} (${boss.maxHp} HP)`}
+              >
+                <img
+                  src={boss.normalImg}
+                  alt={boss.name}
+                  class="boss-sprite"
+                  data-boss-img
+                  width="280"
+                  height="280"
+                  loading="lazy"
+                />
+                <span class="crosshair-pill" data-boss-prompt>🎯 Click to Blast</span>
+                <span class="exterminated-stamp" aria-hidden="true">EXTERMINATED</span>
+                <div class="dmg-layer" data-dmg-layer aria-hidden="true"></div>
+              </button>
+
+              <div class="boss-body">
+                <div class="hp-meta">
+                  <h3>{boss.name}</h3>
+                  <span class="hp-numbers" data-boss-hp-text>{boss.maxHp} / {boss.maxHp} HP</span>
+                </div>
+                <div
+                  class="hp-track"
+                  role="progressbar"
+                  aria-label={`${boss.name} health`}
+                  aria-valuemin="0"
+                  aria-valuemax={boss.maxHp}
+                  aria-valuenow={boss.maxHp}
+                  data-boss-progressbar
+                >
+                  <div class="hp-fill" data-boss-hp-fill style="width: 100%"></div>
+                </div>
+                <p class="boss-weakness"><strong>Weakness:</strong> {boss.weakness}</p>
+                <p class="boss-quote" data-boss-quote>“{boss.taunt}”</p>
+              </div>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 3. EARL & EDNA REACTION STAGE ==================== -->
+    <section class="section banter-section" id="earl-edna-stage" aria-labelledby="banter-heading">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow earl-eyebrow">Edna’s Pest Control CB Radio</p>
+          <h2 id="banter-heading">Meet Earl &amp; His Boss, Edna</h2>
+          <p class="muted">
+            Pick a wasteland situation—or <strong>click directly on Edna or Earl</strong> to cycle through all 4 of
+            Edna’s expressions and all 9 of Earl’s comic reactions.
+          </p>
+        </div>
+
+        <div class="scenario-bar" role="group" aria-label="CB Radio Dispatch Scenarios">
+          {BANTER_SCENARIOS.map((sc, idx) => (
+            <button
+              type="button"
+              class:list={['scenario-btn', { active: idx === 0 }]}
+              data-scenario-btn
+              data-scenario-id={sc.id}
+              aria-pressed={idx === 0 ? 'true' : 'false'}
+            >
+              {sc.buttonLabel}
+            </button>
+          ))}
+        </div>
+
+        <div class="duo-stage">
+          <!-- Edna Card -->
+          <div class="char-panel edna-panel">
+            <button type="button" class="portrait-btn" id="edna-cycle-btn" aria-label="Cycle Edna expression pose">
+              <img
+                src={initialEdnaPose.img}
+                alt={`Edna — ${initialEdnaPose.label}`}
+                id="edna-img"
+                width="260"
+                height="260"
+                loading="lazy"
+              />
+              <span class="pose-pill" id="edna-pose-pill">Pose 1/{EDNA_POSES.length} · {initialEdnaPose.label}</span>
+            </button>
+            <div class="speech-box">
+              <div class="speaker-row">
+                <strong>Edna</strong>
+                <span>Founder · Edna’s Pest Control</span>
+              </div>
+              <p class="speech-line" id="edna-line">“{initialScenario.ednaLine}”</p>
+              <span class="tap-hint">Tap portrait to cycle Edna’s poses ↻</span>
+            </div>
+          </div>
+
+          <!-- Earl Card -->
+          <div class="char-panel earl-panel">
+            <button type="button" class="portrait-btn" id="earl-cycle-btn" aria-label="Cycle Earl expression pose">
+              <img
+                src={initialEarlPose.img}
+                alt={`Earl — ${initialEarlPose.label}`}
+                id="earl-img"
+                width="260"
+                height="260"
+                loading="lazy"
+              />
+              <span class="pose-pill" id="earl-pose-pill">Pose 5/{EARL_POSES.length} · {initialEarlPose.label}</span>
+            </button>
+            <div class="speech-box">
+              <div class="speaker-row">
+                <strong>Earl</strong>
+                <span>37× Employee of the Month</span>
+              </div>
+              <p class="speech-line" id="earl-line">“{initialScenario.earlLine}”</p>
+              <span class="tap-hint">Tap portrait to cycle all 9 Earl poses ↻</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 4. ROGUELITE RIG GARAGE TINKERER ==================== -->
+    <section class="section garage-section" id="rig-garage" aria-labelledby="garage-heading">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow earl-eyebrow">Roguelite Loadout Bench</p>
+          <h2 id="garage-heading">Weld Absurd Combos Mid-Run</h2>
+          <p class="muted">
+            Every run starts scrappy and snowballs into screen-melting mayhem. Mix a roof weapon, an autonomous drone,
+            and a wasteland mutation below to preview how synergies stack.
+          </p>
+        </div>
+
+        <div class="garage-grid">
+          <div class="loadout-controls">
+            <div class="slot-group">
+              <div class="slot-title">1. Primary Roof / Bumper Weapon</div>
+              <div class="part-pills" role="group" aria-label="Primary Weapon">
+                {RIG_WEAPONS.map((part, idx) => (
+                  <button
+                    type="button"
+                    class:list={['part-btn', { active: idx === 0 }]}
+                    data-part-slot="weapon"
+                    data-part-id={part.id}
+                    aria-pressed={idx === 0 ? 'true' : 'false'}
+                  >
+                    <strong>{part.name}</strong>
+                    <span>{part.perk}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div class="slot-group">
+              <div class="slot-title">2. Autonomous Support Drone</div>
+              <div class="part-pills" role="group" aria-label="Support Drone">
+                {RIG_DRONES.map((part, idx) => (
+                  <button
+                    type="button"
+                    class:list={['part-btn', { active: idx === 0 }]}
+                    data-part-slot="drone"
+                    data-part-id={part.id}
+                    aria-pressed={idx === 0 ? 'true' : 'false'}
+                  >
+                    <strong>{part.name}</strong>
+                    <span>{part.perk}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div class="slot-group">
+              <div class="slot-title">3. Radioactive Run Mutation</div>
+              <div class="part-pills" role="group" aria-label="Run Mutation">
+                {RIG_POWERUPS.map((part, idx) => (
+                  <button
+                    type="button"
+                    class:list={['part-btn', { active: idx === 0 }]}
+                    data-part-slot="powerup"
+                    data-part-id={part.id}
+                    aria-pressed={idx === 0 ? 'true' : 'false'}
+                  >
+                    <strong>{part.name}</strong>
+                    <span>{part.perk.trim()}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button type="button" class="arcade-btn mini-btn randomize-btn" id="rig-randomize">
+              🎲 Roll Random Roguelite Synergy
+            </button>
+          </div>
+
+          <div class="synergy-monitor">
+            <div class="monitor-screen">
+              <video
+                id="rig-video"
+                src={initialRig.clip}
+                autoplay
+                loop
+                muted
+                playsinline
+                preload="metadata"
+                poster="/games/earl-vs-the-mutants/screenshots/press_02.png"
+              ></video>
+              <span class="monitor-badge">LIVE COMBO FEED</span>
+            </div>
+
+            <div class="synergy-card">
+              <div class="synergy-head">
+                <span class="synergy-tag">ACTIVE BUILD</span>
+                <h3 id="rig-title">{initialRig.title}</h3>
+                <p class="muted" id="rig-summary">{initialRig.summary}</p>
+              </div>
+
+              <div class="meters">
+                <div class="meter-row">
+                  <span>Chaos Factor</span>
+                  <div class="meter-bar"><div id="meter-chaos" style={`width: ${initialRig.chaos}%`}></div></div>
+                  <strong id="val-chaos">{initialRig.chaos}</strong>
+                </div>
+                <div class="meter-row">
+                  <span>Swarm Clear</span>
+                  <div class="meter-bar"><div id="meter-swarm" style={`width: ${initialRig.swarm}%`}></div></div>
+                  <strong id="val-swarm">{initialRig.swarm}</strong>
+                </div>
+                <div class="meter-row">
+                  <span>Boss Melt</span>
+                  <div class="meter-bar"><div id="meter-boss" style={`width: ${initialRig.bossMelt}%`}></div></div>
+                  <strong id="val-boss">{initialRig.bossMelt}</strong>
+                </div>
+              </div>
+
+              <div class="action-gif-strip">
+                <img
+                  src={EARL_ACTION_GIF}
+                  alt="Animated clip of Earl smashing through wasteland mutants"
+                  width="160"
+                  height="90"
+                  loading="lazy"
+                />
+                <div>
+                  <strong>Unlock Trucks &amp; Permanent Upgrades</strong>
+                  <p class="muted">
+                    Bank scrap between runs to unlock new vehicles, starting weapons, and wild passive perks.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 5. WASTELAND POSTCARDS GALLERY ==================== -->
+    <section class="section gallery-section" id="wasteland-gallery" aria-labelledby="gallery-heading">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow earl-eyebrow">Official Press Kit Reels</p>
+          <h2 id="gallery-heading">Postcards from the Wasteland</h2>
+          <p class="muted">Click any frame to inspect full-screen HD combat shots.</p>
+        </div>
+
+        <div class="shots-grid">
+          {WASTELAND_SHOTS.map((shot, idx) => (
+            <button
+              type="button"
+              class:list={['shot-card', { featured: idx === 0 }]}
+              data-shot-index={idx}
+              aria-label={`Zoom screenshot: ${shot.caption}`}
+            >
+              <img src={shot.src} alt={shot.alt} width="640" height="360" loading="lazy" />
+              <span class="shot-caption">{shot.caption}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 6. STEAM + STUDIO CROSS-LINK BAND ==================== -->
+    <section class="section finale-section" aria-labelledby="finale-heading">
+      <div class="wrap">
+        <div class="finale-card">
+          <img
+            src={EARL_HERO_BANNER}
+            alt=""
+            class="finale-bg"
+            width="1200"
+            height="500"
+            loading="lazy"
+            aria-hidden="true"
+          />
+          <div class="finale-scrim" aria-hidden="true"></div>
+
+          <div class="finale-content">
+            <img
+              src={FALLING_STATE_LOGO}
+              alt="Falling State"
+              class="studio-badge"
+              width="136"
+              height="52"
+              loading="lazy"
+            />
+            <h2 id="finale-heading">Ready to Clock In at Edna’s Pest Control?</h2>
+            <p>
+              Grab the keys, rev the engine, and see why Steam players rate <strong>Earl vs. The Mutants</strong> Very
+              Positive on desktop and Steam Deck.
+            </p>
+            <div class="cta-row center">
+              <a href={STEAM_URL} target="_blank" rel="noopener" class="arcade-btn steam-btn">
+                Get Earl vs. The Mutants on Steam ↗
+              </a>
+              <a href={DISCORD_URL} target="_blank" rel="noopener" class="arcade-btn trailer-btn">
+                Join Official Discord ↗
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <div class="cross-link-bar">
+          <div>
+            <span class="cross-eyebrow">ALSO FROM GEURTSGAMING</span>
+            <h3>Looking for kid &amp; classroom multiplayer?</h3>
+            <p class="muted">
+              Jump into <strong>Cool Typing Games</strong> — 10 free browser typing games with up to 25-player classroom
+              races, zero ads, and colorful robot &amp; space racers.
+            </p>
+          </div>
+          <a href="/games/cool-typing-games/" class="btn">
+            Explore Cool Typing Games →
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- Accessible Screenshot Lightbox -->
+    <dialog class="shot-lightbox" id="shot-lightbox" aria-label="Screenshot viewer">
+      <div class="lightbox-inner">
+        <button type="button" class="lightbox-close" id="lightbox-close" aria-label="Close screenshot">✕ Close</button>
+        <img src={WASTELAND_SHOTS[0].src} alt={WASTELAND_SHOTS[0].alt} id="lightbox-img" />
+        <div class="lightbox-bar">
+          <button type="button" class="arcade-btn mini-btn" id="lightbox-prev" aria-label="Previous screenshot">
+            ← Prev
+          </button>
+          <p id="lightbox-caption">{WASTELAND_SHOTS[0].caption}</p>
+          <button type="button" class="arcade-btn mini-btn" id="lightbox-next" aria-label="Next screenshot">
+            Next →
+          </button>
+        </div>
+      </div>
+    </dialog>
+  </div>
+</Base>
+
+<script>
+  import {
+    EARL_BIOMES,
+    MUTANT_BOSSES,
+    EARL_POSES,
+    EDNA_POSES,
+    BANTER_SCENARIOS,
+    RIG_WEAPONS,
+    RIG_DRONES,
+    RIG_POWERUPS,
+    WASTELAND_SHOTS,
+    strikeBoss,
+    computeRigSynergy,
+  } from '../../data/earl-showcase';
+  import {
+    isSfxEnabled,
+    toggleSfx,
+    sfxClick,
+    sfxRev,
+    sfxBlast,
+    sfxBossDown,
+    sfxFanfare,
+  } from '../../components/games/ArcadeAudio';
+
+  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  // --- 1. SFX Toggle ---
+  const sfxBtn = document.querySelector<HTMLButtonElement>('[data-sfx-toggle]');
+  const sfxIcon = document.querySelector<HTMLElement>('[data-sfx-icon]');
+  const sfxLabel = document.querySelector<HTMLElement>('[data-sfx-label]');
+
+  function renderSfxToggle(on: boolean) {
+    if (!sfxBtn || !sfxIcon || !sfxLabel) return;
+    sfxBtn.setAttribute('aria-pressed', String(on));
+    sfxIcon.textContent = on ? '🔊' : '🔇';
+    sfxLabel.textContent = on ? 'Arcade SFX: On' : 'Arcade SFX: Off';
+  }
+  renderSfxToggle(isSfxEnabled());
+  sfxBtn?.addEventListener('click', () => {
+    const next = toggleSfx();
+    renderSfxToggle(next);
+  });
+
+  // --- 2. Hero Speedometer, Biome Gear-Shifter & Overdrive ---
+  const heroEl = document.getElementById('earl-hero');
+  const heroVideo = document.getElementById('earl-hero-video') as HTMLVideoElement | null;
+  const dashHud = document.getElementById('dash-hud');
+  const overdriveBtn = document.getElementById('overdrive-btn') as HTMLButtonElement | null;
+  const overdriveBtnLabel = document.getElementById('overdrive-btn-label');
+  const speedoState = document.getElementById('speedo-state');
+  const speedoMph = document.getElementById('speedo-mph');
+  const speedoNeedle = document.getElementById('speedo-needle');
+  const speedoArc = document.getElementById('speedo-arc');
+  const biomeNameEl = document.getElementById('biome-name');
+  const biomeHazardEl = document.getElementById('biome-hazard');
+  const biomeBlurbEl = document.getElementById('biome-blurb');
+  const biomeBtns = document.querySelectorAll<HTMLButtonElement>('[data-biome-btn]');
+
+  let activeBiome = EARL_BIOMES[0];
+  let isOverdrive = false;
+  let burstTimer: number | null = null;
+  let holdStartedAt = 0;
+
+  function updateSpeedometer(mph: number) {
+    if (speedoMph) speedoMph.textContent = String(Math.round(mph));
+    const ratio = Math.max(0, Math.min(1, mph / 125));
+    const deg = -78 + ratio * 156;
+    if (speedoNeedle) speedoNeedle.style.transform = `rotate(${deg.toFixed(1)}deg)`;
+    if (speedoArc) {
+      const offset = 270 - ratio * 270;
+      speedoArc.setAttribute('stroke-dashoffset', offset.toFixed(1));
+    }
+  }
+
+  function setOverdrive(active: boolean) {
+    if (isOverdrive === active) return;
+    isOverdrive = active;
+    dashHud?.classList.toggle('overdrive', active);
+    heroEl?.classList.toggle('overdrive', active);
+    overdriveBtn?.setAttribute('aria-pressed', String(active));
+    if (overdriveBtnLabel) {
+      overdriveBtnLabel.textContent = active ? 'OVERDRIVE ENGAGED!!' : 'Rev Overdrive';
+    }
+    if (speedoState) {
+      speedoState.textContent = active ? '🔥 OVERDRIVE!!' : 'CRUISE GEAR';
+    }
+    if (heroVideo && !prefersReducedMotion.matches) {
+      heroVideo.playbackRate = active ? 1.5 : 1.0;
+    }
+    updateSpeedometer(active ? activeBiome.overdriveMph : activeBiome.cruiseMph);
+    if (active) sfxRev();
+  }
+
+  updateSpeedometer(activeBiome.cruiseMph);
+
+  overdriveBtn?.addEventListener('pointerdown', () => {
+    if (burstTimer) {
+      window.clearTimeout(burstTimer);
+      burstTimer = null;
+    }
+    holdStartedAt = performance.now();
+    setOverdrive(true);
+  });
+
+  const endPointerHold = () => {
+    if (!isOverdrive || holdStartedAt === 0) return;
+    const heldMs = performance.now() - holdStartedAt;
+    holdStartedAt = 0;
+    if (heldMs < 260) {
+      // Quick tap triggers a punchy 2-second nitro burst so mobile & click users feel the full rush!
+      burstTimer = window.setTimeout(() => {
+        setOverdrive(false);
+        burstTimer = null;
+      }, 2000);
+    } else {
+      setOverdrive(false);
+    }
+  };
+  window.addEventListener('pointerup', endPointerHold);
+  window.addEventListener('pointercancel', endPointerHold);
+
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    const tag = (e.target as HTMLElement | null)?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (e.key === 'r' || e.key === 'R') {
+      setOverdrive(true);
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.key === 'r' || e.key === 'R') {
+      setOverdrive(false);
+    }
+  });
+
+  biomeBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.biomeId;
+      const found = EARL_BIOMES.find((b) => b.id === id);
+      if (!found) return;
+      activeBiome = found;
+      sfxClick();
+
+      biomeBtns.forEach((b) => {
+        const match = b === btn;
+        b.classList.toggle('active', match);
+        b.setAttribute('aria-pressed', String(match));
+      });
+
+      if (biomeNameEl) biomeNameEl.textContent = found.name;
+      if (biomeHazardEl) biomeHazardEl.textContent = `⚠️ ${found.hazard}`;
+      if (biomeBlurbEl) biomeBlurbEl.textContent = found.blurb;
+
+      if (heroVideo && heroVideo.getAttribute('src') !== found.video) {
+        heroVideo.poster = found.poster;
+        heroVideo.src = found.video;
+        if (!prefersReducedMotion.matches) {
+          heroVideo.play().catch(() => {});
+          heroVideo.playbackRate = isOverdrive ? 1.5 : 1.0;
+        }
+      }
+      updateSpeedometer(isOverdrive ? found.overdriveMph : found.cruiseMph);
+    });
+  });
+
+  // --- 3. Wasteland Ember Sparks Canvas ---
+  const emberCanvas = document.getElementById('earl-ember-canvas') as HTMLCanvasElement | null;
+  if (emberCanvas && !prefersReducedMotion.matches) {
+    const ctx = emberCanvas.getContext('2d');
+    interface Ember {
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      size: number;
+      alpha: number;
+      hue: number;
+    }
+    const embers: Ember[] = [];
+    let width = 0;
+    let height = 0;
+    let heroVisible = true;
+    let rafId = 0;
+
+    const resize = () => {
+      const rect = emberCanvas.getBoundingClientRect();
+      width = Math.max(320, rect.width);
+      height = Math.max(320, rect.height);
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      emberCanvas.width = Math.floor(width * dpr);
+      emberCanvas.height = Math.floor(height * dpr);
+      ctx?.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    resize();
+    window.addEventListener('resize', resize, { passive: true });
+
+    for (let i = 0; i < 42; i++) {
+      embers.push({
+        x: Math.random() * width,
+        y: Math.random() * height,
+        vx: 0.5 + Math.random() * 1.4,
+        vy: -0.4 - Math.random() * 1.1,
+        size: 1.4 + Math.random() * 2.6,
+        alpha: 0.25 + Math.random() * 0.6,
+        hue: 18 + Math.random() * 28,
+      });
+    }
+
+    const draw = () => {
+      if (!ctx || !heroVisible || document.hidden) {
+        rafId = 0;
+        return;
+      }
+      ctx.clearRect(0, 0, width, height);
+      const mult = isOverdrive ? 4.4 : 1;
+
+      for (const p of embers) {
+        p.x += p.vx * mult;
+        p.y += p.vy * (isOverdrive ? 1.6 : 1);
+        if (p.x > width + 20) p.x = -12;
+        if (p.y < -20) {
+          p.y = height + 10;
+          p.x = Math.random() * width;
+        }
+
+        ctx.beginPath();
+        ctx.strokeStyle = `hsla(${p.hue}, 100%, 62%, ${p.alpha})`;
+        ctx.lineWidth = p.size;
+        ctx.lineCap = 'round';
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - (isOverdrive ? p.vx * 9 : p.vx * 2), p.y - p.vy * 1.5);
+        ctx.stroke();
+      }
+      rafId = window.requestAnimationFrame(draw);
+    };
+
+    const ensureLoop = () => {
+      if (!rafId && heroVisible && !document.hidden && !prefersReducedMotion.matches) {
+        rafId = window.requestAnimationFrame(draw);
+      }
+    };
+
+    if (heroEl) {
+      const io = new IntersectionObserver(
+        (entries) => {
+          heroVisible = entries[0]?.isIntersecting ?? true;
+          if (heroVisible) {
+            heroVideo?.play().catch(() => {});
+            ensureLoop();
+          } else {
+            heroVideo?.pause();
+          }
+        },
+        { threshold: 0.05 },
+      );
+      io.observe(heroEl);
+    }
+    document.addEventListener('visibilitychange', ensureLoop);
+    ensureLoop();
+  } else if (prefersReducedMotion.matches) {
+    heroVideo?.pause();
+    document.querySelectorAll<HTMLVideoElement>('video').forEach((v) => v.pause());
+  }
+
+  // --- 4. Mutant Boss Bounty Arena ---
+  const bossHpMap = new Map<string, number>();
+  MUTANT_BOSSES.forEach((b) => bossHpMap.set(b.id, b.maxHp));
+
+  const bountyCashEl = document.getElementById('bounty-cash');
+  const bountyCountEl = document.getElementById('bounty-count');
+  const bountyResetBtn = document.getElementById('bounty-reset');
+  const eotmBanner = document.getElementById('eotm-banner');
+  const totalBountyPossible = MUTANT_BOSSES.reduce((acc, b) => acc + b.bounty, 0);
+
+  function refreshBountyTotals(justClearedAll: boolean) {
+    let cash = 0;
+    let cleared = 0;
+    for (const boss of MUTANT_BOSSES) {
+      if ((bossHpMap.get(boss.id) ?? boss.maxHp) <= 0) {
+        cash += boss.bounty;
+        cleared += 1;
+      }
+    }
+    if (bountyCashEl) {
+      bountyCashEl.innerHTML = `$${cash.toLocaleString()} <small>/ $${totalBountyPossible.toLocaleString()}</small>`;
+    }
+    if (bountyCountEl) {
+      bountyCountEl.innerHTML = `${cleared} <small>/ ${MUTANT_BOSSES.length}</small>`;
+    }
+    const allCleared = cleared === MUTANT_BOSSES.length;
+    if (eotmBanner) eotmBanner.hidden = !allCleared;
+    if (justClearedAll && allCleared) {
+      sfxFanfare();
+    }
+  }
+
+  document.querySelectorAll<HTMLElement>('[data-boss-card]').forEach((card) => {
+    const bossId = card.dataset.bossId ?? '';
+    const boss = MUTANT_BOSSES.find((b) => b.id === bossId);
+    if (!boss) return;
+
+    const trigger = card.querySelector<HTMLButtonElement>('[data-boss-trigger]');
+    const img = card.querySelector<HTMLImageElement>('[data-boss-img]');
+    const hpText = card.querySelector<HTMLElement>('[data-boss-hp-text]');
+    const hpFill = card.querySelector<HTMLElement>('[data-boss-hp-fill]');
+    const progressBar = card.querySelector<HTMLElement>('[data-boss-progressbar]');
+    const quoteEl = card.querySelector<HTMLElement>('[data-boss-quote]');
+    const promptEl = card.querySelector<HTMLElement>('[data-boss-prompt]');
+    const dmgLayer = card.querySelector<HTMLElement>('[data-dmg-layer]');
+
+    const showLaugh = () => {
+      const hp = bossHpMap.get(boss.id) ?? boss.maxHp;
+      if (hp > 0 && hp === boss.maxHp && img) {
+        img.src = boss.laughingImg;
+      }
+    };
+    const restoreIdle = () => {
+      const hp = bossHpMap.get(boss.id) ?? boss.maxHp;
+      if (hp === boss.maxHp && img) {
+        img.src = boss.normalImg;
+      }
+    };
+
+    trigger?.addEventListener('pointerenter', showLaugh);
+    trigger?.addEventListener('focus', showLaugh);
+    trigger?.addEventListener('pointerleave', restoreIdle);
+    trigger?.addEventListener('blur', restoreIdle);
+
+    trigger?.addEventListener('click', () => {
+      const prevHp = bossHpMap.get(boss.id) ?? boss.maxHp;
+      if (prevHp <= 0) return;
+
+      const res = strikeBoss(prevHp, boss.maxHp, Math.random());
+      bossHpMap.set(boss.id, res.nextHp);
+
+      if (img) img.src = boss.angryImg;
+      const pct = Math.round((res.nextHp / boss.maxHp) * 100);
+      if (hpFill) {
+        hpFill.style.width = `${pct}%`;
+        hpFill.style.background = pct > 50 ? '#57e389' : pct > 22 ? '#ffd137' : '#ff4757';
+      }
+      if (hpText) hpText.textContent = `${res.nextHp} / ${boss.maxHp} HP`;
+      progressBar?.setAttribute('aria-valuenow', String(res.nextHp));
+
+      card.classList.remove('hit-shake');
+      void card.offsetWidth;
+      card.classList.add('hit-shake');
+
+      if (dmgLayer) {
+        const pop = document.createElement('span');
+        pop.className = res.crit ? 'dmg-pop crit' : 'dmg-pop';
+        pop.textContent = res.crit ? `⚡ -${res.damage} CRIT!` : `-${res.damage}`;
+        pop.style.left = `${26 + Math.random() * 48}%`;
+        dmgLayer.appendChild(pop);
+        window.setTimeout(() => pop.remove(), 750);
+      }
+
+      if (res.defeated) {
+        card.classList.add('defeated');
+        if (quoteEl) quoteEl.textContent = `✓ ${boss.defeatedLine}`;
+        if (promptEl) promptEl.textContent = `+$${boss.bounty} Claimed`;
+        sfxBossDown();
+        refreshBountyTotals(true);
+      } else {
+        if (promptEl) promptEl.textContent = '💥 Keep Blasting!';
+        sfxBlast(res.crit);
+        refreshBountyTotals(false);
+      }
+    });
+  });
+
+  bountyResetBtn?.addEventListener('click', () => {
+    sfxClick();
+    MUTANT_BOSSES.forEach((boss) => {
+      bossHpMap.set(boss.id, boss.maxHp);
+      const card = document.querySelector<HTMLElement>(`[data-boss-card][data-boss-id="${boss.id}"]`);
+      if (!card) return;
+      card.classList.remove('defeated', 'hit-shake');
+      const img = card.querySelector<HTMLImageElement>('[data-boss-img]');
+      const hpText = card.querySelector<HTMLElement>('[data-boss-hp-text]');
+      const hpFill = card.querySelector<HTMLElement>('[data-boss-hp-fill]');
+      const progressBar = card.querySelector<HTMLElement>('[data-boss-progressbar]');
+      const quoteEl = card.querySelector<HTMLElement>('[data-boss-quote]');
+      const promptEl = card.querySelector<HTMLElement>('[data-boss-prompt]');
+
+      if (img) img.src = boss.normalImg;
+      if (hpText) hpText.textContent = `${boss.maxHp} / ${boss.maxHp} HP`;
+      if (hpFill) {
+        hpFill.style.width = '100%';
+        hpFill.style.background = '#57e389';
+      }
+      progressBar?.setAttribute('aria-valuenow', String(boss.maxHp));
+      if (quoteEl) quoteEl.textContent = `“${boss.taunt}”`;
+      if (promptEl) promptEl.textContent = '🎯 Click to Blast';
+    });
+    refreshBountyTotals(false);
+  });
+
+  // --- 5. Earl & Edna Reaction Stage ---
+  const ednaImg = document.getElementById('edna-img') as HTMLImageElement | null;
+  const ednaPosePill = document.getElementById('edna-pose-pill');
+  const ednaLine = document.getElementById('edna-line');
+  const earlImg = document.getElementById('earl-img') as HTMLImageElement | null;
+  const earlPosePill = document.getElementById('earl-pose-pill');
+  const earlLine = document.getElementById('earl-line');
+  const scenarioBtns = document.querySelectorAll<HTMLButtonElement>('[data-scenario-btn]');
+
+  let ednaPoseIndex = 0;
+  let earlPoseIndex = Math.max(
+    0,
+    EARL_POSES.findIndex((p) => p.id === BANTER_SCENARIOS[0].earlPoseId),
+  );
+
+  function renderEdnaPose(idx: number) {
+    ednaPoseIndex = ((idx % EDNA_POSES.length) + EDNA_POSES.length) % EDNA_POSES.length;
+    const pose = EDNA_POSES[ednaPoseIndex];
+    if (ednaImg) {
+      ednaImg.src = pose.img;
+      ednaImg.alt = `Edna — ${pose.label}`;
+    }
+    if (ednaPosePill) {
+      ednaPosePill.textContent = `Pose ${ednaPoseIndex + 1}/${EDNA_POSES.length} · ${pose.label}`;
+    }
+  }
+
+  function renderEarlPose(idx: number) {
+    earlPoseIndex = ((idx % EARL_POSES.length) + EARL_POSES.length) % EARL_POSES.length;
+    const pose = EARL_POSES[earlPoseIndex];
+    if (earlImg) {
+      earlImg.src = pose.img;
+      earlImg.alt = `Earl — ${pose.label}`;
+    }
+    if (earlPosePill) {
+      earlPosePill.textContent = `Pose ${earlPoseIndex + 1}/${EARL_POSES.length} · ${pose.label}`;
+    }
+  }
+
+  document.getElementById('edna-cycle-btn')?.addEventListener('click', () => {
+    sfxClick();
+    renderEdnaPose(ednaPoseIndex + 1);
+  });
+
+  document.getElementById('earl-cycle-btn')?.addEventListener('click', () => {
+    sfxClick();
+    renderEarlPose(earlPoseIndex + 1);
+  });
+
+  scenarioBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const sc = BANTER_SCENARIOS.find((s) => s.id === btn.dataset.scenarioId);
+      if (!sc) return;
+      sfxClick();
+
+      scenarioBtns.forEach((b) => {
+        const active = b === btn;
+        b.classList.toggle('active', active);
+        b.setAttribute('aria-pressed', String(active));
+      });
+
+      const nextEdna = EDNA_POSES.findIndex((p) => p.id === sc.ednaPoseId);
+      const nextEarl = EARL_POSES.findIndex((p) => p.id === sc.earlPoseId);
+      if (nextEdna >= 0) renderEdnaPose(nextEdna);
+      if (nextEarl >= 0) renderEarlPose(nextEarl);
+
+      if (ednaLine) ednaLine.textContent = `“${sc.ednaLine}”`;
+      if (earlLine) earlLine.textContent = `“${sc.earlLine}”`;
+    });
+  });
+
+  // --- 6. 3-Slot Rig Loadout Tinkerer ---
+  let selectedWeapon = RIG_WEAPONS[0].id;
+  let selectedDrone = RIG_DRONES[0].id;
+  let selectedPowerup = RIG_POWERUPS[0].id;
+
+  const rigTitle = document.getElementById('rig-title');
+  const rigSummary = document.getElementById('rig-summary');
+  const meterChaos = document.getElementById('meter-chaos');
+  const meterSwarm = document.getElementById('meter-swarm');
+  const meterBoss = document.getElementById('meter-boss');
+  const valChaos = document.getElementById('val-chaos');
+  const valSwarm = document.getElementById('val-swarm');
+  const valBoss = document.getElementById('val-boss');
+  const rigVideo = document.getElementById('rig-video') as HTMLVideoElement | null;
+  const partBtns = document.querySelectorAll<HTMLButtonElement>('[data-part-slot]');
+
+  function refreshRig() {
+    const syn = computeRigSynergy(selectedWeapon, selectedDrone, selectedPowerup);
+    if (rigTitle) rigTitle.textContent = syn.title;
+    if (rigSummary) rigSummary.textContent = syn.summary;
+    if (meterChaos) meterChaos.style.width = `${syn.chaos}%`;
+    if (meterSwarm) meterSwarm.style.width = `${syn.swarm}%`;
+    if (meterBoss) meterBoss.style.width = `${syn.bossMelt}%`;
+    if (valChaos) valChaos.textContent = String(syn.chaos);
+    if (valSwarm) valSwarm.textContent = String(syn.swarm);
+    if (valBoss) valBoss.textContent = String(syn.bossMelt);
+
+    if (rigVideo && rigVideo.getAttribute('src') !== syn.clip) {
+      rigVideo.src = syn.clip;
+      if (!prefersReducedMotion.matches) {
+        rigVideo.play().catch(() => {});
+      }
+    }
+
+    partBtns.forEach((btn) => {
+      const slot = btn.dataset.partSlot;
+      const id = btn.dataset.partId;
+      const active =
+        (slot === 'weapon' && id === selectedWeapon) ||
+        (slot === 'drone' && id === selectedDrone) ||
+        (slot === 'powerup' && id === selectedPowerup);
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', String(active));
+    });
+  }
+
+  partBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const slot = btn.dataset.partSlot;
+      const id = btn.dataset.partId;
+      if (!slot || !id) return;
+      sfxClick();
+      if (slot === 'weapon') selectedWeapon = id;
+      if (slot === 'drone') selectedDrone = id;
+      if (slot === 'powerup') selectedPowerup = id;
+      refreshRig();
+    });
+  });
+
+  document.getElementById('rig-randomize')?.addEventListener('click', () => {
+    sfxClick();
+    selectedWeapon = RIG_WEAPONS[Math.floor(Math.random() * RIG_WEAPONS.length)].id;
+    selectedDrone = RIG_DRONES[Math.floor(Math.random() * RIG_DRONES.length)].id;
+    selectedPowerup = RIG_POWERUPS[Math.floor(Math.random() * RIG_POWERUPS.length)].id;
+    refreshRig();
+  });
+
+  // --- 7. Screenshot Lightbox ---
+  const lightbox = document.getElementById('shot-lightbox') as HTMLDialogElement | null;
+  const lightboxImg = document.getElementById('lightbox-img') as HTMLImageElement | null;
+  const lightboxCaption = document.getElementById('lightbox-caption');
+  let activeShotIndex = 0;
+
+  function showShot(idx: number) {
+    activeShotIndex = ((idx % WASTELAND_SHOTS.length) + WASTELAND_SHOTS.length) % WASTELAND_SHOTS.length;
+    const shot = WASTELAND_SHOTS[activeShotIndex];
+    if (lightboxImg) {
+      lightboxImg.src = shot.src;
+      lightboxImg.alt = shot.alt;
+    }
+    if (lightboxCaption) lightboxCaption.textContent = shot.caption;
+  }
+
+  document.querySelectorAll<HTMLButtonElement>('[data-shot-index]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sfxClick();
+      showShot(Number(btn.dataset.shotIndex ?? 0));
+      lightbox?.showModal();
+    });
+  });
+
+  document.getElementById('lightbox-close')?.addEventListener('click', () => lightbox?.close());
+  document.getElementById('lightbox-prev')?.addEventListener('click', () => {
+    sfxClick();
+    showShot(activeShotIndex - 1);
+  });
+  document.getElementById('lightbox-next')?.addEventListener('click', () => {
+    sfxClick();
+    showShot(activeShotIndex + 1);
+  });
+  lightbox?.addEventListener('click', (e) => {
+    if (e.target === lightbox) lightbox.close();
+  });
+</script>
+
+<style>
+  .earl-page {
+    --earl-orange: #ff7a1a;
+    --earl-gold: #ffd137;
+    --earl-red: #ff3b4e;
+    --earl-panel: rgba(20, 14, 24, 0.86);
+    --earl-border: rgba(255, 138, 52, 0.34);
+    background:
+      radial-gradient(ellipse 80% 35% at 50% 18%, rgba(255, 94, 26, 0.16), transparent 70%),
+      linear-gradient(180deg, #120b18 0%, #0b1335 45%, var(--navy) 100%);
+  }
+
+  .earl-eyebrow {
+    color: var(--earl-gold);
+  }
+
+  /* ---- Hero ---- */
+  .earl-hero {
+    position: relative;
+    padding-top: clamp(104px, 13vw, 136px);
+    padding-bottom: clamp(52px, 8vw, 88px);
+    overflow: hidden;
+    border-bottom: 2px solid rgba(255, 122, 26, 0.32);
+  }
+
+  .hero-media {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+  }
+
+  .hero-video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    filter: saturate(1.12) contrast(1.05) brightness(0.55);
+    transition: filter 0.25s ease;
+  }
+
+  .earl-hero.overdrive .hero-video {
+    filter: saturate(1.38) contrast(1.12) brightness(0.68);
+  }
+
+  .hero-scrim {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 22% 38%, rgba(16, 8, 18, 0.42), rgba(11, 10, 24, 0.88) 72%),
+      linear-gradient(180deg, rgba(8, 14, 38, 0.78) 0%, rgba(18, 10, 18, 0.52) 45%, #120b18 100%);
+  }
+
+  .ember-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  .hero-inner {
+    position: relative;
+    z-index: 1;
+  }
+
+  .hero-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: clamp(22px, 3.5vw, 36px);
+  }
+
+  .crumb {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: rgba(12, 14, 28, 0.72);
+    border: 1px solid rgba(255, 209, 55, 0.3);
+    font-family: var(--font-display);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--sand);
+  }
+  .crumb:hover {
+    border-color: var(--earl-gold);
+    color: var(--earl-gold);
+  }
+
+  .hero-badges {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .pill {
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    background: rgba(17, 15, 30, 0.78);
+    border: 1px solid rgba(236, 223, 210, 0.24);
+    color: var(--sand);
+  }
+
+  .live-pill {
+    background: rgba(255, 122, 26, 0.22);
+    border-color: var(--earl-orange);
+    color: #ffe3ba;
+  }
+
+  .sfx-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    padding: 7px 14px;
+    border-radius: 999px;
+    background: rgba(17, 15, 30, 0.84);
+    border: 1px solid rgba(255, 209, 55, 0.35);
+    color: var(--sand);
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .sfx-toggle[aria-pressed='true'] {
+    background: rgba(255, 122, 26, 0.28);
+    border-color: var(--earl-gold);
+    color: #fff6d6;
+  }
+
+  .hero-grid {
+    display: grid;
+    grid-template-columns: 1.15fr 0.95fr;
+    gap: clamp(24px, 4vw, 44px);
+    align-items: center;
+  }
+
+  .earl-logo {
+    width: min(100%, 440px);
+    height: auto;
+    filter: drop-shadow(0 16px 28px rgba(0, 0, 0, 0.65));
+    margin-bottom: 14px;
+  }
+
+  .hero-kicker {
+    font-family: var(--font-display);
+    font-size: clamp(1rem, 1.9vw, 1.3rem);
+    font-weight: 900;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--earl-gold);
+    margin-bottom: 12px;
+  }
+
+  .hero-lede {
+    font-size: clamp(1rem, 1.4vw, 1.12rem);
+    color: #f4e8dc;
+    max-width: 58ch;
+    margin-bottom: 24px;
+  }
+
+  /* Tactile 3D Arcade Buttons */
+  .cta-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .cta-row.center {
+    justify-content: center;
+  }
+
+  .arcade-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    min-height: 48px;
+    padding: 12px 20px;
+    border-radius: 12px;
+    font-family: var(--font-display);
+    font-size: 0.84rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    border: 2px solid rgba(255, 255, 255, 0.22);
+    transition: transform 0.1s ease, filter 0.15s ease, box-shadow 0.15s ease;
+    user-select: none;
+  }
+
+  .steam-btn {
+    background: linear-gradient(180deg, #ff9929 0%, #e8580c 100%);
+    color: #160904;
+    border-color: #ffd584;
+    box-shadow: 0 5px 0 #8c2d04, 0 14px 28px rgba(255, 102, 16, 0.42);
+  }
+
+  .overdrive-btn {
+    background: linear-gradient(180deg, #ff4757 0%, #b5172c 100%);
+    color: #fff7eb;
+    border-color: #ff9aa4;
+    box-shadow: 0 5px 0 #690916, 0 14px 28px rgba(255, 59, 78, 0.36);
+  }
+  .overdrive-btn[aria-pressed='true'] {
+    transform: translateY(4px);
+    box-shadow: 0 1px 0 #690916, 0 0 26px rgba(255, 209, 55, 0.8);
+    background: linear-gradient(180deg, #ffd137 0%, #ff5722 100%);
+    color: #1a0802;
+  }
+
+  .trailer-btn {
+    background: rgba(20, 18, 36, 0.86);
+    color: var(--sand);
+    border-color: rgba(236, 223, 210, 0.36);
+    box-shadow: 0 5px 0 rgba(7, 6, 14, 0.9);
+  }
+
+  .mini-btn {
+    min-height: 42px;
+    padding: 9px 16px;
+    font-size: 0.76rem;
+    background: rgba(34, 24, 44, 0.92);
+    color: var(--sand);
+    border-color: rgba(255, 162, 76, 0.45);
+    box-shadow: 0 4px 0 rgba(10, 7, 14, 0.9);
+  }
+
+  @media (hover: hover) {
+    .arcade-btn:hover {
+      filter: brightness(1.08);
+      transform: translateY(-2px);
+    }
+  }
+  .arcade-btn:active {
+    transform: translateY(3px);
+  }
+
+  .key-hint {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 5px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    font-size: 0.7rem;
+  }
+
+  /* Dashboard HUD */
+  .dash-hud {
+    background: var(--earl-panel);
+    border: 2px solid var(--earl-border);
+    border-radius: 20px;
+    padding: 22px;
+    box-shadow: 0 24px 55px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(10px);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease;
+  }
+  .dash-hud.overdrive {
+    border-color: var(--earl-gold);
+    box-shadow: 0 0 42px rgba(255, 122, 26, 0.55), inset 0 0 22px rgba(255, 94, 26, 0.25);
+  }
+
+  .dash-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 12px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+  }
+  .dash-tag {
+    color: var(--text-muted);
+  }
+  .dash-status {
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(255, 122, 26, 0.2);
+    color: var(--earl-gold);
+    font-weight: 900;
+  }
+
+  .speedo-row {
+    display: grid;
+    grid-template-columns: 170px 1fr;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+
+  .gauge-wrap {
+    position: relative;
+    text-align: center;
+  }
+  .speedo-svg {
+    width: 100%;
+    max-width: 176px;
+    margin-inline: auto;
+  }
+  #speedo-needle {
+    transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .speedo-readout {
+    margin-top: -8px;
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 5px;
+    font-family: var(--font-display);
+  }
+  .speedo-readout strong {
+    font-size: 1.9rem;
+    color: #fff6e0;
+  }
+  .speedo-readout span {
+    font-size: 0.72rem;
+    color: var(--earl-gold);
+    letter-spacing: 0.14em;
+  }
+
+  .readout-label {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.2em;
+    color: var(--text-muted);
+  }
+  .readout-sector {
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    font-weight: 800;
+    color: #fff4e4;
+    margin: 2px 0 4px;
+  }
+  .readout-hazard {
+    font-size: 0.84rem;
+    font-weight: 800;
+    color: var(--earl-gold);
+    margin-bottom: 6px;
+  }
+  .readout-blurb {
+    font-size: 0.88rem;
+    line-height: 1.45;
+    color: var(--silver);
+    margin: 0;
+  }
+
+  .gear-shifter {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .gear-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: var(--sand);
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .gear-btn.active {
+    background: rgba(255, 122, 26, 0.24);
+    border-color: var(--earl-orange);
+  }
+  .gear-num {
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    font-weight: 900;
+    color: var(--earl-gold);
+  }
+  .gear-text {
+    font-size: 0.8rem;
+    font-weight: 800;
+    line-height: 1.2;
+  }
+
+  /* ---- 2. Boss Bounty Arena ---- */
+  .bounty-hud {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 16px 22px;
+    margin: 28px 0 24px;
+    border-radius: 16px;
+    background: rgba(18, 14, 28, 0.88);
+    border: 1px solid var(--earl-border);
+  }
+  .bounty-stat {
+    display: flex;
+    flex-direction: column;
+  }
+  .stat-label {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .stat-val {
+    font-family: var(--font-display);
+    font-size: 1.45rem;
+    color: var(--sand);
+  }
+  .stat-val.cash {
+    color: #63e884;
+  }
+  .stat-val small {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+
+  .eotm-banner {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 20px;
+    align-items: center;
+    padding: 22px 26px;
+    margin-bottom: 26px;
+    border-radius: 18px;
+    background: linear-gradient(135deg, rgba(255, 153, 41, 0.26), rgba(137, 49, 114, 0.42));
+    border: 2px solid var(--earl-gold);
+    box-shadow: 0 20px 50px rgba(255, 122, 26, 0.28);
+  }
+  .eotm-banner[hidden] {
+    display: none;
+  }
+  .eotm-badge {
+    display: inline-block;
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    font-weight: 900;
+    letter-spacing: 0.16em;
+    color: var(--earl-gold);
+    margin-bottom: 4px;
+  }
+  .eotm-copy h3 {
+    margin-bottom: 6px;
+  }
+  .eotm-copy p {
+    margin: 0;
+  }
+
+  .boss-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 14px;
+  }
+  @media (max-width: 1120px) {
+    .boss-grid {
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 18px;
+    }
+  }
+
+  .boss-card {
+    display: flex;
+    flex-direction: column;
+    background: rgba(17, 16, 36, 0.88);
+    border: 1.5px solid color-mix(in srgb, var(--boss-accent) 42%, rgba(255, 255, 255, 0.12));
+    border-radius: 18px;
+    overflow: hidden;
+    transition: transform 0.18s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  @media (hover: hover) {
+    .boss-card:hover {
+      transform: translateY(-4px);
+      border-color: var(--boss-accent);
+      box-shadow: 0 20px 40px -22px var(--boss-accent);
+    }
+  }
+
+  .boss-card.hit-shake {
+    animation: bossShake 0.24s ease;
+  }
+  @keyframes bossShake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-6px) rotate(-1deg); }
+    75% { transform: translateX(6px) rotate(1deg); }
+  }
+
+  .boss-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 14px;
+    background: rgba(0, 0, 0, 0.28);
+    font-size: 0.72rem;
+    font-weight: 800;
+  }
+  .bounty-tag {
+    font-family: var(--font-display);
+    color: var(--earl-gold);
+    letter-spacing: 0.08em;
+  }
+  .boss-role {
+    color: var(--text-muted);
+  }
+
+  .boss-hit-zone {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 0.92;
+    padding: 14px;
+    background: radial-gradient(circle at 50% 58%, color-mix(in srgb, var(--boss-accent) 26%, transparent), transparent 70%);
+    border: 0;
+    cursor: crosshair;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+  }
+  .boss-sprite {
+    max-height: 195px;
+    width: auto;
+    object-fit: contain;
+    transition: transform 0.16s ease, filter 0.25s ease;
+    pointer-events: none;
+  }
+  .boss-hit-zone:active .boss-sprite {
+    transform: scale(0.93);
+  }
+  .boss-card.defeated .boss-sprite {
+    filter: grayscale(0.85) contrast(0.85) brightness(0.6);
+    transform: scale(0.88) rotate(-6deg);
+  }
+
+  .crosshair-pill {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(10, 10, 20, 0.82);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    color: var(--sand);
+    font-size: 0.72rem;
+    font-weight: 800;
+  }
+
+  .exterminated-stamp {
+    position: absolute;
+    padding: 6px 14px;
+    border: 3px solid #63e884;
+    border-radius: 8px;
+    background: rgba(8, 20, 14, 0.9);
+    color: #63e884;
+    font-family: var(--font-display);
+    font-size: 0.92rem;
+    font-weight: 900;
+    letter-spacing: 0.14em;
+    transform: rotate(-11deg) scale(0.6);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+  }
+  .boss-card.defeated .exterminated-stamp {
+    opacity: 1;
+    transform: rotate(-11deg) scale(1);
+  }
+
+  .dmg-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  :global(.dmg-pop) {
+    position: absolute;
+    top: 42%;
+    transform: translateX(-50%);
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 900;
+    color: #fff;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.9);
+    animation: dmgFloat 0.72s ease-out forwards;
+  }
+  :global(.dmg-pop.crit) {
+    color: #ffd137;
+    font-size: 1.15rem;
+  }
+  @keyframes dmgFloat {
+    0% { opacity: 1; transform: translate(-50%, 0) scale(0.9); }
+    100% { opacity: 0; transform: translate(-50%, -52px) scale(1.12); }
+  }
+
+  .boss-body {
+    padding: 14px 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1;
+  }
+  .hp-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .hp-meta h3 {
+    font-size: 1rem;
+    margin: 0;
+  }
+  .hp-numbers {
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    color: var(--earl-gold);
+    white-space: nowrap;
+  }
+  .hp-track {
+    height: 9px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+  }
+  .hp-fill {
+    height: 100%;
+    background: #57e389;
+    transition: width 0.18s ease, background 0.2s ease;
+  }
+  .boss-weakness {
+    font-size: 0.82rem;
+    color: var(--silver);
+    margin: 0;
+  }
+  .boss-quote {
+    font-size: 0.86rem;
+    font-style: italic;
+    color: #f6e7d8;
+    margin: auto 0 0;
+  }
+
+  /* ---- 3. Earl & Edna Stage ---- */
+  .scenario-bar {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+    margin: 26px 0 28px;
+  }
+  .scenario-btn {
+    padding: 10px 16px;
+    min-height: 44px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: var(--sand);
+    font-weight: 800;
+    font-size: 0.88rem;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+  }
+  .scenario-btn.active {
+    background: rgba(255, 122, 26, 0.26);
+    border-color: var(--earl-gold);
+    color: #fff6dc;
+  }
+
+  .duo-stage {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 22px;
+  }
+  .char-panel {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 18px;
+    align-items: center;
+    padding: 20px;
+    border-radius: 20px;
+    background: rgba(16, 18, 44, 0.82);
+    border: 1.5px solid rgba(255, 162, 76, 0.28);
+  }
+  .portrait-btn {
+    position: relative;
+    padding: 10px;
+    border-radius: 16px;
+    background: radial-gradient(circle at 50% 60%, rgba(255, 122, 26, 0.24), rgba(8, 12, 28, 0.7));
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+  }
+  .portrait-btn img {
+    max-height: 190px;
+    width: auto;
+    object-fit: contain;
+    transition: transform 0.15s ease;
+  }
+  @media (hover: hover) {
+    .portrait-btn:hover img {
+      transform: scale(1.05);
+    }
+  }
+  .pose-pill {
+    margin-top: 8px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(10, 10, 22, 0.86);
+    color: var(--earl-gold);
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.08em;
+  }
+  .speaker-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .speaker-row strong {
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    color: var(--earl-gold);
+  }
+  .speaker-row span {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+  .speech-line {
+    font-size: 1.04rem;
+    font-weight: 700;
+    color: #fff4e8;
+    margin-bottom: 10px;
+  }
+  .tap-hint {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+  }
+
+  /* ---- 4. Roguelite Rig Garage ---- */
+  .garage-grid {
+    display: grid;
+    grid-template-columns: 1.05fr 0.95fr;
+    gap: 26px;
+    margin-top: 28px;
+    align-items: start;
+  }
+  .loadout-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .slot-title {
+    font-family: var(--font-display);
+    font-size: 0.78rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--earl-gold);
+    margin-bottom: 8px;
+  }
+  .part-pills {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .part-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    background: rgba(18, 22, 54, 0.76);
+    border: 1.5px solid rgba(255, 255, 255, 0.14);
+    color: var(--sand);
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .part-btn strong {
+    font-size: 0.92rem;
+  }
+  .part-btn span {
+    font-size: 0.78rem;
+    color: var(--silver);
+    line-height: 1.3;
+  }
+  .part-btn.active {
+    background: rgba(255, 122, 26, 0.22);
+    border-color: var(--earl-orange);
+  }
+  .randomize-btn {
+    align-self: flex-start;
+  }
+
+  .synergy-monitor {
+    background: rgba(15, 16, 38, 0.9);
+    border: 2px solid var(--earl-border);
+    border-radius: 20px;
+    overflow: hidden;
+  }
+  .monitor-screen {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    background: #070812;
+  }
+  .monitor-screen video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .monitor-badge {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(12, 10, 20, 0.82);
+    border: 1px solid var(--earl-gold);
+    color: var(--earl-gold);
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+  }
+  .synergy-card {
+    padding: 20px 22px 22px;
+  }
+  .synergy-tag {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    color: var(--earl-gold);
+  }
+  .synergy-head h3 {
+    margin: 4px 0 6px;
+  }
+  .meters {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 16px 0 18px;
+  }
+  .meter-row {
+    display: grid;
+    grid-template-columns: 112px 1fr 34px;
+    gap: 10px;
+    align-items: center;
+    font-size: 0.84rem;
+    font-weight: 800;
+  }
+  .meter-bar {
+    height: 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+  }
+  .meter-bar > div {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #ffd137, #ff6a1a);
+    transition: width 0.25s ease;
+  }
+  .meter-row strong {
+    font-family: var(--font-display);
+    font-size: 0.8rem;
+    text-align: right;
+    color: var(--earl-gold);
+  }
+  .action-gif-strip {
+    display: grid;
+    grid-template-columns: 132px 1fr;
+    gap: 14px;
+    align-items: center;
+    padding-top: 16px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  .action-gif-strip img {
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+  }
+  .action-gif-strip p {
+    margin: 4px 0 0;
+    font-size: 0.84rem;
+  }
+
+  /* ---- 5. Wasteland Gallery ---- */
+  .shots-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-top: 28px;
+  }
+  .shot-card {
+    position: relative;
+    padding: 0;
+    border-radius: 16px;
+    overflow: hidden;
+    border: 1.5px solid rgba(255, 255, 255, 0.16);
+    background: #090d22;
+    cursor: pointer;
+    text-align: left;
+  }
+  .shot-card.featured {
+    grid-column: span 2;
+  }
+  .shot-card img {
+    width: 100%;
+    height: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    transition: transform 0.35s ease;
+  }
+  @media (hover: hover) {
+    .shot-card:hover img {
+      transform: scale(1.04);
+    }
+  }
+  .shot-caption {
+    position: absolute;
+    inset: auto 0 0 0;
+    padding: 26px 14px 12px;
+    background: linear-gradient(180deg, transparent, rgba(7, 8, 18, 0.92));
+    color: var(--sand);
+    font-size: 0.84rem;
+    font-weight: 700;
+  }
+
+  /* ---- 6. Finale & Cross-link ---- */
+  .finale-card {
+    position: relative;
+    border-radius: 24px;
+    overflow: hidden;
+    border: 2px solid var(--earl-border);
+    padding: clamp(36px, 6vw, 64px) clamp(20px, 5vw, 56px);
+    text-align: center;
+  }
+  .finale-bg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    filter: brightness(0.42) saturate(1.15);
+  }
+  .finale-scrim {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 50%, rgba(20, 10, 22, 0.62), rgba(10, 12, 32, 0.92));
+  }
+  .finale-content {
+    position: relative;
+    z-index: 1;
+    max-width: 640px;
+    margin-inline: auto;
+  }
+  .studio-badge {
+    margin: 0 auto 16px;
+    height: 48px;
+    width: auto;
+    padding: 8px 18px;
+    border-radius: 999px;
+    background: rgba(236, 223, 210, 0.94);
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+  }
+  .finale-content p {
+    font-size: 1.06rem;
+    margin-bottom: 22px;
+  }
+
+  .cross-link-bar {
+    margin-top: 28px;
+    padding: 26px 30px;
+    border-radius: 20px;
+    background: var(--surface);
+    border: 1px solid var(--surface-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+  .cross-eyebrow {
+    display: block;
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    letter-spacing: 0.2em;
+    color: #3be7ff;
+    margin-bottom: 6px;
+  }
+  .cross-link-bar h3 {
+    margin-bottom: 4px;
+  }
+  .cross-link-bar p {
+    margin: 0;
+    max-width: 58ch;
+  }
+
+  /* Lightbox */
+  .shot-lightbox {
+    max-width: min(92vw, 1040px);
+    width: 100%;
+    padding: 0;
+    border: 2px solid var(--earl-gold);
+    border-radius: 20px;
+    background: #0b0e24;
+    color: var(--sand);
+  }
+  .shot-lightbox::backdrop {
+    background: rgba(4, 6, 16, 0.86);
+    backdrop-filter: blur(5px);
+  }
+  .lightbox-inner {
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .lightbox-close {
+    align-self: flex-end;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    color: var(--sand);
+    font-family: var(--font-display);
+    font-size: 0.76rem;
+    cursor: pointer;
+  }
+  #lightbox-img {
+    width: 100%;
+    max-height: 72vh;
+    object-fit: contain;
+    border-radius: 12px;
+    background: #050713;
+  }
+  .lightbox-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  #lightbox-caption {
+    margin: 0;
+    text-align: center;
+    font-weight: 700;
+  }
+
+  /* Responsive */
+  @media (max-width: 960px) {
+    .hero-grid,
+    .duo-stage,
+    .garage-grid {
+      grid-template-columns: 1fr;
+    }
+    .shots-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+    .shot-card.featured {
+      grid-column: span 2;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .speedo-row,
+    .char-panel,
+    .part-pills,
+    .action-gif-strip,
+    .eotm-banner,
+    .shots-grid {
+      grid-template-columns: 1fr;
+    }
+    .shot-card.featured {
+      grid-column: span 1;
+    }
+    .gear-shifter {
+      grid-template-columns: 1fr;
+    }
+    .cta-row .arcade-btn {
+      width: 100%;
+    }
+  }
+</style>

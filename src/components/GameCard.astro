@@ -8,7 +8,7 @@ const Heading = headingLevel === 2 ? 'h2' : 'h3';
 ---
 
 <article class:list={['card game', { featured }]} style={`--game-accent: ${game.accent}`}>
-  <a href={game.url} target="_blank" rel="noopener" class="media" aria-label={`${game.status}: ${game.title}`}>
+  <a href={game.pageHref} class="media" aria-label={`Explore ${game.title} (${game.status})`}>
     <Image src={game.image} alt={`${game.title} key art`} widths={[480, 800, 1200]} sizes="(max-width: 720px) 100vw, 50vw" loading={featured ? 'eager' : 'lazy'} />
     <span class="status">{game.status}</span>
   </a>
@@ -17,13 +17,19 @@ const Heading = headingLevel === 2 ? 'h2' : 'h3';
       <span class="tag">{game.audience}</span>
       <span class="tag">{game.platform}</span>
     </div>
-    <Heading class="title">{game.title}</Heading>
+    <Heading class="title"><a href={game.pageHref} class="title-link">{game.title}</a></Heading>
     <p class="tagline">{game.tagline}</p>
     <p class="muted desc">{game.description}</p>
-    <a href={game.url} target="_blank" rel="noopener" class="btn">
-      {game.cta}
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8h10m0 0L9 4m4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    </a>
+    <div class="actions">
+      <a href={game.pageHref} class="btn">
+        Explore world
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8h10m0 0L9 4m4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
+      <a href={game.url} target="_blank" rel="noopener" class="btn ghost">
+        {game.cta}
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5 11L11 5M11 5H6M11 5v5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
+    </div>
   </div>
 </article>
 
@@ -40,6 +46,7 @@ const Heading = headingLevel === 2 ? 'h2' : 'h3';
       box-shadow: 0 30px 60px -30px color-mix(in srgb, var(--game-accent) 45%, transparent);
     }
     .game:hover .media img { transform: scale(1.04); }
+    .title-link:hover { color: var(--game-accent); }
   }
   .media {
     position: relative;
@@ -69,12 +76,14 @@ const Heading = headingLevel === 2 ? 'h2' : 'h3';
   .body { padding: 26px 26px 30px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
   .tags { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
   .title { margin-bottom: 4px; font-size: clamp(1.15rem, 2vw, 1.4rem); }
+  .title-link { transition: color 0.15s ease; }
   .tagline { font-weight: 800; margin-bottom: 8px; }
   .desc { flex: 1; }
-  .btn { align-self: flex-start; margin-top: 8px; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
 
   @media (max-width: 480px) {
     .body { padding: 20px 20px 24px; }
-    .btn { align-self: stretch; justify-content: center; }
+    .actions { flex-direction: column; align-items: stretch; }
+    .actions .btn { justify-content: center; }
   }
 </style>

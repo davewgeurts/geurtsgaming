@@ -10,6 +10,7 @@ export interface Game {
   audience: string;
   platform: string;
   status: string;
+  pageHref: string;
   url: string;
   cta: string;
   image: ImageMetadata;
@@ -26,6 +27,7 @@ export const games: Game[] = [
     audience: 'Ages 6–14',
     platform: 'Browser',
     status: 'Free to play',
+    pageHref: '/games/cool-typing-games/',
     url: 'https://cooltypinggames.com',
     cta: 'Play free',
     image: coolTyping,
@@ -40,6 +42,7 @@ export const games: Game[] = [
     audience: 'Teens & up',
     platform: 'PC · Steam',
     status: 'Out now',
+    pageHref: '/games/earl-vs-the-mutants/',
     url: 'https://earlvsthemutants.com',
     cta: 'Get the game',
     image: earl,
