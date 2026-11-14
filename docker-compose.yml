@@ -126,6 +126,7 @@ services:
     profiles: ["tools"]
     command: ["npm", "test"]
     volumes:
+      - ./.github:/app/.github:ro
       - ./src:/app/src:ro
       - ./public:/app/public:ro
       - ./tests:/app/tests:ro
@@ -145,6 +146,7 @@ services:
     profiles: ["tools"]
     command: ["npm", "run", "build"]
     volumes:
+      - ./.github:/app/.github:ro
       - ./src:/app/src:ro
       - ./public:/app/public:ro
       - ./tests:/app/tests:ro

@@ -19,19 +19,43 @@ import {
   generateRoomCode,
   isAllowedRelayOrigin,
   normalizeRoomCode,
+  randomToken,
 } from './room.mjs';
 
-// Classroom-safe per-IP limits (in-memory per Worker isolate; never persisted to storage).
+// Classroom-safe per-IP limits (in-memory per Worker isolate; salted & one-way hashed so not even
+// transient isolate RAM holds raw IP address strings, and never persisted to storage).
 const MAX_ROOMS_PER_IP_PER_MIN = 60;
 const MAX_JOIN_ATTEMPTS_PER_IP_PER_MIN = 300;
+const ISOLATE_RATE_SALT = randomToken();
 const createRateByIp = new Map();
 const hostOpenRateByIp = new Map();
 const joinRateByIp = new Map();
 
+export function hashRateKey(ip) {
+  const input = `${ISOLATE_RATE_SALT}:${ip || 'unknown'}`;
+  let h1 = 0x811c9dc5;
+  let h2 = 0xcbf29ce4;
+  for (let i = 0; i < input.length; i++) {
+    const c = input.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ (c + i), 0x01000193) >>> 0;
+  }
+  return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
+}
+
+export function inspectRateMapKeys() {
+  return [
+    ...createRateByIp.keys(),
+    ...hostOpenRateByIp.keys(),
+    ...joinRateByIp.keys(),
+  ];
+}
+
 function checkIpRate(map, ip, limit, now = Date.now()) {
-  const recent = (map.get(ip) || []).filter((ts) => now - ts < 60_000);
+  const key = hashRateKey(ip);
+  const recent = (map.get(key) || []).filter((ts) => now - ts < 60_000);
   if (recent.length >= limit) {
-    map.set(ip, recent);
+    map.set(key, recent);
     return false;
   }
   recent.push(now);
@@ -39,7 +63,7 @@ function checkIpRate(map, ip, limit, now = Date.now()) {
     const oldest = map.keys().next().value;
     if (oldest !== undefined) map.delete(oldest);
   }
-  map.set(ip, recent);
+  map.set(key, recent);
   return true;
 }
 
