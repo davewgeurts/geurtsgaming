@@ -8,6 +8,8 @@ import {
   clientToArenaPoint,
   computeCoopViewportLayout,
 } from '../src/game/coop-thumbdeck';
+
+const thumbDeckR15 = await import('../src/game/coop-thumbdeck');
 import { COOP_ARENA_HEIGHT, COOP_ARENA_WIDTH, type CoopPublicSeat } from '../src/game/coop-types';
 import { NEON, type Ink } from '../src/game/core';
 import { textWidth } from '../src/game/font';
@@ -39,10 +41,13 @@ test('computeCoopViewportLayout reserves bottom 38% on portrait phones and full 
   assert.ok(Math.abs(ipad.arenaRect.w / ipad.arenaRect.h - 0.75) < 1e-6);
   assert.ok(ipad.arenaRect.w > 750);
 
-  // Landscape phone (844 x 390) & Laptop (1440 x 900)
+  // Landscape phone (844 x 390): the deck moves beside the arena (Round 15, 4.4). Laptop (1440 x 900): no deck.
   const landscape = computeCoopViewportLayout(844, 390, true);
-  assert.equal(landscape.useThumbDeck, false);
+  assert.equal(landscape.useThumbDeck, true);
+  assert.equal(landscape.deckSide, 'right');
   assert.equal(landscape.deckHeight, 0);
+  assert.ok(landscape.arenaRect.x + landscape.arenaRect.w <= landscape.deckRect.x, 'the deck sits beside the arena');
+  assert.ok(Math.abs(landscape.arenaRect.w / landscape.arenaRect.h - 0.75) < 1e-6);
 
   const laptop = computeCoopViewportLayout(1440, 900, false);
   assert.equal(laptop.useThumbDeck, false);
@@ -130,9 +135,10 @@ test('Portrait-phone Host lets 100% of touches pass through on Game Over or Paus
   assert.equal(dir.handlePointerDown(2, padX, padY, true), true);
   assert.equal(dir.deck.state().touching, true);
 
-  // 2. Rotate phone to landscape (`844 x 390`) mid-touch, lift finger, and rotate back (`390 x 844`)
+  // 2. Rotate phone to landscape (`844 x 390`) mid-touch, lift finger, and rotate back (`390 x 844`). Since Round 15
+  // (4.4) the deck moves beside the arena instead of going away; the held thumb is still let go.
   const landscape = dir.setViewport(844, 390, undefined, true);
-  assert.equal(landscape.useThumbDeck, false);
+  assert.equal(landscape.deckSide, 'right');
   assert.equal(dir.deck.state().touching, false, 'viewport switch immediately releases captured thumb pointer');
   dir.handlePointerUp(2);
   dir.setViewport(390, 844, undefined, true);
@@ -411,8 +417,9 @@ test('Round 13 (4.2): tablet portrait (768x1024 and 810x1080) wingman tags have 
   }
 });
 
-test('Round 13 (Sec 5): Guest Game Over shows host-relaunch notice without Top 10, Game Over hides reboot timers, and stacked wrecks stagger labels', () => {
-  // 1. Guest Game Over draws "WAITING FOR THE HOST TO RELAUNCH" (at mid + 96) and omits BEST + Top 10 + Retry
+test('Round 13 (Sec 5): Guest Game Over shows host-relaunch notice without Top 10, Game Over hides reboot timers, and stacked wrecks stagger labels', async () => {
+  // 1. A squad's game over is its mission summary: the solo HUD lines (BEST, Top 10, Retry) are not drawn at all, and
+  // a guest's summary says it is waiting for the host (Round 15, 6: the HUD's own co-op lines were never shown).
   const guestRec = createStrokeRecorder();
   renderMessages(
     baseHudContext(guestRec.ctx, guestRec.ink, {
@@ -424,11 +431,24 @@ test('Round 13 (Sec 5): Guest Game Over shows host-relaunch notice without Top 1
       coopRole: 'guest',
     }),
   );
-  const expectedWaitWidth = textWidth('WAITING FOR THE HOST TO RELAUNCH', 10);
-  assert.equal(guestRec.batches.length, 4, 'Guest Game Over draws exactly 4 lines (GAME OVER, SCORE, SQUAD SET FREE, WAITING FOR HOST)');
-  const waitBatch = guestRec.batches[3]!;
-  assert.equal(waitBatch.color, NEON.cyan);
-  assert.ok(Math.abs(waitBatch.w - expectedWaitWidth) < 4, 'bottom line matches WAITING FOR THE HOST TO RELAUNCH');
+  assert.equal(guestRec.batches.length, 0, 'the HUD draws nothing over a squad game over');
+  const { renderSquadMissionSummary } = await import('../src/game/coop-quiz');
+  const summaryRec = createStrokeRecorder();
+  renderSquadMissionSummary(summaryRec.ctx as never, summaryRec.ink, {
+    formattedCode: 'R13-SEC',
+    isHost: false,
+    coarse: false,
+    time: 0.2,
+    stateTime: 1.5,
+    score: 1200,
+    wave: 4,
+    totalFreed: 3,
+    upgrades: new Set(),
+    pilots: [{ seat: 1, callsign: 'NOVA', color: NEON.cyan, questionsRight: 2, revives: 1 }],
+  });
+  const expectedWaitWidth = textWidth('WAITING FOR THE HOST TO RELAUNCH', 10.5);
+  const waitBatch = summaryRec.batches.find((b) => b.color === NEON.cyan && Math.abs(b.w - expectedWaitWidth) < 4);
+  assert.ok(waitBatch, "a guest's summary says WAITING FOR THE HOST TO RELAUNCH");
 
   // Solo Game Over still draws BEST + TOP 10 + PRESS SPACE TO RETRY (6 lines)
   const soloRec = createStrokeRecorder();
@@ -496,4 +516,149 @@ test('Round 13 (Sec 5): Guest Game Over shows host-relaunch notice without Top 1
 
   dir.dispose();
   client.dispose();
+});
+
+test('Round 15 (4.4): a phone or tablet held sideways gets full-size question cards beside the arena', () => {
+  const { deckCardBoxes } = thumbDeckR15;
+  const cards = [
+    { kind: 'grade', interactive: true },
+    { kind: 'offer', upgrades: UPGRADES.slice(0, 3), interactive: true },
+    {
+      kind: 'choice',
+      title: 'SOLVE TO DEFUSE',
+      titleColor: NEON.red,
+      question: '7 + 5',
+      options: [11, 12, 13],
+      correctIndex: 1,
+      pickedIndex: null,
+      done: false,
+      interactive: true,
+      timeLeft: 10,
+      timeLimit: 16,
+      note: '',
+      noteColor: NEON.cyan,
+    },
+  ] as const;
+  for (const [w, h] of [
+    [844, 390],
+    [740, 360],
+    [1024, 768],
+    [1180, 820],
+  ] as const) {
+    const layout = computeCoopViewportLayout(w, h, true);
+    assert.equal(layout.useThumbDeck, true, `${w}x${h} uses the deck`);
+    assert.equal(layout.deckSide, 'right');
+    const arena = layout.arenaRect;
+    assert.ok(arena.h >= h - 16, `${w}x${h}: the arena still uses the full height (${arena.h.toFixed(0)} px)`);
+    for (const card of cards) {
+      const boxes = deckCardBoxes(layout, card as never);
+      assert.ok(boxes.length > 0, `${w}x${h} ${card.kind}`);
+      for (const b of boxes) {
+        assert.ok(b.w >= 44 && b.h >= 44, `${w}x${h} ${card.kind}: target ${b.w.toFixed(0)}x${b.h.toFixed(0)} px`);
+        assert.ok(b.x >= arena.x + arena.w && b.x + b.w <= w && b.y >= 0 && b.y + b.h <= h, `${w}x${h} ${card.kind}: on screen, beside the arena`);
+      }
+    }
+  }
+  // A laptop's mouse and a portrait tablet's finger still play in the full-size arena.
+  assert.equal(computeCoopViewportLayout(1440, 900, false).useThumbDeck, false);
+  assert.equal(computeCoopViewportLayout(820, 1180, true).useThumbDeck, false);
+});
+
+test('Round 15 (5.11): on small phones every grade and upgrade row is at least 44 px and fully on screen', () => {
+  const { deckCardBoxes } = thumbDeckR15;
+  const grade = { kind: 'grade', interactive: true } as const;
+  const offer = { kind: 'offer', upgrades: UPGRADES.slice(0, 3), interactive: true } as const;
+  for (const [w, h] of [
+    [320, 568],
+    [360, 640],
+    [375, 667],
+    [390, 844],
+  ] as const) {
+    const layout = computeCoopViewportLayout(w, h, true);
+    assert.equal(layout.deckSide, 'bottom');
+    for (const card of [grade, offer]) {
+      const boxes = deckCardBoxes(layout, card as never);
+      assert.equal(boxes.length, 3);
+      for (const b of boxes) {
+        assert.ok(b.h >= 44 && b.w >= 44, `${w}x${h} ${card.kind}: row ${b.w.toFixed(0)}x${b.h.toFixed(0)} px`);
+        assert.ok(b.y >= layout.deckRect.y && b.y + b.h <= h, `${w}x${h} ${card.kind}: row ends at y ${(b.y + b.h).toFixed(0)}`);
+      }
+    }
+  }
+});
+
+test('Round 15 (6): wreck labels never overprint, and deck card titles use only letters the font can draw', async () => {
+  const { placeWreckLabel } = await import('../src/game/coop-flight');
+  const { hasGlyph } = await import('../src/game/font');
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+  for (let run = 0; run < 200; run++) {
+    const drawn: Array<{ x: number; top: number; bottom: number }> = [];
+    const count = 2 + Math.floor(rnd() * 3);
+    for (let i = 0; i < count; i++) {
+      const x = 300 + rnd() * 120;
+      const y = 800 + rnd() * 40;
+      placeWreckLabel(drawn, x, y + 22, rnd() < 0.5 ? 18 : 9, 2);
+    }
+    for (let a = 0; a < drawn.length; a++) {
+      for (let b = a + 1; b < drawn.length; b++) {
+        const A = drawn[a]!;
+        const B = drawn[b]!;
+        const overlap = Math.abs(A.x - B.x) < 84 && A.top < B.bottom && B.top < A.bottom;
+        assert.equal(overlap, false, `run ${run}: labels ${a} and ${b} overprint`);
+      }
+    }
+  }
+  const { CoopLocalQuizController } = await import('../src/game/coop-quiz');
+  const hooks = { play() {}, announce() {}, onChallengeSettled() {}, onUpgradeChosen() {} };
+  const c = new CoopLocalQuizController({ isolatedGrade: true, initialGrade: 1, initialInputMode: 'touch' });
+  c.openChallenge(600, 'break', 12, true, hooks);
+  const card = c.deckCard(true);
+  assert.ok(card && card.kind === 'choice');
+  const blanks = [...card.title].filter((ch) => !hasGlyph(ch));
+  assert.deepEqual(blanks, [], `"${card.title}" draws blanks for ${blanks.join(' ')}`);
+});
+
+test("Round 15 (6): on a phone and a tablet, the page's buttons never cover the Sum Boss's face, health bar or taunt", () => {
+  const seats: CoopPublicSeat[] = [0, 1].map((i) => ({ seat: i as 0 | 1, callsign: `P${i + 1}`, ready: true, isHost: i === 0, connected: true }));
+  for (const [vw, vh] of [
+    [390, 844],
+    [360, 640],
+    [768, 1024],
+  ] as const) {
+    const client = new CoopClient({ code: 'BOSS15', role: 'host', storage: null });
+    Object.assign(client, { seat: 0, seats });
+    const dir = new CoopFlightDirector({ client, initialSeats: seats, storage: null, now: () => 1000 });
+    const layout = dir.setViewport(vw, vh, undefined, true);
+    // A host's row in co-op (HeroGame.astro): Pause and Sound 44 px, Exit 57 px (measured in Chrome at 390x844), 6 px
+    // apart on narrow phones; wider screens give Exit more room. 12 px from the top and right, 44 px tall.
+    const rowW = vw <= 420 ? 44 + 44 + 57 + 2 * 6 : 44 + 44 + 80 + 2 * 8;
+    const controls: Box = { x: vw - 12 - rowW, y: 12, w: rowW, h: 44 };
+    const draw = (bossShown: boolean) => {
+      const rec = createStrokeRecorder();
+      rec.ctx.save();
+      rec.ctx.translate(layout.arenaRect.x, layout.arenaRect.y);
+      rec.ctx.scale(layout.arenaScale, layout.arenaScale);
+      const ctxv = baseHudContext(rec.ctx, rec.ink, { controlsBottom: dir.mapCanvasPointToArena(0, 56).y });
+      if (!bossShown) {
+        ctxv.boss = null;
+        ctxv.villain.show = 0;
+      }
+      renderHud(ctxv);
+      rec.ctx.restore();
+      return rec.batches;
+    };
+    // The boss's corner is drawn last: whatever a boss adds to the HUD is its face, health bar and taunt.
+    const without = draw(false).length;
+    const bossParts = draw(true).slice(without);
+    assert.ok(bossParts.length >= 3, `${vw}x${vh}: the boss's corner was drawn`);
+    const covered = bossParts.filter((b) => boxesOverlap(b, controls));
+    assert.deepEqual(
+      covered.map((b) => `${b.color} at (${Math.round(b.x)},${Math.round(b.y)}) ${Math.round(b.w)}x${Math.round(b.h)}`),
+      [],
+      `${vw}x${vh}: the boss's corner is drawn under the buttons`,
+    );
+    dir.dispose();
+    client.dispose();
+  }
 });

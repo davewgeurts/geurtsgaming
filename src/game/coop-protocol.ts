@@ -25,6 +25,7 @@ import {
   INPUT_FLAG_LEFT,
   INPUT_FLAG_POINTER,
   INPUT_FLAG_RIGHT,
+  INPUT_FLAG_PICKING,
   INPUT_FLAG_TAP,
   INPUT_FLAG_UP,
   MAX_BINARY_BYTES,
@@ -37,6 +38,19 @@ import { AMBER, LILAC, NEON, PEBBLE, PINK, ROCK, ROSE, SAND } from './core';
 export const COOP_WORLD_W = COOP_ARENA_WIDTH;
 export const COOP_WORLD_H = COOP_ARENA_HEIGHT;
 export const SNAP_PROTOCOL_VERSION = COOP_PROTOCOL_VERSION;
+/**
+ * Version 2 kept the version in the low two bits of the flags byte, and 3 is the last value two bits can hold. From
+ * version 3 on, those bits are always 3 and the real version is the next byte. A version 2 page still sees 3 there and
+ * asks its player to refresh; later versions only change the version byte.
+ */
+const SNAP_VERSION_BITS_EXTENDED = 3;
+/** Fixed header: type, flags, version, session, tick, wave, banner, score, freed, energy, upgrades, host time, counts. */
+const SNAP_HEADER_BYTES = 26;
+/**
+ * How far past the newest snapshot straight bullets may be drawn. It must exceed round trip plus two snapshot
+ * intervals, or bullets stand still at the cap until the next snapshot and then hop (round 15, 3.2).
+ */
+const STRAIGHT_LEAD_CAP_MS = 450;
 
 export const INPUT_FLAG_FIRING = INPUT_FLAG_FIRE;
 export {
@@ -373,9 +387,20 @@ export function formatBossMathQuestion(a: number, op: MathWireOp, b: number): st
   return `${a & 0xff} ${op} ${b & 0xff}`;
 }
 
-/** Pack an 8-byte `0x01` `BIN_FRAME_INPUT` frame. */
+/**
+ * Pack a `0x01` `BIN_FRAME_INPUT` frame: 8 bytes, plus 2 when `sendMs` is given (the guest's own clock in ms, low 16
+ * bits, so the host times each input from when it was sent rather than when it arrived), plus 4 more when steering by
+ * pointer: `destX`/`destY`, where the ship is heading.
+ */
 export function encodeGuestInput(input: CoopGuestInput): Uint8Array {
-  const buf = new ArrayBuffer(8);
+  const hasSendMs = typeof input.sendMs === 'number' && Number.isFinite(input.sendMs);
+  const hasDest =
+    hasSendMs &&
+    typeof input.destX === 'number' &&
+    Number.isFinite(input.destX) &&
+    typeof input.destY === 'number' &&
+    Number.isFinite(input.destY);
+  const buf = new ArrayBuffer(hasDest ? 14 : hasSendMs ? 10 : 8);
   const view = new DataView(buf);
   let flags = 0;
   if (input.firing) flags |= INPUT_FLAG_FIRING;
@@ -385,6 +410,7 @@ export function encodeGuestInput(input: CoopGuestInput): Uint8Array {
   if (input.up) flags |= INPUT_FLAG_UP;
   if (input.down) flags |= INPUT_FLAG_DOWN;
   if (input.tap) flags |= INPUT_FLAG_TAP;
+  if (input.picking) flags |= INPUT_FLAG_PICKING;
 
   view.setUint8(0, BIN_FRAME_INPUT);
   view.setUint8(1, input.seat & 0x03);
@@ -392,12 +418,19 @@ export function encodeGuestInput(input: CoopGuestInput): Uint8Array {
   view.setUint16(4, encodeCoord(input.targetY), true);
   view.setUint8(6, flags);
   view.setUint8(7, input.seq & 0xff);
+  if (hasSendMs) view.setUint16(8, Math.round(input.sendMs!) & 0xffff, true);
+  if (hasDest) {
+    // A coordinate uses 14 bits; the top bit of destX says the destination is still.
+    view.setUint16(10, encodeCoord(input.destX!) | (input.destStill ? 0x8000 : 0), true);
+    view.setUint16(12, encodeCoord(input.destY!), true);
+  }
   return new Uint8Array(buf);
 }
 
-/** Unpack an 8-byte `0x01` `BIN_FRAME_INPUT` frame, returning `null` if malformed. */
+/** Unpack an 8-, 10- or 14-byte `0x01` `BIN_FRAME_INPUT` frame, returning `null` if malformed. */
 export function decodeGuestInput(bytes: Uint8Array): CoopGuestInput | null {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 8) return null;
+  const len = bytes instanceof Uint8Array ? bytes.byteLength : 0;
+  if (len !== 8 && len !== 10 && len !== 14) return null;
   if (bytes[0] !== BIN_FRAME_INPUT) return null;
   const seatRaw = bytes[1]!;
   if (seatRaw > 3) return null;
@@ -417,7 +450,16 @@ export function decodeGuestInput(bytes: Uint8Array): CoopGuestInput | null {
     up: (flags & INPUT_FLAG_UP) !== 0,
     down: (flags & INPUT_FLAG_DOWN) !== 0,
     tap: (flags & INPUT_FLAG_TAP) !== 0,
+    picking: (flags & INPUT_FLAG_PICKING) !== 0,
     seq,
+    ...(len >= 10 ? { sendMs: view.getUint16(8, true) } : {}),
+    ...(len === 14
+      ? {
+          destX: decodeCoord(view.getUint16(10, true)),
+          destY: decodeCoord(view.getUint16(12, true)),
+          destStill: (view.getUint16(10, true) & 0x8000) !== 0,
+        }
+      : {}),
   };
 }
 
@@ -492,7 +534,7 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
   const fieldBytes = field ? 9 + rockBitmap.byteLength : 0;
 
   const totalBytes =
-    25 +
+    SNAP_HEADER_BYTES +
     ships.length * 12 +
     enemies.length * 9 +
     bossBytes +
@@ -510,7 +552,7 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
   const view = new DataView(buf);
   let off = 0;
 
-  let vFlags = SNAP_PROTOCOL_VERSION & 0x03; // protocol v2
+  let vFlags = SNAP_VERSION_BITS_EXTENDED;
   if (snap.paused) vFlags |= 0x04;
   if (snap.parked) vFlags |= 0x08;
   if (snap.gameOver) vFlags |= 0x10;
@@ -533,6 +575,7 @@ export function encodeWorldSnapshot(snap: CoopWorldSnapshot): Uint8Array {
 
   view.setUint8(off++, BIN_FRAME_SNAP);
   view.setUint8(off++, vFlags);
+  view.setUint8(off++, SNAP_PROTOCOL_VERSION);
   view.setUint8(off++, sessionByte);
   view.setUint16(off, snap.tick & 0xffff, true);
   off += 2;
@@ -734,8 +777,10 @@ export function getSnapshotVersionMismatch(bytes: Uint8Array): 'older' | 'newer'
     return null;
   }
   if (bytes[0] !== BIN_FRAME_SNAP) return null;
-  const version = bytes[1]! & 0x03;
-  if (version === 0 || version === SNAP_PROTOCOL_VERSION) return null;
+  const bits = bytes[1]! & 0x03;
+  if (bits === 0) return null;
+  const version = bits === SNAP_VERSION_BITS_EXTENDED ? bytes[2]! : bits;
+  if (version === SNAP_PROTOCOL_VERSION) return null;
   return version < SNAP_PROTOCOL_VERSION ? 'older' : 'newer';
 }
 
@@ -746,7 +791,7 @@ export function isSnapshotVersionMismatch(bytes: Uint8Array): boolean {
 
 /** Unpack a `0x02` `BIN_FRAME_SNAP` binary snapshot, returning `null` on any truncated or invalid frame. */
 export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 25 || bytes.byteLength > MAX_BINARY_BYTES) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength < SNAP_HEADER_BYTES || bytes.byteLength > MAX_BINARY_BYTES) {
     return null;
   }
   if (bytes[0] !== BIN_FRAME_SNAP) return null;
@@ -756,7 +801,8 @@ export function decodeWorldSnapshot(bytes: Uint8Array): CoopWorldSnapshot | null
   let off = 1;
 
   const vFlags = view.getUint8(off++);
-  if ((vFlags & 0x03) !== SNAP_PROTOCOL_VERSION) return null;
+  if ((vFlags & 0x03) !== SNAP_VERSION_BITS_EXTENDED) return null;
+  if (view.getUint8(off++) !== SNAP_PROTOCOL_VERSION) return null;
 
   const paused = (vFlags & 0x04) !== 0;
   const parked = (vFlags & 0x08) !== 0;
@@ -1131,7 +1177,65 @@ function isNewerTick(prevTick: number, nextTick: number): boolean {
   return delta > 0 && delta < 32768;
 }
 
+/** The host sends a snapshot about every 55.6 ms (18 a second). */
 const HOST_SNAP_PERIOD_MS = 1000 / 18;
+/**
+ * How much of each new sample the bullet lead's running average takes. A guest and its host keep the same average (the
+ * guest for its bullets, the host for that guest's ship), so it must be the same on both sides; a small gain keeps the
+ * two close while a sample is still on its way from one to the other.
+ */
+export const COOP_LEAD_AVERAGE_GAIN = 0.05;
+
+/**
+ * The bullet lead's running average. A guest keeps one for its bullets and the host keeps the same one for that
+ * guest's ship (`mirrorGuestLeads`), fed the same samples in the same order and updated by `updateLeadAverage`, so
+ * both screens use the same value.
+ */
+export interface LeadAverage {
+  value: number | null;
+  /** Samples taken since the last reset (the first few are averaged evenly). */
+  count: number;
+  /** Consecutive samples far off the average on the same side: a clock that jumped. */
+  jumps: number;
+  jumpSign: number;
+}
+
+export function freshLeadAverage(): LeadAverage {
+  return { value: null, count: 0, jumps: 0, jumpSign: 0 };
+}
+
+/**
+ * Take one lead sample. The first 4 after a reset are averaged evenly (one late first sample cannot skew it); after
+ * that each sample moves it by COOP_LEAD_AVERAGE_GAIN. Three samples in a row more than 150 ms off on the same side
+ * mean the host's clock jumped (a short pause, a long frame): it moves there at once. Over 1.2 s off, at once too.
+ */
+export function updateLeadAverage(avg: LeadAverage, sample: number): void {
+  if (!Number.isFinite(sample)) return;
+  if (avg.value === null || Math.abs(sample - avg.value) > 1200) {
+    avg.value = sample;
+    avg.count = 1;
+    avg.jumps = 0;
+    avg.jumpSign = 0;
+    return;
+  }
+  const off = sample - avg.value;
+  if (Math.abs(off) > 150 && (avg.jumps === 0 || Math.sign(off) === avg.jumpSign)) {
+    avg.jumps += 1;
+    avg.jumpSign = Math.sign(off);
+    if (avg.jumps >= 3) {
+      avg.value = sample;
+      avg.count = 1;
+      avg.jumps = 0;
+      avg.jumpSign = 0;
+      return;
+    }
+  } else {
+    avg.jumps = 0;
+    avg.jumpSign = 0;
+  }
+  avg.count += 1;
+  avg.value += off * (avg.count <= 4 ? 1 / avg.count : COOP_LEAD_AVERAGE_GAIN);
+}
 
 interface BufferedSnapshot {
   unwrappedTick: number;
@@ -1163,6 +1267,10 @@ export class SnapshotInterpolator {
   private clockOffsetMs: number | null = null;
   private lastRenderHostMs: number | null = null;
   private lastSampleWallMs: number | null = null;
+  /** The host's present as last estimated (`sample`), the wall time it was for, and since when the evidence says less. */
+  private hostNowEstMs: number | null = null;
+  private hostNowEstAtMs = 0;
+  private hostNowLowSinceMs: number | null = null;
   private wasPaused = false;
   private wasExtrapolating = false;
   private needsReseam = false;
@@ -1173,7 +1281,10 @@ export class SnapshotInterpolator {
   private readonly shipSmoothOffset = new Map<CoopSeatIndex, { dx: number; dy: number }>();
   private readonly enemySmoothOffset = new Map<number, { dx: number; dy: number }>();
   private bossSmoothOffset: { dx: number; dy: number } = { dx: 0, dy: 0 };
-  private ackHostOffsetMs: number | null = null;
+  /** The bullet lead: the same running average the host keeps for this guest (see `updateLeadAverage`). */
+  private readonly leadAvg: LeadAverage = freshLeadAverage();
+  /** Goes up each time the lead is cleared, so its owner knows to start sampling afresh. */
+  leadResets = 0;
   private bulletTracks: Array<{
     x: number;
     y: number;
@@ -1181,8 +1292,13 @@ export class SnapshotInterpolator {
     vy: number;
     atHostMs: number;
     bornHostMs: number;
+    reachMs: number;
   }> = [];
   private shotBornHostMs = new WeakMap<CoopSnapShot, number>();
+  /** Per new bullet, how soon after its birth it passes nearest this guest's ship (Infinity if it never comes near). */
+  private shotReachMs = new WeakMap<CoopSnapShot, number>();
+  /** This guest's own ship, where a new bullet's catch-up must be finished by. */
+  private focus: { x: number; y: number } | null = null;
 
   constructor(opts?: { interpDelayMs?: number; maxExtrapolateMs?: number }) {
     this.interpDelayMs = opts?.interpDelayMs ?? 85;
@@ -1192,14 +1308,21 @@ export class SnapshotInterpolator {
   /** Feed `snap.hostElapsedMs - guestSentWallMs[ackSeq]` so enemy bullets align with Guest's 0ms local ship. */
   setAckHostOffset(offsetMs: number | null): void {
     if (offsetMs === null || !Number.isFinite(offsetMs)) {
-      this.ackHostOffsetMs = null;
+      Object.assign(this.leadAvg, freshLeadAverage());
+      this.leadResets += 1;
       return;
     }
-    if (this.ackHostOffsetMs === null || Math.abs(offsetMs - this.ackHostOffsetMs) > 1200) {
-      this.ackHostOffsetMs = offsetMs;
-    } else {
-      this.ackHostOffsetMs += (offsetMs - this.ackHostOffsetMs) * 0.2;
-    }
+    // The host keeps this same average (coop-flight.ts mirrorGuestLeads): it must change only the same way.
+    updateLeadAverage(this.leadAvg, offsetMs);
+  }
+
+  /** Whether the bullet lead has a value (false after a reset, until the first sample). */
+  hasAckHostOffset(): boolean {
+    return this.leadAvg.value !== null;
+  }
+
+  private get ackHostOffsetMs(): number | null {
+    return this.leadAvg.value;
   }
 
   reset(): void {
@@ -1217,6 +1340,8 @@ export class SnapshotInterpolator {
     this.clockOffsetMs = null;
     this.lastRenderHostMs = null;
     this.lastSampleWallMs = null;
+    this.hostNowEstMs = null;
+    this.hostNowLowSinceMs = null;
     this.wasPaused = false;
     this.wasExtrapolating = false;
     this.needsReseam = false;
@@ -1227,9 +1352,31 @@ export class SnapshotInterpolator {
     this.shipSmoothOffset.clear();
     this.enemySmoothOffset.clear();
     this.bossSmoothOffset = { dx: 0, dy: 0 };
-    this.ackHostOffsetMs = null;
+    Object.assign(this.leadAvg, freshLeadAverage());
+    this.leadResets += 1;
     this.bulletTracks.length = 0;
     this.shotBornHostMs = new WeakMap<CoopSnapShot, number>();
+    this.shotReachMs = new WeakMap<CoopSnapShot, number>();
+  }
+
+  /** Where this guest's own ship is (null while it is down): new bullets heading for it finish catching up in time. */
+  setFocus(x: number | null, y: number | null): void {
+    this.focus = x === null || y === null || !Number.isFinite(x) || !Number.isFinite(y) ? null : { x, y };
+  }
+
+  /**
+   * How soon a bullet passes nearest this guest's ship, in ms: Infinity if it moves away, or passes further off than
+   * the ship can fly (at 380 px/s, steering by keys) by then, plus 120 px. A bullet the ship could still get under
+   * has to have caught up by the time it gets there, or at 150 ms or more each way it lands well behind the lead.
+   */
+  private reachOf(sh: CoopSnapShot): number {
+    const f = this.focus;
+    const v2 = sh.vx * sh.vx + sh.vy * sh.vy;
+    if (!f || v2 < 1) return Infinity;
+    const t = -((sh.x - f.x) * sh.vx + (sh.y - f.y) * sh.vy) / v2;
+    if (t <= 0) return Infinity;
+    const miss = Math.hypot(sh.x + sh.vx * t - f.x, sh.y + sh.vy * t - f.y);
+    return miss > 120 + 380 * t ? Infinity : t * 1000;
   }
 
   latest(): CoopWorldSnapshot | null {
@@ -1388,7 +1535,10 @@ export class SnapshotInterpolator {
         const lagMs = targetHostMs - this.lastRenderHostMs;
         let rate = 1.0;
         if (lagMs > 12) {
-          rate = 1.0 + Math.min(0.25, (lagMs - 12) / 140);
+          // Ordinary jitter catches up gently (at most 25% fast). After a stall of the snapshots coming in (the render
+          // clock waits `maxExtrapolateMs` past the last one), the world is far behind: up to 3x, so a second behind
+          // is under 300 ms behind in about 0.7 s instead of 4.5.
+          rate = 1.0 + Math.min(0.25, (lagMs - 12) / 140) + Math.min(1.75, Math.max(0, lagMs - 300) / 250);
         } else if (lagMs < -12) {
           rate = 1.0 - Math.min(0.15, (-lagMs - 12) / 140);
         }
@@ -1400,16 +1550,12 @@ export class SnapshotInterpolator {
 
     this.decaySmoothOffsets(wallDt);
 
+    const recentHostNowMs = this.estimateHostNow(safeNow, last);
     const leadTargetHostMs =
       this.ackHostOffsetMs !== null
-        ? clampNum(safeNow + this.ackHostOffsetMs, presentHostMs - 40, last.hostMs + 210)
-        : clampNum(presentHostMs, renderHostMs, last.hostMs + 180);
-    const straightShots = this.evaluateStraightShots(
-      last.snap,
-      last.hostMs,
-      renderHostMs,
-      leadTargetHostMs,
-    );
+        ? clampNum(safeNow + this.ackHostOffsetMs, recentHostNowMs - 40, last.hostMs + STRAIGHT_LEAD_CAP_MS)
+        : clampNum(presentHostMs, renderHostMs, last.hostMs + STRAIGHT_LEAD_CAP_MS);
+    const straightShots = this.evaluateStraightShots(last.snap, last.hostMs, renderHostMs, leadTargetHostMs, recentHostNowMs);
 
     if (this.needsReseam && this.prevSampleHostMs !== null) {
       this.needsReseam = false;
@@ -1622,6 +1768,7 @@ export class SnapshotInterpolator {
       vy: number;
       atHostMs: number;
       bornHostMs: number;
+      reachMs: number;
     }> = [];
 
     for (const sh of snap.shots) {
@@ -1635,6 +1782,7 @@ export class SnapshotInterpolator {
           vy: sh.vy,
           atHostMs: hostMs,
           bornHostMs: -Infinity,
+          reachMs: Infinity,
         });
         continue;
       }
@@ -1646,7 +1794,9 @@ export class SnapshotInterpolator {
         const tr = this.bulletTracks[i]!;
         if (Math.abs(tr.vx - sh.vx) > 16 || Math.abs(tr.vy - sh.vy) > 16) continue;
         const dt = snap.paused ? 0 : (hostMs - tr.atHostMs) / 1000;
-        if (dt < -0.02 || dt > 0.45) continue;
+        // Straight bullets fly exactly as predicted, so one is still recognised after a gap in snapshots (a stalled
+        // download) and is not caught up again from its muzzle.
+        if (dt < -0.02 || dt > 3) continue;
         const px = tr.x + tr.vx * Math.max(0, dt);
         const py = tr.y + tr.vy * Math.max(0, dt);
         const d = Math.hypot(px - sh.x, py - sh.y);
@@ -1657,8 +1807,10 @@ export class SnapshotInterpolator {
       }
 
       const bornHostMs = bestIdx >= 0 ? this.bulletTracks[bestIdx]!.bornHostMs : hostMs;
+      const reachMs = bestIdx >= 0 ? this.bulletTracks[bestIdx]!.reachMs : this.reachOf(sh);
       if (bestIdx >= 0) used.add(bestIdx);
       this.shotBornHostMs.set(sh, bornHostMs);
+      this.shotReachMs.set(sh, reachMs);
       nextTracks.push({
         x: sh.x,
         y: sh.y,
@@ -1666,6 +1818,7 @@ export class SnapshotInterpolator {
         vy: sh.vy,
         atHostMs: hostMs,
         bornHostMs,
+        reachMs,
       });
     }
 
@@ -1673,28 +1826,75 @@ export class SnapshotInterpolator {
       nextTracks.length > SNAP_MAX_SHOTS ? nextTracks.slice(-SNAP_MAX_SHOTS) : nextTracks;
   }
 
+  /**
+   * The host's present: the fastest snapshot of the last 250 ms (its time plus how long ago it came in), carried
+   * forward. The arrival clock follows the fastest arrivals slowly on purpose; this one is right again as soon as a
+   * held-up batch of snapshots has come in, and 150 ms after the host's own clock fell behind in a long frame. It goes
+   * forward at once, but back only when the snapshots have said so for 150 ms: a held-up batch arrives oldest first,
+   * and for a moment its oldest are all there is. While the host is paused its clock stands still, and an estimate
+   * not kept up for a while (this guest paused, or its tab hidden) starts afresh.
+   */
+  private estimateHostNow(nowMs: number, last: BufferedSnapshot): number {
+    let windowMs = last.hostMs + Math.max(0, nowMs - last.receivedAt);
+    for (let i = this.buffer.length - 2; i >= 0; i--) {
+      const b = this.buffer[i]!;
+      if (b.snap.paused || this.buffer[i + 1]!.snap.paused || nowMs - b.receivedAt > 250) break;
+      windowMs = Math.max(windowMs, b.hostMs + (nowMs - b.receivedAt));
+    }
+    let estMs: number;
+    if (last.snap.paused || this.hostNowEstMs === null || nowMs - this.hostNowEstAtMs > 250) {
+      estMs = last.snap.paused ? last.hostMs : windowMs;
+      this.hostNowLowSinceMs = null;
+    } else {
+      const carriedMs = this.hostNowEstMs + Math.max(0, nowMs - this.hostNowEstAtMs);
+      if (windowMs >= carriedMs - 30) {
+        estMs = Math.max(windowMs, carriedMs);
+        this.hostNowLowSinceMs = null;
+      } else if (this.hostNowLowSinceMs !== null && nowMs - this.hostNowLowSinceMs >= 150) {
+        estMs = windowMs;
+        this.hostNowLowSinceMs = null;
+      } else {
+        this.hostNowLowSinceMs ??= nowMs;
+        estMs = carriedMs;
+      }
+    }
+    this.hostNowEstMs = estMs;
+    this.hostNowEstAtMs = nowMs;
+    return estMs;
+  }
+
   private evaluateStraightShots(
     lastSnap: CoopWorldSnapshot,
     lastHostMs: number,
     renderHostMs: number,
     leadTargetHostMs: number,
+    recentHostNowMs: number,
   ): CoopSnapShot[] {
     const out: CoopSnapShot[] = [];
+    // A new bullet appears at its muzzle as of the host's present (the render clock plus the interpolation delay, which
+    // moves smoothly) and catches up to the lead: gently (at most 15% faster than it really flies), but finished by the
+    // time it gets near this guest's ship (then at most 60% faster), so the ship and the bullet meet where they meet
+    // on the host. While the render clock is still catching up after a stall, "the present" is the newest snapshots'
+    // (less a little of their jitter), or bullets fired in the meantime would reach this ship hundreds of ms late.
+    const presentStartMs = Math.max(renderHostMs + this.interpDelayMs, recentHostNowMs - 40);
+    const startHostMs = Math.min(presentStartMs, Math.max(renderHostMs, leadTargetHostMs));
     for (const sh of lastSnap.shots) {
       if (sh.kind === 'beam' || sh.kind === 'rocket') continue;
       const born = this.shotBornHostMs.get(sh) ?? -Infinity;
-      if (Number.isFinite(born) && renderHostMs < born - 28) {
+      if (Number.isFinite(born) && startHostMs < born - 28) {
         continue;
       }
       if (lastSnap.paused) {
         out.push(sh);
         continue;
       }
-      const ramp = Number.isFinite(born)
-        ? clampNum((renderHostMs - (born - 28)) / 420, 0, 1)
-        : 1;
-      const evalHostMs = renderHostMs + ramp * (leadTargetHostMs - renderHostMs);
-      const dtSec = clampNum((evalHostMs - lastHostMs) / 1000, -0.14, 0.21);
+      const leadMs = Math.max(0, leadTargetHostMs - startHostMs);
+      const gentleMs = Math.max(420, leadMs / 0.15);
+      const reach = this.shotReachMs.get(sh) ?? Infinity;
+      const rampMs = Number.isFinite(reach) ? Math.min(gentleMs, Math.max(leadMs / 0.6, reach * 0.7)) : gentleMs;
+      const ramp = Number.isFinite(born) ? clampNum((startHostMs - (born - 28)) / rampMs, 0, 1) : 1;
+      const evalHostMs = startHostMs + ramp * (leadTargetHostMs - startHostMs);
+      const dtSec = clampNum((evalHostMs - lastHostMs) / 1000, -0.14, STRAIGHT_LEAD_CAP_MS / 1000);
       out.push(
         dtSec === 0
           ? sh

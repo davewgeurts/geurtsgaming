@@ -395,7 +395,8 @@ export class Game {
               this.state === 'playing' && !this.paused && this.coop!.handlePointerDown(id, x, y, touch),
             pointerMove: (id: number, x: number, y: number) => this.coop!.handlePointerMove(id, x, y),
             pointerUp: (id: number) => this.coop!.handlePointerUp(id),
-            pointerDrop: () => this.coop!.releasePointers(true),
+            // A pause or a hidden tab lets go of held touches; AUTO-FIRE stays as the pilot set it.
+            pointerDrop: () => this.coop!.releasePointers(false),
             allowButtonSpace: (target: EventTarget | null) => this.coop!.isLeaveSheetButton(target),
           }
         : {}),
@@ -803,6 +804,11 @@ export class Game {
     const confirm = code === 'Space' || code === 'Enter';
     if (this.coop) {
       if (!this.coop.isHost) return false;
+      if (this.paused && this.coop.isResumeCountdownActive) {
+        // HOST AWAY's 3-2-1 gives the squad time to get ready: it is not skipped. P stops it and stays paused.
+        if (code === 'KeyP') this.coop.cancelHostAwayCountdown(this.coopAdapter);
+        return true;
+      }
       if (this.paused) {
         if (code === 'KeyP' || confirm) this.setPaused(false);
         return true;
@@ -910,6 +916,8 @@ export class Game {
   private press(): void {
     if (this.coop) {
       if (!this.coop.isHost) return;
+      // The click that brings the window back must not skip HOST AWAY's 3-2-1.
+      if (this.paused && this.coop.isResumeCountdownActive) return;
       if (this.paused) this.setPaused(false);
       else if (this.state === 'over' && this.stateTime > 0.9) this.beginCoop();
       return;
@@ -947,6 +955,10 @@ export class Game {
         this.voice.hush();
         this.input.drop();
         this.coopHiddenSec = 0;
+        // Hidden again during HOST AWAY's 3-2-1: nobody is at the host, so the squad waits again.
+        if (this.coop.isHost && this.paused && this.coop.isResumeCountdownActive) {
+          this.coop.engageHostAway(this.coopAdapter);
+        }
         this.last = performance.now();
         this.bgTimer = setInterval(() => {
           const coop = this.coop;
@@ -1247,7 +1259,9 @@ export class Game {
         this.coop.recordHostFx('spark', x, y, color);
       }
     },
-    problem: () => makeProblem(sumLevel(this.wave, (this.coop ? this.coop.grade : this.grade) ?? 1)),
+    // In co-op the whole squad sees the boss's sums, so they cannot follow one pilot's private grade band (it would
+    // show the others which band the host picked): the squad gets the youngest band's sums.
+    problem: () => makeProblem(sumLevel(this.wave, this.coop ? 0 : (this.grade ?? 1))),
   };
 
   private bossEnv(): BossEnv {
@@ -1864,6 +1878,8 @@ export class Game {
     this.shots = this.shots.filter((s) => !s.dead);
     this.pickups = this.pickups.filter((p) => !p.dead);
     this.mines = this.mines.filter((m) => !m.dead);
+    // Everything has moved and every hit is settled: the squad's snapshot can go out.
+    coop.endHostFrame(this.coopAdapter);
   }
 
   /** A capsule's question is open, which is when the world runs in slow motion and the cannons hold their fire. */
@@ -2268,6 +2284,8 @@ export class Game {
       scale: this.scale,
       shipScale: this.shipScale,
       inset: this.inset,
+      // The page's buttons (HeroGame.astro .arcade-controls: 12 px from the top, 44 px tall) over co-op's scaled arena.
+      ...(this.coop ? { controlsBottom: this.coop.mapCanvasPointToArena(0, this.viewInset.top + 56).y } : {}),
       room: this.room,
       homeY: this.homeY,
       time: this.time,
@@ -2559,6 +2577,8 @@ export class Game {
     if (!coop || !coop.suppressStandardMessages(this.state, this.paused)) {
       renderMessages(hudCtx);
     }
+    // The asteroid alert goes under co-op's question cards: a pilot answering must always see the sum and the boxes.
+    if (alert !== null && this.state === 'playing' && !this.paused) renderAlert(hudCtx, alert);
     if (coop) {
       coop.renderArenaOverlays(ctx, this.ink, {
         time: this.time,
@@ -2570,7 +2590,6 @@ export class Game {
         soulsInFlight: this.souls.length,
       });
     }
-    if (alert !== null && this.state === 'playing' && !this.paused) renderAlert(hudCtx, alert);
 
     if (coop) {
       ctx.restore();

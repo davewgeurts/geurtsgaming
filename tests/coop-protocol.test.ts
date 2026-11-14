@@ -725,9 +725,10 @@ test('SnapshotInterpolator rides out 250ms network stalls without snap-jumps and
   assert.equal(fxIt256.consumeNewFx().length, 1, 'exact 256-FX wrap across gap still plays next FX');
 });
 
-test('Round 13 (4.3): snapshot protocol version 2 rejects legacy v1 frames and detects version mismatches cleanly', () => {
-  assert.equal(COOP_PROTOCOL_VERSION, 2);
-  assert.equal(SNAP_PROTOCOL_VERSION, 2);
+test('Round 13 (4.3), Round 15 (5.12): snapshot protocol version 4 rejects other versions and names which side is out of date', () => {
+  // Version 4 (Round 15 batch 2 review): 14-byte pointer input frames, which a version 3 host reads as nothing.
+  assert.equal(COOP_PROTOCOL_VERSION, 4);
+  assert.equal(SNAP_PROTOCOL_VERSION, 4);
 
   const valid = encodeWorldSnapshot({
     session: 9,
@@ -750,22 +751,30 @@ test('Round 13 (4.3): snapshot protocol version 2 rejects legacy v1 frames and d
     items: [],
     fx: [],
   });
-  assert.equal(valid.byteLength, 25, 'minimum v2 snapshot header is 25 bytes');
-  assert.equal(valid[1]! & 0x03, 2, 'version bits encode protocol version 2');
+  assert.equal(valid.byteLength, 26, 'minimum v3+ snapshot header is 26 bytes');
+  // A version 2 page reads the two version bits, sees 3 instead of its own 2, and asks its player to refresh.
+  assert.equal(valid[1]! & 0x03, 3, 'the two old version bits hold 3, meaning "the version is in the next byte"');
+  assert.equal(valid[2], 4, 'the version byte holds 4');
   assert.equal(isSnapshotVersionMismatch(valid), false);
   assert.ok(decodeWorldSnapshot(valid));
 
-  for (const wrongVer of [1, 3]) {
+  // Frames from version 1 and 2 hosts keep the version in the two bits.
+  for (const oldVer of [1, 2]) {
     const mutated = new Uint8Array(valid);
-    mutated[1] = (mutated[1]! & ~0x03) | wrongVer;
-    assert.equal(decodeWorldSnapshot(mutated), null, `version ${wrongVer} is rejected by decoder`);
-    assert.equal(isSnapshotVersionMismatch(mutated), true, `version ${wrongVer} is flagged as version mismatch`);
-    assert.equal(
-      getSnapshotVersionMismatch(mutated),
-      wrongVer === 1 ? 'older' : 'newer',
-      `version ${wrongVer} reports directional mismatch`,
-    );
+    mutated[1] = (mutated[1]! & ~0x03) | oldVer;
+    assert.equal(decodeWorldSnapshot(mutated), null, `version ${oldVer} is rejected by decoder`);
+    assert.equal(isSnapshotVersionMismatch(mutated), true, `version ${oldVer} is flagged as version mismatch`);
+    assert.equal(getSnapshotVersionMismatch(mutated), 'older', `version ${oldVer} is older`);
   }
+  // Other versions keep 3 in the bits and change the version byte: a version 3 host (no pointer destinations) is older.
+  const v3 = new Uint8Array(valid);
+  v3[2] = 3;
+  assert.equal(decodeWorldSnapshot(v3), null, 'version 3 is rejected by decoder');
+  assert.equal(getSnapshotVersionMismatch(v3), 'older', 'version 3 is older');
+  const future = new Uint8Array(valid);
+  future[2] = 5;
+  assert.equal(decodeWorldSnapshot(future), null, 'version 5 is rejected by decoder');
+  assert.equal(getSnapshotVersionMismatch(future), 'newer', 'version 5 is newer');
   assert.equal(getSnapshotVersionMismatch(valid), null);
   const v0Mutated = new Uint8Array(valid);
   v0Mutated[1] = v0Mutated[1]! & ~0x03;
@@ -980,4 +989,121 @@ test('Round 13 (4.1, 4.4, Sec 5): straight shots extrapolate to present, extrapo
   }
   assert.equal(consumed, recorded, `zero duplicate or dropped FX across 600ms stall + 3s pause (${consumed} vs ${recorded})`);
   assert.ok(maxResumeStep < 8.5, `post-unpause enemy step stays smooth: max=${maxResumeStep.toFixed(2)}px`);
+});
+
+test('Round 15 follow-up (b2 15): after a long host frame, the bullet lead floor follows the newest snapshots, not the slow arrival clock', () => {
+  // Host and guest clocks run together; snapshots go out every 55 ms and take 50 ms to arrive; the guest's inputs
+  // take 60 ms to be used. At 2.0 s the host has one 300 ms frame that it runs as 50 ms: its clock falls 250 ms behind.
+  const it = new SnapshotInterpolator();
+  const snapAt = (tick: number, hostMs: number): CoopWorldSnapshot => ({
+    tick,
+    hostElapsedMs: hostMs,
+    wave: 1,
+    banner: 0,
+    teamScore: 0,
+    freed: 0,
+    energy: 1,
+    paused: false,
+    parked: false,
+    gameOver: false,
+    ships: [],
+    enemies: [],
+    boss: null,
+    tanker: null,
+    field: null,
+    // One straight bullet that left y = 0 at host time 0, at 300 px/s.
+    shots: [{ kind: 'enemy', color: NEON.red, heavy: false, x: 100, y: (300 * hostMs) / 1000, vx: 0, vy: 300, beamLife: 0 }],
+    items: [],
+    fx: [],
+  });
+  const hostAt = (sendMs: number) => (sendMs < 2000 ? sendMs : sendMs - 250);
+  const sends: number[] = [];
+  for (let t = 0; t < 2000; t += 55) sends.push(t);
+  for (let t = 2300; t < 3200; t += 55) sends.push(t);
+  let next = 0;
+  let tick = 0;
+  const worst: Array<{ t: number; aheadMs: number }> = [];
+  for (let now = 0; now < 3200; now += 1000 / 60) {
+    while (next < sends.length && sends[next]! + 50 <= now) {
+      const sent = sends[next]!;
+      it.push(snapAt(++tick, hostAt(sent)), sent + 50);
+      // The input this snapshot acknowledges was sent 60 ms before the host used it.
+      it.setAckHostOffset(hostAt(sent) - (sent - 60));
+      next += 1;
+    }
+    const out = it.sample(now);
+    const shot = out?.shots[0];
+    if (!shot || now < 2300 + 200) continue; // the first ~0.2 s after the frame: the lead itself is still re-learning
+    // Where the bullet belongs: at the host time when an input sent now gets used.
+    const wantHostMs = hostAt(now) + 60;
+    worst.push({ t: Math.round(now), aheadMs: ((shot.y - (300 * wantHostMs) / 1000) / 300) * 1000 });
+  }
+  const bad = worst.filter((w) => Math.abs(w.aheadMs) > 20);
+  assert.ok(worst.length > 30);
+  assert.deepEqual(bad.slice(0, 4), [], `${bad.length} frames off by more than 20 ms`);
+});
+
+test('Round 15 follow-up (b2 16): the held-up snapshots arriving after a long download stall never pull a young bullet back', () => {
+  // Host and guest clocks run together; snapshots go out every 55 ms and take 50 ms to arrive, except that everything
+  // sent from 2.0 to 2.7 s is held up and arrives oldest first between 2.75 and 2.8 s. Three bullets at 300 px/s: one
+  // fired before the stall, two during it (the guest first hears of those in the held-up batch).
+  const it = new SnapshotInterpolator();
+  const bullets = [
+    { x: 100, born: 1700 },
+    { x: 120, born: 2100 },
+    { x: 140, born: 2400 },
+  ];
+  const snapAt = (tick: number, hostMs: number): CoopWorldSnapshot => ({
+    tick,
+    hostElapsedMs: hostMs,
+    wave: 1,
+    banner: 0,
+    teamScore: 0,
+    freed: 0,
+    energy: 1,
+    paused: false,
+    parked: false,
+    gameOver: false,
+    ships: [],
+    enemies: [],
+    boss: null,
+    tanker: null,
+    field: null,
+    shots: bullets
+      .filter((b) => hostMs >= b.born)
+      .map((b) => ({ kind: 'enemy' as const, color: NEON.red, heavy: false, x: b.x, y: (300 * (hostMs - b.born)) / 1000, vx: 0, vy: 300, beamLife: 0 })),
+    items: [],
+    fx: [],
+  });
+  const sends: Array<{ sent: number; arrives: number }> = [];
+  let held = 0;
+  for (let t = 0; t < 3600; t += 55) {
+    const isHeld = t >= 2000 && t < 2700;
+    sends.push({ sent: t, arrives: isHeld ? 2750 + 4 * held++ : t + 50 });
+  }
+  let next = 0;
+  let tick = 0;
+  const prevY = new Map<number, number>();
+  const problems: string[] = [];
+  for (let now = 0; now < 3600; now += 1000 / 60) {
+    while (next < sends.length && sends[next]!.arrives <= now) {
+      const { sent } = sends[next]!;
+      it.push(snapAt(++tick, sent), sends[next]!.arrives);
+      it.setAckHostOffset(60);
+      next += 1;
+    }
+    const out = it.sample(now);
+    if (!out) continue;
+    for (const b of bullets) {
+      const drawn = out.shots.find((sh) => sh.x === b.x);
+      const before = prevY.get(b.x);
+      if (before !== undefined && !drawn) problems.push(`${Math.round(now)} ms: bullet ${b.x} vanished`);
+      if (before !== undefined && drawn && drawn.y < before - 0.01) {
+        problems.push(`${Math.round(now)} ms: bullet ${b.x} went back ${(before - drawn.y).toFixed(1)} px`);
+      }
+      if (drawn) prevY.set(b.x, drawn.y);
+    }
+  }
+  assert.equal(prevY.size, bullets.length, 'every bullet was drawn');
+  assert.deepEqual(problems.slice(0, 4), [], `${problems.length} problems`);
 });
