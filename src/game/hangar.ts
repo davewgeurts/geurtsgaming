@@ -23,9 +23,11 @@ import {
   PILOT_IDS,
   SHIPS,
   SHIP_BY_ID,
+  SHIP_IDS,
   THEMES,
   THEME_BY_ID,
   type HangarHat,
+  type PilotEmote,
   type PilotId,
   type PilotLoadout,
   type PilotSpec,
@@ -33,7 +35,7 @@ import {
   type ThemeId,
 } from './loadout';
 import { makeProblem } from './maths';
-import { shipShape, trace, traceShipThrusters } from './shapes';
+import { DROGUE, SHIP, TANKER, shipShape, trace, traceShipThrusters } from './shapes';
 
 export type HangarInk = Ink;
 export type HangarCue = 'bell' | 'step' | 'canopy' | 'key' | 'power';
@@ -239,15 +241,32 @@ export interface HangarOptions {
   scenarioSeed?: number;
   onCommitLoadout?: (loadout: PilotLoadout) => void;
   onAnnounce?: (message: string) => void;
+  onPilotVoice?: (pilot: PilotId, text: string) => void;
+}
+
+export interface HangarCadetTarget extends HangarBox {
+  id: PilotId;
+  slot: number;
+  worldX: number;
+  worldZ: number;
 }
 
 export interface HangarUiSnapshot {
   navBtn: HangarBox | null;
+  partyBtn: HangarBox | null;
   quickFlyBtn: HangarBox | null;
   avatarCards: readonly HangarBox[];
   themeCards: readonly HangarBox[];
   shipPlaques: readonly HangarBox[];
   shipTargets: readonly HangarBox[];
+  cadetTargets: readonly HangarCadetTarget[];
+}
+
+export interface ActivePilotTagline {
+  readonly pilot: PilotId;
+  readonly text: string;
+  readonly emote: PilotEmote;
+  age: number;
 }
 
 export class Hangar {
@@ -267,6 +286,32 @@ export class Hangar {
   private reduceMotion: boolean;
   private readonly onCommit?: (loadout: PilotLoadout) => void;
   private readonly onAnnounce?: (message: string) => void;
+  private readonly onPilotVoice?: (pilot: PilotId, text: string) => void;
+
+  /** Cycling tagline state for Step 1 Avatar hover/focus previews. */
+  activeTagline: ActivePilotTagline | null = null;
+  private readonly taglineCursor: Record<PilotId, number> = {
+    nova: 0,
+    leo: 0,
+    maya: 0,
+    kai: 0,
+    fox: 0,
+    cat: 0,
+    wolf: 0,
+    owl: 0,
+  };
+  private pendingVoice: { pilot: PilotId; text: string; wait: number } | null = null;
+
+  /** Interactive hangar easter eggs: full-squad Dance Party + clickable cadet reactions! */
+  dancePartyTimer = 0;
+  cadetReaction: {
+    id: PilotId;
+    slot: number;
+    callout: string;
+    timer: number;
+    worldX: number;
+    worldZ: number;
+  } | null = null;
 
   private w = 1280;
   private h = 800;
@@ -295,8 +340,12 @@ export class Hangar {
   private themeCards: HangarBox[] = [];
   private shipPlaques: HangarBox[] = [];
   private shipTargets: HangarBox[] = [];
+  private cadetTargets: HangarCadetTarget[] = [];
   private navBtn: HangarBox | null = null;
+  private partyBtn: HangarBox | null = null;
   private quickFlyBtn: HangarBox | null = null;
+
+  private lastHoveredPilotIdx = -1;
 
   /** Sums for the board and words for the typing screen: the same ones the game asks. */
   private readonly sums = Array.from({ length: 6 }, () => makeProblem(1));
@@ -311,10 +360,18 @@ export class Hangar {
     this.reduceMotion = opts?.reduceMotion ?? false;
     this.onCommit = opts?.onCommitLoadout;
     this.onAnnounce = opts?.onAnnounce;
+    this.onPilotVoice = opts?.onPilotVoice;
     this.scenario = buildScenario(opts?.scenarioSeed);
     this.syncFocusFromLoadout();
     this.stage = opts?.hasSavedLoadout ? 'boarding' : 'avatar';
     if (this.stage === 'avatar') {
+      const first = PILOTS[this.focusPilot]!;
+      this.activeTagline = {
+        pilot: first.id,
+        text: first.taglines[0].text,
+        emote: first.taglines[0].emote,
+        age: 0.9,
+      };
       this.announceStage();
     }
   }
@@ -329,17 +386,79 @@ export class Hangar {
     return this.stage !== 'boarding';
   }
 
+  /** True while the full-squad Dance Party is lighting up the hangar. */
+  get dancePartyActive(): boolean {
+    return this.dancePartyTimer > 0;
+  }
+
   /** Current interactive 2D layout boxes (used by layout & accessibility tests). */
   get uiBoxes(): HangarUiSnapshot {
     this.ensureGeometry();
     return {
       navBtn: this.navBtn,
+      partyBtn: this.partyBtn,
       quickFlyBtn: this.quickFlyBtn,
       avatarCards: this.avatarCards,
       themeCards: this.themeCards,
       shipPlaques: this.shipPlaques,
       shipTargets: this.shipTargets,
+      cadetTargets: this.cadetTargets,
     };
+  }
+
+  /** Cycle and play the focused/hovered pilot's next signature tagline + matching 3D emote! */
+  triggerPilotTagline(pilotId: PilotId, immediate = false): ActivePilotTagline {
+    const spec = PILOT_BY_ID[pilotId];
+    const slot = this.taglineCursor[pilotId] % spec.taglines.length;
+    this.taglineCursor[pilotId] += 1;
+    const picked = spec.taglines[slot]!;
+    const active: ActivePilotTagline = {
+      pilot: pilotId,
+      text: picked.text,
+      emote: picked.emote,
+      age: 0,
+    };
+    this.activeTagline = active;
+    if (immediate) {
+      this.pendingVoice = null;
+      this.onPilotVoice?.(pilotId, picked.text);
+    } else {
+      this.pendingVoice = { pilot: pilotId, text: picked.text, wait: 0.08 };
+    }
+    return active;
+  }
+
+  /** Launch (or toggle) a 7-second full-squad Dance Party with disco lights! */
+  triggerDanceParty(): void {
+    this.dancePartyTimer = this.dancePartyTimer > 0.5 ? 0 : 7;
+    this.cue('power');
+    if (this.dancePartyTimer > 0) {
+      this.onAnnounce?.('Squad dance party in the hangar!');
+    }
+  }
+
+  /** Click/tap one of the 7 other cadets on the hangar floor to make them react & call out! */
+  tapCadetAt(x: number, y: number): boolean {
+    const hit = this.cadetTargets.find((c) => hitBox(x, y, c, 8));
+    if (!hit) return false;
+    const spec = PILOT_BY_ID[hit.id];
+    const slotIdx = this.taglineCursor[hit.id] % spec.taglines.length;
+    this.taglineCursor[hit.id] += 1;
+    const line = spec.taglines[slotIdx]!;
+    const callouts = ['HI ACE!', 'WATCH THIS!', 'GO SQUAD!', 'YAY!', 'PIZZA TIME!', 'LET US FLY!'] as const;
+    const callout = callouts[(hit.slot + slotIdx) % callouts.length]!;
+    this.cadetReaction = {
+      id: hit.id,
+      slot: hit.slot,
+      callout,
+      timer: 4,
+      worldX: hit.worldX,
+      worldZ: hit.worldZ,
+    };
+    this.cue('key');
+    this.onPilotVoice?.(hit.id, line.text);
+    this.onAnnounce?.(`${spec.name}: ${line.text}`);
+    return true;
   }
 
   private syncFocusFromLoadout(): void {
@@ -378,6 +497,14 @@ export class Hangar {
     this.stage = 'avatar';
     this.stageAge = 0;
     this.focusSince = this.clock;
+    this.lastHoveredPilotIdx = -1;
+    const p = PILOTS[this.focusPilot]!;
+    this.activeTagline = {
+      pilot: p.id,
+      text: p.taglines[0].text,
+      emote: p.taglines[0].emote,
+      age: 0.9,
+    };
     this.cue('key');
     this.announceStage();
   }
@@ -385,6 +512,7 @@ export class Hangar {
   /** One-press Quick Fly: commit whichever pilot, theme and ship are currently focused and board immediately. */
   quickFly(): void {
     if (!this.isPicking) return;
+    this.pendingVoice = null;
     this.loadout = {
       pilot: PILOTS[this.focusPilot]!.id,
       theme: THEMES[this.focusTheme]!.id,
@@ -402,6 +530,27 @@ export class Hangar {
   update(dt: number): void {
     this.clock += dt;
     this.stageAge += dt;
+    if (this.activeTagline) {
+      this.activeTagline.age += dt;
+    }
+    if (this.pendingVoice) {
+      this.pendingVoice.wait -= dt;
+      if (this.pendingVoice.wait <= 0) {
+        const pv = this.pendingVoice;
+        this.pendingVoice = null;
+        if (this.stage === 'avatar') {
+          this.onPilotVoice?.(pv.pilot, pv.text);
+        }
+      }
+    }
+    if (this.dancePartyTimer > 0) {
+      this.dancePartyTimer = Math.max(0, this.dancePartyTimer - dt);
+    }
+    if (this.cadetReaction) {
+      this.cadetReaction.timer -= dt;
+      if (this.cadetReaction.timer <= 0) this.cadetReaction = null;
+    }
+
     if (this.isPicking) {
       // Fade in smoothly when opening on the picker, then stay bright while the player chooses.
       this.t = Math.min(this.t + dt, FADE + 0.2);
@@ -438,6 +587,7 @@ export class Hangar {
   // ----------------------------------------------------------------- input
 
   wantsKey(key: string): boolean {
+    if (key === 'b' || key === 'B') return true;
     if (!this.isPicking) return false;
     if (key === 'f' || key === 'F') return true;
     if (key === 'Backspace') return this.stage !== 'avatar';
@@ -447,6 +597,10 @@ export class Hangar {
   }
 
   typeKey(key: string): void {
+    if (key === 'b' || key === 'B') {
+      this.triggerDanceParty();
+      return;
+    }
     if (!this.isPicking || this.stageAge < HANGAR_STAGE_GRACE) return;
     if (key === 'f' || key === 'F') {
       this.quickFly();
@@ -471,6 +625,10 @@ export class Hangar {
   }
 
   command(code: string): boolean {
+    if (code === 'KeyB') {
+      this.triggerDanceParty();
+      return true;
+    }
     if (code === 'KeyH') {
       if (!this.isPicking) {
         this.openCustomizer();
@@ -508,8 +666,9 @@ export class Hangar {
       const p = PILOTS[next]!;
       this.loadout.pilot = p.id;
       this.focusSince = this.clock;
+      const line = this.triggerPilotTagline(p.id, true);
       this.cue('key');
-      this.onAnnounce?.(`${p.name}, ${p.tag}.`);
+      this.onAnnounce?.(`${p.name}, ${p.tag}: ${line.text}`);
       return true;
     }
 
@@ -549,10 +708,18 @@ export class Hangar {
     this.ensureGeometry();
     if (this.stage === 'avatar') {
       const idx = this.avatarCards.findIndex((b) => hitBox(x, y, b, 2));
-      if (idx >= 0 && idx !== this.focusPilot) {
+      if (idx < 0) {
+        this.lastHoveredPilotIdx = -1;
+        return;
+      }
+      if (idx !== this.lastHoveredPilotIdx) {
+        this.lastHoveredPilotIdx = idx;
         this.focusPilot = idx;
-        this.loadout.pilot = PILOTS[idx]!.id;
+        const p = PILOTS[idx]!;
+        this.loadout.pilot = p.id;
         this.focusSince = this.clock;
+        this.triggerPilotTagline(p.id, false);
+        this.cue('key');
       }
       return;
     }
@@ -577,15 +744,23 @@ export class Hangar {
 
   /**
    * Handle a click or tap at (x, y).
-   * Returns true whenever a picker step is active so stray taps never skip the intro.
+   * Returns true whenever a picker step is active (or when tapping a cadet/party button during boarding)
+   * so interactive clicks never accidentally skip the hangar.
    */
   pick(x: number, y: number): boolean {
-    if (!this.isPicking) return false;
+    if (!this.isPicking) {
+      // During boarding, tapping one of the 7 squadmates makes them react instead of skipping!
+      return this.tapCadetAt(x, y);
+    }
     if (this.stageAge < HANGAR_STAGE_GRACE) return true;
     this.ensureGeometry();
 
     if (this.navBtn && hitBox(x, y, this.navBtn, 6)) {
       this.stepBack();
+      return true;
+    }
+    if (this.partyBtn && hitBox(x, y, this.partyBtn, 6)) {
+      this.triggerDanceParty();
       return true;
     }
     if (this.quickFlyBtn && hitBox(x, y, this.quickFlyBtn, 6)) {
@@ -611,13 +786,16 @@ export class Hangar {
       return true;
     }
 
-    // stage === 'ship': tap a >= 44px 2D bay stat card (or click the 3D ship directly on desktop)!
+    // stage === 'ship': tap a >= 44px 2D bay stat card (or click the 3D ship directly on desktop),
+    // or click any of the 7 squadmates on the hangar floor to make them react!
     const plaqueIdx = this.shipPlaques.findIndex((b) => hitBox(x, y, b, 6));
     const craftIdx = plaqueIdx >= 0 ? plaqueIdx : this.shipTargets.findIndex((b) => hitBox(x, y, b, 10));
     if (craftIdx >= 0) {
       this.focusShip = craftIdx;
       this.selectShip(SHIPS[craftIdx]!.id);
+      return true;
     }
+    this.tapCadetAt(x, y);
     return true;
   }
 
@@ -626,6 +804,7 @@ export class Hangar {
       this.stage = 'avatar';
       this.stageAge = 0;
       this.focusSince = this.clock;
+      this.lastHoveredPilotIdx = -1;
       this.cue('key');
       this.announceStage();
     } else if (this.stage === 'ship') {
@@ -638,6 +817,7 @@ export class Hangar {
   }
 
   private selectPilot(id: PilotId): void {
+    this.pendingVoice = null;
     this.loadout.pilot = id;
     this.syncFocusFromLoadout();
     this.stage = 'theme';
@@ -741,13 +921,15 @@ export class Hangar {
 
     // Sub-bar starts strictly below the 44px top-right `.arcade-controls` toolbar so nothing overlaps on 320px phones.
     const uiTop = top + 50;
-    const wideBar = availW >= 560;
+    const wideBar = this.stage === 'ship' ? availW >= 680 : availW >= 560;
 
     if (this.isPicking) {
       this.navBtn = this.stage === 'avatar' ? null : { x: left, y: uiTop, w: 84, h: 44 };
+      this.partyBtn = this.stage === 'ship' ? { x: left + 90, y: uiTop, w: 84, h: 44 } : null;
       this.quickFlyBtn = { x: right - 118, y: uiTop, w: 118, h: 44 };
     } else {
       this.navBtn = null;
+      this.partyBtn = null;
       this.quickFlyBtn = null;
     }
 
@@ -758,14 +940,15 @@ export class Hangar {
       const rows = Math.ceil(PILOTS.length / cols);
       const gap = this.w < 460 ? 8 : 12;
       const gridTop = headerTop + (this.h < 500 ? 34 : 44);
-      const gridBottom = bottom - 24;
+      const taglineReserve = this.h < 500 ? 40 : 48;
+      const gridBottom = bottom - taglineReserve;
       const maxCardW = cols === 4 ? 148 : 164;
       const cw = Math.min(maxCardW, (availW - gap * (cols - 1)) / cols);
-      const ch = clamp((gridBottom - gridTop - gap * (rows - 1)) / rows, 68, cols === 4 ? 156 : 124);
+      const ch = clamp((gridBottom - gridTop - gap * (rows - 1)) / rows, 68, cols === 4 ? 152 : 120);
       const totalW = cw * cols + gap * (cols - 1);
       const x0 = left + (availW - totalW) / 2;
       const totalH = ch * rows + gap * (rows - 1);
-      const y0 = gridTop + Math.max(0, (gridBottom - gridTop - totalH) * 0.35);
+      const y0 = gridTop + Math.max(0, (gridBottom - gridTop - totalH) * 0.25);
       this.avatarCards = PILOTS.map((_, i) => ({
         x: x0 + (i % cols) * (cw + gap),
         y: y0 + Math.floor(i / cols) * (ch + gap),
@@ -1346,10 +1529,35 @@ export class Hangar {
     }, false);
   }
 
+  private recordCadetTarget(id: PilotId, slot: number, worldX: number, worldY: number, worldZ: number): void {
+    if (!this.flat(worldX, worldY + 0.95, worldZ)) return;
+    const w = Math.max(44, (this.focal * 1.6) / this.sd);
+    const h = Math.max(44, (this.focal * 2.1) / this.sd);
+    this.cadetTargets.push({
+      id,
+      slot,
+      x: this.sx - w / 2,
+      y: this.sy - h * 0.52,
+      w,
+      h,
+      worldX,
+      worldZ,
+    });
+  }
+
+  private renderCadetCallout(ink: HangarInk, x: number, z: number, text: string, color: string): void {
+    ink(color, 0.95, 1.35, () => {
+      this.label(text, x, 2.55, z, 0.36);
+      this.seg(x - 0.14, 2.38, z, x, 2.18, z);
+      this.seg(x + 0.14, 2.38, z, x, 2.18, z);
+    });
+  }
+
   /**
    * Draw all 7 non-selected pilot avatars across the hangar in a randomized scenario:
    * studying maths & typing, tossing a glowing neon ball back and forth, doing jumping jacks,
    * napping on benches, munching space pizza, zapping holo-targets, and breaking into cadet dances!
+   * Also supports interactive tap/click reactions and the full-squad Dance Party (`KeyB` / `PARTY`)!
    */
   private renderSquadScenario(
     ink: HangarInk,
@@ -1357,66 +1565,100 @@ export class Hangar {
     mathAnswered: boolean,
     typingFinished: boolean,
   ): void {
+    this.cadetTargets = [];
     const others = this.scenario.rosterOrder
       .filter((id) => id !== this.loadout.pilot)
       .map((id) => PILOT_BY_ID[id]);
     if (others.length < 7) return;
 
     const { catchZone, mathSecondSleeps, antics, dances, phases } = this.scenario;
+    const partyOn = this.dancePartyTimer > 0;
+    const partySyncMove = DANCE_MOVES[Math.floor(animTime / 2.2) % DANCE_MOVES.length]!;
     const seg = (ax: number, ay: number, az: number, bx: number, by: number, bz: number): void =>
       this.seg(ax, ay, az, bx, by, bz);
+
+    const isReacting = (slot: number): boolean => this.cadetReaction?.slot === slot && this.cadetReaction.timer > 0;
 
     // 1. Typing Lab Cadet (`others[0]` at desk 15.2, 24.5):
     {
       const c = others[0]!;
       const ph = phases[0]!;
       const tap = Math.sin(animTime * 15 + ph);
-      const pose = typingFinished
-        ? person({
-            x: 15.2,
-            z: 24.5,
-            scale: 0.9,
-            seated: true,
-            pack: true,
-            happy: true,
-            armL: { upper: [-0.42, 0.85, 0.22], fore: [-0.25, 0.95, 0.18] },
-            armR: { upper: [0.42, 0.85, 0.22], fore: [0.25, 0.95, 0.18] },
-          })
-        : person({
-            x: 15.2,
-            z: 24.5,
-            scale: 0.9,
-            seated: true,
-            pack: true,
-            armL: { upper: [-0.15, -0.55, 0.65], fore: [0.1, -0.15 + tap * 0.18, 0.88] },
-            armR: { upper: [0.15, -0.55, 0.65], fore: [-0.1, -0.15 - tap * 0.18, 0.88] },
-          });
-      this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.85, false, pose);
+      const react = isReacting(0);
+      if (partyOn || react) {
+        const px = 14.0;
+        const pz = 23.6;
+        const pose = this.reduceMotion
+          ? person({ x: px, z: pz, face: Math.PI + 0.32, pack: true, happy: true })
+          : this.cadetDancePose(partyOn ? partySyncMove : dances[0]!, px, pz, Math.PI + 0.32, animTime, partyOn ? 0 : ph);
+        this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.9, false, pose);
+        this.renderFloatingNotes(ink, px, pz, animTime, ph, c.colors.accent);
+        this.recordCadetTarget(c.id, 0, px, 0, pz);
+        if (react && this.cadetReaction) this.renderCadetCallout(ink, px, pz, this.cadetReaction.callout, c.colors.accent);
+      } else {
+        const pose = typingFinished
+          ? person({
+              x: 15.2,
+              z: 24.5,
+              scale: 0.9,
+              seated: true,
+              pack: true,
+              happy: true,
+              armL: { upper: [-0.42, 0.85, 0.22], fore: [-0.25, 0.95, 0.18] },
+              armR: { upper: [0.42, 0.85, 0.22], fore: [0.25, 0.95, 0.18] },
+            })
+          : person({
+              x: 15.2,
+              z: 24.5,
+              scale: 0.9,
+              seated: true,
+              pack: true,
+              armL: { upper: [-0.15, -0.55, 0.65], fore: [0.1, -0.15 + tap * 0.18, 0.88] },
+              armR: { upper: [0.15, -0.55, 0.65], fore: [-0.1, -0.15 - tap * 0.18, 0.88] },
+            });
+        this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.85, false, pose);
+        this.recordCadetTarget(c.id, 0, 15.2, 0, 24.5);
+      }
     }
 
     // 2. Maths Class Cadet (`others[1]` at front-right desk -14.4, 25.4):
     {
       const c = others[1]!;
-      const pose = mathAnswered
-        ? person({
-            x: -14.4,
-            z: 25.4,
-            scale: 0.9,
-            seated: true,
-            pack: true,
-            happy: true,
-            armL: { upper: [-0.38, 0.82, 0.25], fore: [-0.2, 0.92, 0.2] },
-            armR: { upper: [0.38, 0.82, 0.25], fore: [0.2, 0.92, 0.2] },
-          })
-        : person({
-            x: -14.4,
-            z: 25.4,
-            scale: 0.9,
-            seated: true,
-            pack: true,
-            reach: 0.86,
-          });
-      this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.85, false, pose);
+      const ph = phases[1]!;
+      const react = isReacting(1);
+      if (partyOn || react) {
+        const px = -13.1;
+        const pz = 24.2;
+        const pose = this.reduceMotion
+          ? person({ x: px, z: pz, face: Math.PI - 0.32, pack: true, happy: true })
+          : this.cadetDancePose(partyOn ? partySyncMove : dances[1]!, px, pz, Math.PI - 0.32, animTime, partyOn ? 0 : ph);
+        this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.9, false, pose);
+        this.renderFloatingNotes(ink, px, pz, animTime, ph, c.colors.accent);
+        this.recordCadetTarget(c.id, 1, px, 0, pz);
+        if (react && this.cadetReaction) this.renderCadetCallout(ink, px, pz, this.cadetReaction.callout, c.colors.accent);
+      } else {
+        const pose = mathAnswered
+          ? person({
+              x: -14.4,
+              z: 25.4,
+              scale: 0.9,
+              seated: true,
+              pack: true,
+              happy: true,
+              armL: { upper: [-0.38, 0.82, 0.25], fore: [-0.2, 0.92, 0.2] },
+              armR: { upper: [0.38, 0.82, 0.25], fore: [0.2, 0.92, 0.2] },
+            })
+          : person({
+              x: -14.4,
+              z: 25.4,
+              scale: 0.9,
+              seated: true,
+              pack: true,
+              reach: 0.86,
+            });
+        this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.85, false, pose);
+        this.recordCadetTarget(c.id, 1, -14.4, 0, 25.4);
+      }
     }
 
     // Also keep two junior trainees at the back Maths Class row so the classroom stays full:
@@ -1436,69 +1678,91 @@ export class Hangar {
             ? ([[5.1, 8.3], [8.6, 7.6]] as const)
             : ([[-9.1, 19.6], [-4.9, 20.4]] as const);
 
-      const faceAB = Math.atan2(spotB[0] - spotA[0], spotB[1] - spotA[1]);
-      const faceBA = Math.atan2(spotA[0] - spotB[0], spotA[1] - spotB[1]);
+      this.recordCadetTarget(cA.id, 2, spotA[0], 0, spotA[1]);
+      this.recordCadetTarget(cB.id, 3, spotB[0], 0, spotB[1]);
 
-      const cycle = (animTime + phases[2]!) / 1.35;
-      const leg = Math.floor(cycle);
-      const u = cycle - leg;
-      const aToB = leg % 2 === 0;
-      const from = aToB ? spotA : spotB;
-      const to = aToB ? spotB : spotA;
-
-      const bx = lerp(from[0], to[0], u);
-      const bz = lerp(from[1], to[1], u);
-      const by = 1.18 + 4 * u * (1 - u) * 1.55;
-
-      // Glowing spinning 3D octahedron space-ball flying in an arc between them:
-      ink(LIME, 0.95, 1.45, () => {
-        const r = 0.2;
-        const spin = animTime * 5.5;
-        const cs = Math.cos(spin) * r;
-        const sn = Math.sin(spin) * r;
-        const pts: readonly [number, number][] = [
-          [cs, sn],
-          [-sn, cs],
-          [-cs, -sn],
-          [sn, -cs],
-        ];
-        for (let i = 0; i < 4; i++) {
-          const [dx0, dz0] = pts[i]!;
-          const [dx1, dz1] = pts[(i + 1) % 4]!;
-          seg(bx + dx0, by, bz + dz0, bx + dx1, by, bz + dz1);
-          seg(bx + dx0, by, bz + dz0, bx, by + r * 1.15, bz);
-          seg(bx + dx0, by, bz + dz0, bx, by - r * 1.15, bz);
+      if (partyOn) {
+        for (const [c, sp, ph] of [
+          [cA, spotA, phases[2]!],
+          [cB, spotB, phases[3]!],
+        ] as const) {
+          const faceCam = sp[0] < 0 ? Math.PI - 0.25 : Math.PI + 0.25;
+          const pose = this.reduceMotion
+            ? person({ x: sp[0], z: sp[1], face: faceCam, pack: true, happy: true })
+            : this.cadetDancePose(partySyncMove, sp[0], sp[1], faceCam, animTime, 0);
+          this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.94, false, pose);
+          this.renderFloatingNotes(ink, sp[0], sp[1], animTime, ph, c.colors.accent);
         }
-      });
+      } else {
+        const trickLob = isReacting(2) || isReacting(3);
+        const faceAB = Math.atan2(spotB[0] - spotA[0], spotB[1] - spotA[1]);
+        const faceBA = Math.atan2(spotA[0] - spotB[0], spotA[1] - spotB[1]);
 
-      const throwerLift = Math.max(0, 1 - u * 2.6);
-      const catcherLift = Math.max(0, (u - 0.55) / 0.45);
-      const hopCatch = Math.max(0, Math.sin(catcherLift * Math.PI)) * 0.18;
+        const cycle = (animTime + phases[2]!) / (trickLob ? 1.05 : 1.35);
+        const leg = Math.floor(cycle);
+        const u = cycle - leg;
+        const aToB = leg % 2 === 0;
+        const from = aToB ? spotA : spotB;
+        const to = aToB ? spotB : spotA;
 
-      const poseFor = (isThrower: boolean, spot: readonly [number, number], face: number, ph: number): Pose => {
-        const reachAmt = isThrower ? throwerLift : catcherLift;
-        return person({
-          x: spot[0],
-          z: spot[1],
-          y: isThrower ? 0 : hopCatch,
-          face,
-          pack: true,
-          happy: reachAmt > 0.35,
-          tailPhase: animTime * 6 + ph,
-          squat: isThrower ? (1 - throwerLift) * 0.04 : 0.06 * (1 - catcherLift),
-          armL: {
-            upper: [-0.2, -0.25 + reachAmt * 0.78, 0.55 + reachAmt * 0.3],
-            fore: [0.12, 0.15 + reachAmt * 0.72, 0.75],
-          },
-          armR: {
-            upper: [0.2, -0.25 + reachAmt * 0.88, 0.55 + reachAmt * 0.35],
-            fore: [-0.12, 0.2 + reachAmt * 0.78, 0.8],
-          },
+        const bx = lerp(from[0], to[0], u);
+        const bz = lerp(from[1], to[1], u);
+        const arcPeak = trickLob ? 3.85 : 1.55;
+        const by = 1.18 + 4 * u * (1 - u) * arcPeak;
+
+        // Glowing spinning 3D octahedron space-ball flying in an arc between them:
+        ink(trickLob ? PINK : LIME, 0.95, trickLob ? 1.7 : 1.45, () => {
+          const r = trickLob ? 0.26 : 0.2;
+          const spin = animTime * (trickLob ? 11 : 5.5);
+          const cs = Math.cos(spin) * r;
+          const sn = Math.sin(spin) * r;
+          const pts: readonly [number, number][] = [
+            [cs, sn],
+            [-sn, cs],
+            [-cs, -sn],
+            [sn, -cs],
+          ];
+          for (let i = 0; i < 4; i++) {
+            const [dx0, dz0] = pts[i]!;
+            const [dx1, dz1] = pts[(i + 1) % 4]!;
+            seg(bx + dx0, by, bz + dz0, bx + dx1, by, bz + dz1);
+            seg(bx + dx0, by, bz + dz0, bx, by + r * 1.15, bz);
+            seg(bx + dx0, by, bz + dz0, bx, by - r * 1.15, bz);
+          }
         });
-      };
 
-      this.drawPilot(ink, cA, cA.colors.base, cA.colors.accent, 0.92, false, poseFor(aToB, spotA, faceAB, phases[2]!));
-      this.drawPilot(ink, cB, cB.colors.base, cB.colors.accent, 0.92, false, poseFor(!aToB, spotB, faceBA, phases[3]!));
+        const throwerLift = Math.max(0, 1 - u * 2.6);
+        const catcherLift = Math.max(0, (u - 0.55) / 0.45);
+        const hopCatch = Math.max(0, Math.sin(catcherLift * Math.PI)) * (trickLob ? 0.48 : 0.18);
+
+        const poseFor = (isThrower: boolean, spot: readonly [number, number], face: number, ph: number): Pose => {
+          const reachAmt = isThrower ? throwerLift : catcherLift;
+          return person({
+            x: spot[0],
+            z: spot[1],
+            y: isThrower ? (trickLob ? throwerLift * 0.32 : 0) : hopCatch,
+            face,
+            pack: true,
+            happy: trickLob || reachAmt > 0.35,
+            tailPhase: animTime * 6 + ph,
+            squat: isThrower ? (1 - throwerLift) * 0.04 : 0.06 * (1 - catcherLift),
+            armL: {
+              upper: [-0.2, -0.25 + reachAmt * 0.78, 0.55 + reachAmt * 0.3],
+              fore: [0.12, 0.15 + reachAmt * 0.72, 0.75],
+            },
+            armR: {
+              upper: [0.2, -0.25 + reachAmt * 0.88, 0.55 + reachAmt * 0.35],
+              fore: [-0.12, 0.2 + reachAmt * 0.78, 0.8],
+            },
+          });
+        };
+
+        this.drawPilot(ink, cA, cA.colors.base, cA.colors.accent, 0.92, false, poseFor(aToB, spotA, faceAB, phases[2]!));
+        this.drawPilot(ink, cB, cB.colors.base, cB.colors.accent, 0.92, false, poseFor(!aToB, spotB, faceBA, phases[3]!));
+        if (trickLob && this.cadetReaction) {
+          this.renderCadetCallout(ink, (spotA[0] + spotB[0]) / 2, (spotA[1] + spotB[1]) / 2, 'MEGA TOSS!', YELLOW);
+        }
+      }
     }
 
     // 5, 6 & 7. Three Randomized Hangar Antics on the open foreground/side spots:
@@ -1510,34 +1774,51 @@ export class Hangar {
             [-10.4, 11.4, Math.PI - 0.38],
           ]
         : catchZone === 'rightApron'
-          ? [
-              [-5.5, 7.5, Math.PI - 0.28],
-              [-8.6, 8.6, Math.PI - 0.42],
-              [10.4, 11.4, Math.PI + 0.38],
-            ]
-          : [
-              [-7.0, 7.7, Math.PI - 0.32],
-              [5.6, 7.6, Math.PI + 0.28],
-              [8.7, 8.7, Math.PI + 0.42],
-            ];
+            ? [
+                [-5.5, 7.5, Math.PI - 0.28],
+                [-8.6, 8.6, Math.PI - 0.42],
+                [10.4, 11.4, Math.PI + 0.38],
+              ]
+            : [
+                [-7.0, 7.7, Math.PI - 0.32],
+                [5.6, 7.6, Math.PI + 0.28],
+                [8.7, 8.7, Math.PI + 0.42],
+              ];
 
     antics.forEach((act, idx) => {
-      const c = others[4 + idx]!;
-      const ph = phases[4 + idx]!;
-      const baseMove = dances[4 + idx]!;
+      const slot = 4 + idx;
+      const c = others[slot]!;
+      const ph = phases[slot]!;
+      const baseMove = dances[slot]!;
       const [sx, sz, faceCam] = openSpots[idx]!;
+      const react = isReacting(slot);
 
-      // Spontaneous ~4.2s cadet dance break every ~13.5s for active standing cadets!
+      const spotX = act === 'mathExtra' && !partyOn && !react ? -18.2 : sx;
+      const spotZ = act === 'mathExtra' && !partyOn && !react ? 25.4 : sz;
+      this.recordCadetTarget(c.id, slot, spotX, 0, spotZ);
+
+      // Spontaneous ~4.2s cadet dance break every ~13.5s, OR tapped cadet reaction, OR full-squad Dance Party!
       const danceWindow = !this.reduceMotion && ((animTime + ph * 1.3) % 13.5) < 4.2;
-      const activeMove =
-        DANCE_MOVES[(DANCE_MOVES.indexOf(baseMove) + Math.floor((animTime + ph) / 6.5)) % DANCE_MOVES.length]!;
+      const activeMove = partyOn
+        ? partySyncMove
+        : DANCE_MOVES[(DANCE_MOVES.indexOf(baseMove) + Math.floor((animTime + ph) / 6.5)) % DANCE_MOVES.length]!;
 
-      if (act === 'dance' || (danceWindow && (act === 'jacks' || act === 'practice'))) {
+      if (partyOn || react || act === 'dance' || (danceWindow && (act === 'jacks' || act === 'practice'))) {
+        if (act === 'sleep') {
+          // Keep the empty nap bench drawn behind the woken-up dancing cadet!
+          ink(BLUE, 0.5, 1.1, () => {
+            this.box(sx, 0.36, sz + 0.65, 2.2, 0.1, 0.85);
+          }, false);
+        }
         const pose = this.reduceMotion
           ? person({ x: sx, z: sz, face: faceCam, pack: true, happy: true })
-          : this.cadetDancePose(activeMove, sx, sz, faceCam, animTime, ph);
+          : this.cadetDancePose(activeMove, sx, sz, faceCam, animTime, partyOn ? 0 : ph);
         this.drawPilot(ink, c, c.colors.base, c.colors.accent, 0.94, false, pose);
         this.renderFloatingNotes(ink, sx, sz, animTime, ph, c.colors.accent);
+        if (react && this.cadetReaction) {
+          const msg = act === 'sleep' ? 'IM AWAKE!' : this.cadetReaction.callout;
+          this.renderCadetCallout(ink, sx, sz, msg, c.colors.accent);
+        }
         return;
       }
 
@@ -1858,16 +2139,17 @@ export class Hangar {
     const selectedShip = SHIP_BY_ID[this.loadout.ship];
     const animTime = this.reduceMotion ? 0 : time;
 
-    // --- outside the door: a low-poly planet with a ring, a long way off
+    // --- outside the door: a low-poly ringed planet + Flight School traffic passing across deep space
     ctx.save();
     ctx.beginPath();
     this.clipSky(ctx);
     ctx.clip();
     ink(MINT, 0.55, 1.1, () => {
       const [px, py, pz, r] = [9, 15, DEPTH + 150, 11];
+      const spin = animTime * 0.045;
       const at = (turn: number, scale: number): [number, number] => [
-        px + Math.cos(turn * Math.PI * 2 + 0.3) * r * scale,
-        py + Math.sin(turn * Math.PI * 2 + 0.3) * r * scale,
+        px + Math.cos(turn * Math.PI * 2 + 0.3 + spin) * r * scale,
+        py + Math.sin(turn * Math.PI * 2 + 0.3 + spin) * r * scale,
       ];
       for (let i = 0; i < 10; i++) {
         const [x0, y0] = at(i / 10, 1);
@@ -1890,6 +2172,9 @@ export class Hangar {
         seg(px + Math.cos(a) * r * 1.75, py + Math.sin(a) * r * 0.4, pz, px + Math.cos(b) * r * 1.75, py + Math.sin(b) * r * 0.4, pz);
       }
     }, false);
+    if (!this.reduceMotion) {
+      this.renderDoorwaySpaceTraffic(ctx, ink, animTime);
+    }
     ctx.restore();
 
     // --- the building: floor, walls, roof, and the door open to space
@@ -1897,18 +2182,40 @@ export class Hangar {
       for (let z = 0; z <= DEPTH; z += 6) seg(-HALF, 0, z, HALF, 0, z);
       for (let x = -HALF; x <= HALF; x += 6) seg(x, 0, 0, x, 0, DEPTH);
     }, false);
-    ink(VIOLET, 0.4, 1.1, () => {
-      for (const z of ARCHES) {
-        seg(-HALF, 0, z, -HALF, WALL, z);
-        seg(-HALF, WALL, z, -15, ROOF, z);
-        seg(-15, ROOF, z, 15, ROOF, z);
-        seg(15, ROOF, z, HALF, WALL, z);
-        seg(HALF, WALL, z, HALF, 0, z);
-      }
-      for (const [x, y] of [[-HALF, WALL], [-15, ROOF], [15, ROOF], [HALF, WALL]] as const) seg(x, y, ARCHES[0]!, x, y, DEPTH);
-      seg(-HALF, 0, DEPTH, -DOOR_HALF, 0, DEPTH);
-      seg(DOOR_HALF, 0, DEPTH, HALF, 0, DEPTH);
-    }, false);
+    const partyOn = this.dancePartyTimer > 0;
+    if (partyOn) {
+      const partyPalette = [PINK, CYAN, YELLOW, LIME, VIOLET] as const;
+      const beat = Math.floor(animTime * 6.5);
+      ARCHES.forEach((z, idx) => {
+        const archCol = partyPalette[(idx + beat) % partyPalette.length]!;
+        ink(archCol, 0.78, 1.4, () => {
+          seg(-HALF, 0, z, -HALF, WALL, z);
+          seg(-HALF, WALL, z, -15, ROOF, z);
+          seg(-15, ROOF, z, 15, ROOF, z);
+          seg(15, ROOF, z, HALF, WALL, z);
+          seg(HALF, WALL, z, HALF, 0, z);
+        });
+      });
+      ink(CYAN, 0.52, 1.15, () => {
+        for (const [x, y] of [[-HALF, WALL], [-15, ROOF], [15, ROOF], [HALF, WALL]] as const) seg(x, y, ARCHES[0]!, x, y, DEPTH);
+        seg(-HALF, 0, DEPTH, -DOOR_HALF, 0, DEPTH);
+        seg(DOOR_HALF, 0, DEPTH, HALF, 0, DEPTH);
+      }, false);
+      this.renderDiscoBall(ink, animTime);
+    } else {
+      ink(VIOLET, 0.4, 1.1, () => {
+        for (const z of ARCHES) {
+          seg(-HALF, 0, z, -HALF, WALL, z);
+          seg(-HALF, WALL, z, -15, ROOF, z);
+          seg(-15, ROOF, z, 15, ROOF, z);
+          seg(15, ROOF, z, HALF, WALL, z);
+          seg(HALF, WALL, z, HALF, 0, z);
+        }
+        for (const [x, y] of [[-HALF, WALL], [-15, ROOF], [15, ROOF], [HALF, WALL]] as const) seg(x, y, ARCHES[0]!, x, y, DEPTH);
+        seg(-HALF, 0, DEPTH, -DOOR_HALF, 0, DEPTH);
+        seg(DOOR_HALF, 0, DEPTH, HALF, 0, DEPTH);
+      }, false);
+    }
     ink(CYAN, 0.9, 1.6, () => {
       seg(-DOOR_HALF, 0, DEPTH, -DOOR_HALF, DOOR_TOP, DEPTH);
       seg(-DOOR_HALF, DOOR_TOP, DEPTH, DOOR_HALF, DOOR_TOP, DEPTH);
@@ -2116,12 +2423,22 @@ export class Hangar {
     // --- the player's 3D pilot figure (wearing their avatar's 3D head/ears/visor/tail & colour-theme suit!)
     const activeZ = boarding ? selectedShip.bay.z + rolling * rolling * 18 : selectedShip.bay.z;
     const activeX = boarding ? lerp(selectedShip.bay.x, selectedShip.bay.x * 0.5, rolling) : selectedShip.bay.x;
-    const playerPose = {
-      ...this.pilotPose(selectedShip, activeX, activeZ, pilotSpec.hangarHat),
-      happy: true,
-      tailPhase: animTime * 6.5,
-    };
+    const syncMove = DANCE_MOVES[Math.floor(animTime / 2.2) % DANCE_MOVES.length]!;
+    const playerPose =
+      partyOn && !boarding && !this.reduceMotion
+        ? {
+            ...this.cadetDancePose(syncMove, START.x, START.z, Math.PI, animTime, 0),
+            hat: pilotSpec.hangarHat,
+          }
+        : {
+            ...this.pilotPose(selectedShip, activeX, activeZ, pilotSpec.hangarHat),
+            happy: true,
+            tailPhase: animTime * 6.5,
+          };
     this.drawPilot(ink, pilotSpec, theme.hull, pilotSpec.colors.accent, 1, true, playerPose);
+    if (partyOn && !boarding) {
+      this.renderFloatingNotes(ink, START.x, START.z, animTime, 0, theme.hull);
+    }
 
     // --- UI overlays for each stage
     if (this.stage === 'avatar') {
@@ -2135,6 +2452,123 @@ export class Hangar {
     }
 
     this.ctx = null;
+  }
+
+  /** Deep-space vignettes drifting past the open hangar bay door (clipped inside `clipSky`). */
+  private renderDoorwaySpaceTraffic(ctx: CanvasRenderingContext2D, ink: HangarInk, animTime: number): void {
+    const QUARTER = Math.PI / 2;
+
+    // 1. Flight-School Duckling Line: instructor + 3 wobbling cadets (Swift, Starhawk, Bastion)
+    const uSchool = (animTime / 14) % 1;
+    if (uSchool < 0.72) {
+      const progress = uSchool / 0.72;
+      const wz = DEPTH + 42;
+      const leadX = lerp(-18, 22, progress);
+      const leadY = 9.4 + Math.sin(animTime * 1.5) * 0.55;
+      if (this.flat(leadX, leadY, wz)) {
+        const sc = clamp((this.focal * 0.095) / this.sd, 0.35, 0.85);
+        const lx = this.sx;
+        const ly = this.sy;
+        ink(SAND, 0.48, 1.1, () => trace(ctx, SHIP, lx, ly, sc, QUARTER), false);
+      }
+      const cadetColors = [CYAN, LIME, YELLOW] as const;
+      SHIP_IDS.forEach((cid, idx) => {
+        const lag = idx === 2 ? Math.max(0, Math.sin(animTime * 0.95)) ** 3 * 2.4 : 0;
+        const cx = leadX - (2.6 + idx * 2.5 + lag);
+        const cy = 9.4 + Math.sin(animTime * 1.5 - (idx + 1) * 0.75) * 0.85 + Math.sin(animTime * 3.1 + idx) * 0.2;
+        if (this.flat(cx, cy, wz)) {
+          const sc = clamp((this.focal * 0.068) / this.sd, 0.25, 0.62);
+          const sx = this.sx;
+          const sy = this.sy;
+          const rot = QUARTER + Math.sin(animTime * 2.4 + idx) * 0.16;
+          ink(cadetColors[idx]!, 0.44, 1, () => trace(ctx, shipShape(cid), sx, sy, sc, rot), false);
+        }
+      });
+    }
+
+    // 2. Fuel Tanker Refuel Pass: tanker + curved fuel hose + drogue + customer ship
+    const uTank = ((animTime + 6.5) / 16) % 1;
+    if (uTank < 0.68) {
+      const progress = uTank / 0.68;
+      const wz = DEPTH + 56;
+      const tx = lerp(19, -21, progress);
+      const ty = 5.2 + Math.sin(animTime * 0.85) * 0.45;
+      const cx = tx + 6.2 + Math.sin(animTime * 1.3) * 0.45;
+      const cy = ty + Math.sin(animTime * 1.8 + 1) * 0.55;
+      if (this.flat(tx, ty, wz)) {
+        const sc = clamp((this.focal * 0.11) / this.sd, 0.36, 0.85);
+        const tsx = this.sx;
+        const tsy = this.sy;
+        ink(LIME, 0.45, 1.1, () => trace(ctx, TANKER, tsx, tsy, sc, -QUARTER), false);
+        if (this.flat(cx, cy, wz)) {
+          const csx = this.sx;
+          const csy = this.sy;
+          const tailX = tsx + 20 * sc;
+          const noseX = csx - 9 * sc;
+          const sag = 6 * sc;
+          ink(LIME, 0.36, 1, () => {
+            ctx.moveTo(tailX, tsy);
+            ctx.quadraticCurveTo((tailX + noseX) / 2, (tsy + csy) / 2 + sag, noseX, csy);
+            trace(ctx, DROGUE, noseX, csy, sc * 0.68, -QUARTER);
+          }, false);
+          ink(SAND, 0.44, 1, () => trace(ctx, shipShape('swift'), csx, csy, sc * 0.76, -QUARTER), false);
+        }
+      }
+    }
+
+    // 3. Occasional streaking shooting star high in the doorway:
+    const uComet = ((animTime + 2.2) / 9.5) % 1;
+    if (uComet < 0.14) {
+      const u = uComet / 0.14;
+      const wz = DEPTH + 80;
+      const hx = lerp(-16, 15, u);
+      const hy = lerp(13.2, 6.8, u);
+      for (let i = 0; i < 3; i++) {
+        const alpha = (0.52 - i * 0.15) * Math.min(1, u * 5, (1 - u) * 3.5);
+        ink(SAND, alpha, 1.1, () => {
+          this.seg(hx - i * 1.6, hy + i * 0.68, wz, hx - (i + 1) * 1.6, hy + (i + 1) * 0.68, wz);
+        }, false);
+      }
+    }
+  }
+
+  /** Spinning 3D low-poly disco ball & sweeping neon floor beams during the `KeyB` / `PARTY` Dance Party! */
+  private renderDiscoBall(ink: HangarInk, animTime: number): void {
+    const bx = 0;
+    const by = 13.8;
+    const bz = 18.5;
+    const r = 1.15;
+    const spin = animTime * 2.6;
+    ink(SAND, 0.85, 1.2, () => {
+      this.seg(bx, ROOF, bz, bx, by + r, bz);
+      for (const lat of [-0.55, 0, 0.55]) {
+        const ry = by + Math.sin(lat) * r;
+        const rr = Math.cos(lat) * r;
+        for (let i = 0; i < 8; i++) {
+          const a0 = spin + (i * Math.PI) / 4;
+          const a1 = spin + ((i + 1) * Math.PI) / 4;
+          this.seg(bx + Math.cos(a0) * rr, ry, bz + Math.sin(a0) * rr, bx + Math.cos(a1) * rr, ry, bz + Math.sin(a1) * rr);
+        }
+      }
+      for (let i = 0; i < 8; i++) {
+        const a = spin + (i * Math.PI) / 4;
+        const mx = bx + Math.cos(a) * r;
+        const mz = bz + Math.sin(a) * r;
+        this.seg(bx, by + r, bz, mx, by, mz);
+        this.seg(mx, by, mz, bx, by - r, bz);
+      }
+    });
+    const beamColors = [PINK, CYAN, YELLOW, LIME, VIOLET, ORANGE] as const;
+    beamColors.forEach((col, i) => {
+      const a = animTime * 1.9 + (i * Math.PI) / 3;
+      const fx = Math.cos(a) * 14.5;
+      const fz = 19 + Math.sin(a * 1.3) * 10.5;
+      ink(col, 0.34, 1.2, () => {
+        this.seg(bx, by - r * 0.6, bz, fx, 0.05, fz);
+        this.seg(fx - 0.55, 0.05, fz, fx + 0.55, 0.05, fz);
+        this.seg(fx, 0.05, fz - 0.55, fx, 0.05, fz + 0.55);
+      }, false);
+    });
   }
 
   private renderActionBox(f: HangarFrame, b: HangarBox | null, label: string, accentColor: string): void {
@@ -2157,9 +2591,16 @@ export class Hangar {
     const ins = this.lastInset;
     const availW = Math.max(240, f.w - ins.left - ins.right - 24);
     const uiTop = ins.top + 62;
+    const wideBar = this.stage === 'ship' ? availW >= 680 : availW >= 560;
     this.renderActionBox(f, this.navBtn, '< BACK', CYAN);
+    this.renderActionBox(
+      f,
+      this.partyBtn,
+      f.touch ? 'PARTY' : 'PARTY · B',
+      this.dancePartyTimer > 0 ? YELLOW : PINK,
+    );
     this.renderActionBox(f, this.quickFlyBtn, f.touch ? 'QUICK FLY' : 'QUICK FLY · F', accentColor);
-    return availW >= 560 ? uiTop + 4 : uiTop + 52;
+    return wideBar ? uiTop + 4 : uiTop + 52;
   }
 
   private renderAvatarStage(f: HangarFrame): void {
@@ -2189,23 +2630,56 @@ export class Hangar {
       ctx.fill();
       ctx.restore();
 
-      // Focused pilot turns further in 3D and cycles expressive emotions so players see them react live!
+      // Focused pilot performs the matching 3D signature emote (wink, nod, smile or fierce) for their tagline!
       const elapsedFocus = Math.max(0, this.clock - this.focusSince);
-      const mood: Mood = focused
-        ? elapsedFocus < 0.85
-          ? 'happy'
-          : PREVIEW_MOODS[Math.floor((elapsedFocus - 0.85) / 1.15) % PREVIEW_MOODS.length]!
-        : (Math.floor((time + i * 1.7) / 6) % 5 === 0 ? 'happy' : 'calm');
-      const yaw = this.reduceMotion
-        ? (focused ? 0.16 : -0.1)
-        : focused
-          ? Math.sin(time * 1.8) * 0.34
-          : Math.sin(time * 0.8 + i * 0.9) * 0.14;
-      const pitch = this.reduceMotion
-        ? 0.04
-        : focused && (mood === 'happy' || mood === 'laugh')
-          ? -0.06 + Math.sin(time * 6) * 0.04
-          : Math.sin(time * 1.1 + i) * 0.04;
+      const activeEmote =
+        focused && this.activeTagline?.pilot === p.id && this.activeTagline.age < 3.2
+          ? this.activeTagline
+          : null;
+
+      let mood: Mood;
+      let yaw: number;
+      let pitch: number;
+
+      if (activeEmote) {
+        const age = activeEmote.age;
+        if (activeEmote.emote === 'wink') {
+          mood = 'wink';
+          yaw = this.reduceMotion ? 0.2 : 0.22 + Math.sin(age * 4.2) * 0.08;
+          pitch = this.reduceMotion ? -0.04 : -0.05 + Math.sin(age * 6) * 0.03;
+        } else if (activeEmote.emote === 'nod') {
+          mood = !this.reduceMotion && age < 0.65 && Math.floor(age * 11) % 2 === 1 ? 'talk' : 'happy';
+          yaw = this.reduceMotion ? 0.12 : Math.sin(age * 2.2) * 0.14;
+          pitch = this.reduceMotion ? 0.11 : 0.04 + Math.sin(age * 14) * 0.22 * Math.max(0, 1 - age / 1.6);
+        } else if (activeEmote.emote === 'fierce') {
+          mood = 'fierce';
+          yaw = this.reduceMotion
+            ? -0.14
+            : Math.sin(age * 15) * 0.13 * Math.max(0, 1 - age / 1.1) + Math.sin(age * 2) * 0.1;
+          pitch = 0.12;
+        } else {
+          // 'smile'
+          mood = !this.reduceMotion && age > 0.35 && age < 1.05 ? 'laugh' : 'happy';
+          yaw = this.reduceMotion ? 0.16 : Math.sin(age * 3.1) * 0.25;
+          pitch = this.reduceMotion ? -0.06 : -0.08 - Math.abs(Math.sin(age * 7)) * 0.05;
+        }
+      } else {
+        mood = focused
+          ? elapsedFocus < 0.85
+            ? 'happy'
+            : PREVIEW_MOODS[Math.floor((elapsedFocus - 0.85) / 1.15) % PREVIEW_MOODS.length]!
+          : (Math.floor((time + i * 1.7) / 6) % 5 === 0 ? 'happy' : 'calm');
+        yaw = this.reduceMotion
+          ? (focused ? 0.16 : -0.1)
+          : focused
+            ? Math.sin(time * 1.8) * 0.34
+            : Math.sin(time * 0.8 + i * 0.9) * 0.14;
+        pitch = this.reduceMotion
+          ? 0.04
+          : focused && (mood === 'happy' || mood === 'laugh')
+            ? -0.06 + Math.sin(time * 6) * 0.04
+            : Math.sin(time * 1.1 + i) * 0.04;
+      }
 
       const labelBand = card.h < 86 ? 22 : 28;
       const faceBox = Math.max(36, Math.min(card.w - 14, card.h - labelBand - 10));
@@ -2260,8 +2734,41 @@ export class Hangar {
       focused);
     });
 
-    const hint = touch ? 'TAP A PILOT OR QUICK FLY' : '1-8 · ARROWS + SPACE · F QUICK FLY';
-    ink(SAND, 0.55, 1, () => traceText(ctx, hint, w / 2, h - ins.bottom - 20, fitTo(hint, 8, availW), 'center'), false);
+    // Glowing neon speech pill below the avatar grid showing the focused pilot's signature tagline:
+    const focusedPilot = PILOTS[this.focusPilot]!;
+    const tagText =
+      this.activeTagline?.pilot === focusedPilot.id
+        ? this.activeTagline.text
+        : focusedPilot.taglines[0].text;
+    const lastCard = this.avatarCards[this.avatarCards.length - 1];
+    const cardsBottom = lastCard ? lastCard.y + lastCard.h : h - ins.bottom - 58;
+    const hintY = h - ins.bottom - 16;
+    const pillRoom = hintY - cardsBottom - 8;
+    if (pillRoom >= 18) {
+      const pillH = clamp(pillRoom - 2, 18, 25);
+      const pillW = Math.min(availW, 500);
+      const pill: HangarBox = {
+        x: w / 2 - pillW / 2,
+        y: cardsBottom + Math.max(3, (pillRoom - pillH) * 0.45),
+        w: pillW,
+        h: pillH,
+      };
+      ctx.save();
+      ctx.beginPath();
+      cutRectPath(ctx, pill, 6);
+      ctx.fillStyle = 'rgba(6, 15, 48, 0.9)';
+      ctx.fill();
+      ctx.restore();
+      const speech = `${focusedPilot.name}: '${tagText}'`;
+      const speechSize = fitTo(speech, h < 500 ? 7.8 : 9, pill.w - 20);
+      ink(focusedPilot.colors.accent, 0.85, 1.25, () => cutRectPath(ctx, pill, 6), false);
+      ink(SAND, 0.96, 1.3, () =>
+        traceText(ctx, speech, w / 2, pill.y + (pill.h - speechSize) / 2, speechSize, 'center'),
+      false);
+    }
+
+    const hint = touch ? 'TAP A PILOT OR QUICK FLY' : 'HOVER TO HEAR · 1-8 · ARROWS + SPACE · F QUICK FLY';
+    ink(SAND, 0.55, 1, () => traceText(ctx, hint, w / 2, hintY, fitTo(hint, 7.8, availW), 'center'), false);
   }
 
   private renderThemeStage(f: HangarFrame): void {
@@ -2382,7 +2889,7 @@ export class Hangar {
     const headerY = this.renderPickerActionBar(f, theme.hull);
 
     // Top banner with subtle dark backing pill so the 3D hangar stays wide open underneath!
-    const maxBannerW = availW >= 560 ? availW - 252 : availW;
+    const maxBannerW = availW >= 680 ? availW - 380 : availW;
     const bannerW = Math.min(maxBannerW, 430);
     const banner: HangarBox = { x: w / 2 - bannerW / 2, y: headerY - 4, w: bannerW, h: h < 500 ? 40 : 46 };
     ctx.save();

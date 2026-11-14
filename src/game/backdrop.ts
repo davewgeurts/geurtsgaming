@@ -13,8 +13,8 @@
 import { pick, rand } from './core';
 
 type V3 = readonly [number, number, number];
-interface Mesh { verts: V3[]; faces: number[][] }
-type BodyKind = 'planet' | 'moon' | 'rock';
+interface Mesh { verts: V3[]; faces: number[][]; spokes?: readonly (readonly [number, number])[] }
+type BodyKind = 'planet' | 'station' | 'moon' | 'rock';
 
 interface Body {
   kind: BodyKind;
@@ -116,10 +116,67 @@ function rock(): Mesh {
   };
 }
 
+/**
+ * An octagonal rotating ring station (Space Pilot School in orbit): a faceted outer habitat wheel,
+ * a central docking hub with twin spires, and four radial connecting spokes.
+ */
+function stationMesh(): Mesh {
+  const N = 8;
+  const verts: V3[] = [];
+  const faces: number[][] = [];
+  const spokes: Array<readonly [number, number]> = [];
+
+  // 0..7: outer-top wheel, 8..15: outer-bottom wheel, 16..23: inner-top wheel, 24..31: inner-bottom wheel
+  const rOut = 1;
+  const rIn = 0.74;
+  const hRim = 0.11;
+  for (const y of [hRim, -hRim]) {
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      verts.push([Math.cos(a) * rOut, y, Math.sin(a) * rOut]);
+    }
+  }
+  for (const y of [hRim, -hRim]) {
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      verts.push([Math.cos(a) * rIn, y, Math.sin(a) * rIn]);
+    }
+  }
+
+  // 32..39: hub top ring, 40..47: hub bottom ring, 48: top spire, 49: bottom spire
+  const rHub = 0.25;
+  const hHub = 0.18;
+  for (const y of [hHub, -hHub]) {
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      verts.push([Math.cos(a) * rHub, y, Math.sin(a) * rHub]);
+    }
+  }
+  verts.push([0, 0.46, 0], [0, -0.46, 0]);
+
+  for (let i = 0; i < N; i++) {
+    const j = (i + 1) % N;
+    // Wheel outer rim + top deck + bottom deck (all outward normals point away from origin):
+    faces.push([i, j, 8 + j, 8 + i]);
+    faces.push([16 + i, 16 + j, j, i]);
+    faces.push([8 + i, 8 + j, 24 + j, 24 + i]);
+    // Central hub drum + twin spire cones:
+    faces.push([32 + i, 32 + j, 40 + j, 40 + i]);
+    faces.push([48, 32 + j, 32 + i]);
+    faces.push([49, 40 + i, 40 + j]);
+    if (i % 2 === 0) {
+      spokes.push([32 + i, 16 + i], [40 + i, 24 + i]);
+    }
+  }
+  return { verts, faces, spokes };
+}
+
 const ICOSAHEDRON = icosahedron();
 const OCTAHEDRON = octahedron();
 const GLOBE = globe(8, [-1.05, -0.4, 0.4, 1.05]);
 const GLOBE_FINE = globe(10, [-1.1, -0.55, 0, 0.55, 1.1]);
+const STATION = stationMesh();
+const STATION_SHADE = 0.068;
 
 /** Fills for a body's faces: the background colour, lifted a little towards the body's own colour. */
 function shadesOf(color: string, strength: number): string[] {
@@ -141,9 +198,9 @@ export class Backdrop {
   private side = Math.random() < 0.5 ? -1 : 1;
   private lastColor = '';
   // Scratch space, reused every frame: a body's corners after turning, and its faces sorted by how lit they are.
-  private X = new Float32Array(64);
-  private Y = new Float32Array(64);
-  private Z = new Float32Array(64);
+  private X = new Float32Array(96);
+  private Y = new Float32Array(96);
+  private Z = new Float32Array(96);
   private lit: number[][] = Array.from({ length: LEVELS }, () => []);
 
   /** Tell the backdrop how big the screen is. The first call, and any big change of shape, lays the scenery out afresh. */
@@ -164,6 +221,7 @@ export class Backdrop {
     this.bodies = [];
     // Listed far to near, which is also the order they are drawn in.
     for (let i = 0; i < (roomy ? 2 : 1); i++) this.bodies.push(this.make('planet', i === 0));
+    this.bodies.push(this.make('station', roomy));
     for (let i = 0; i < 2; i++) this.bodies.push(this.make('moon', true));
     const rocks = Math.max(3, Math.min(9, Math.floor((w * h) / 150_000)));
     for (let i = 0; i < rocks; i++) this.bodies.push(this.make('rock', true));
@@ -198,6 +256,22 @@ export class Backdrop {
         ring: Math.random() < (banded ? 0.6 : 0.2) ? rand(1.55, 1.9) : 0,
       };
       body.y = onScreen ? rand(h * 0.2, h * 0.5) : -this.reach(body) - rand(h * 0.1, h * 0.8);
+    } else if (kind === 'station') {
+      const r = Math.max(24, span * rand(0.055, 0.095));
+      const color = pick(MOON_COLORS);
+      this.side = -this.side;
+      const x = this.side < 0 ? rand(r * 0.4, w * 0.2) : rand(w * 0.8, w - r * 0.4);
+      body = {
+        kind, r, x, y: 0, color,
+        mesh: STATION,
+        depth: rand(0.06, 0.11),
+        shades: shadesOf(color, STATION_SHADE),
+        alpha: 0.19,
+        a: rand(0, 6), b: rand(0.48, 0.82), c: rand(-0.4, 0.4),
+        da: rand(0.09, 0.18) * (Math.random() < 0.5 ? -1 : 1), db: 0,
+        ring: 0,
+      };
+      body.y = onScreen ? rand(h * 0.58, h * 0.84) : -r - rand(h * 0.25, h * 0.9);
     } else if (kind === 'moon') {
       const r = Math.max(6, span * rand(0.014, 0.032));
       const color = pick(MOON_COLORS);
@@ -320,6 +394,12 @@ export class Backdrop {
     ctx.globalAlpha = b.alpha;
     ctx.beginPath();
     for (const bucket of lit) bucket.forEach(outline);
+    if (b.mesh.spokes) {
+      for (const [s0, s1] of b.mesh.spokes) {
+        ctx.moveTo(X[s0]!, Y[s0]!);
+        ctx.lineTo(X[s1]!, Y[s1]!);
+      }
+    }
     ctx.stroke();
 
     if (b.ring) this.ring(ctx, b, cx, cy, cb, sb, cc, sc, true);

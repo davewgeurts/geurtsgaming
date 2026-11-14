@@ -72,6 +72,9 @@ const { Game } = await import('../src/game/game');
 const { bossParts, createBoss, shootBoss, updateBoss } = await import('../src/game/boss');
 const { createField, gapAt, updateField } = await import('../src/game/asteroids');
 const { FUEL_SECONDS, createTanker, tankerTail, updateTanker } = await import('../src/game/tanker');
+const { traceText } = await import('../src/game/font');
+const { Backdrop } = await import('../src/game/backdrop');
+const { heroCameos } = await import('../src/components/hero-cameos');
 const { trust } = await import('../src/data/trust');
 
 interface StrokeRecord {
@@ -123,6 +126,10 @@ function makeRecordingCanvas(w = 1280, h = 800) {
     lineTo(x: number, y: number) {
       lines += 1;
       activeCoords.push([x, y]);
+    },
+    quadraticCurveTo(cpx: number, cpy: number, x: number, y: number) {
+      lines += 1;
+      activeCoords.push([cpx, cpy], [x, y]);
     },
     stroke() {
       strokes.push({
@@ -1073,4 +1080,292 @@ test('hangar living squad scenario: chosen pilot wears avatar head + theme colou
   reseedProbe.openCustomizer();
   const secondSeed = reseedProbe.scenario.seed;
   assert.notEqual(firstSeed, secondSeed, 'openCustomizer() rolls a new hangar scenario');
+});
+
+test('avatar hover taglines, 3D wink & fierce emotes, and font glyph coverage across all 8 pilots', () => {
+  // 1. Every tagline uses strictly supported stroke-font characters (no unsupported glyphs like `"`)
+  for (const p of PILOTS) {
+    assert.equal(p.taglines.length, 3);
+    for (const tl of p.taglines) {
+      assert.ok(!tl.text.includes('"'), `${p.id} tagline avoids unsupported double-quotes: ${tl.text}`);
+      const { ctx, strokes } = makeRecordingCanvas(600, 120);
+      ctx.beginPath();
+      traceText(ctx, `${p.name}: '${tl.text}'`, 20, 20, 10);
+      ctx.stroke();
+      assert.ok((strokes[0]?.lines ?? 0) > 25, `${p.id} tagline traces crisp stroke glyphs: ${tl.text}`);
+    }
+  }
+
+  // 2. All 8 avatars draw distinct 3D geometry in `wink` and `fierce` moods
+  for (const p of PILOTS) {
+    const captureMood = (mood: 'calm' | 'wink' | 'fierce') => {
+      const { ctx, ink, strokes } = makeRecordingCanvas(200, 200);
+      renderAvatarFrame({
+        ctx,
+        ink,
+        who: p.id,
+        x: 20,
+        y: 20,
+        box: 120,
+        yaw: 0.18,
+        pitch: 0.04,
+        mood,
+        time: 1.0,
+      });
+      return JSON.stringify(strokes.map((s) => s.coords.map(([x, y]) => [Math.round(x * 10), Math.round(y * 10)])));
+    };
+    const calmSig = captureMood('calm');
+    const winkSig = captureMood('wink');
+    const fierceSig = captureMood('fierce');
+    assert.notEqual(winkSig, calmSig, `${p.id} wink mood differs from calm`);
+    assert.notEqual(fierceSig, calmSig, `${p.id} fierce mood differs from calm`);
+    assert.notEqual(winkSig, fierceSig, `${p.id} wink mood differs from fierce`);
+  }
+
+  // 3. Hovering cycles through all 3 taglines (debounced 0.08s for pointer sweep, immediate for keyboard arrows)
+  const spokenCalls: Array<{ pilot: string; text: string }> = [];
+  const hangar = new Hangar(() => {}, {
+    initialLoadout: DEFAULT_LOADOUT,
+    hasSavedLoadout: false,
+    reduceMotion: false,
+    onPilotVoice: (pilot, text) => spokenCalls.push({ pilot, text }),
+  });
+
+  const renderStep1 = (time: number) => {
+    const { ctx, ink, strokes } = makeRecordingCanvas(1280, 800);
+    hangar.render({
+      ctx,
+      ink,
+      w: 1280,
+      h: 800,
+      inset: { top: 0, right: 0, bottom: 0, left: 0 },
+      time,
+      touch: false,
+      reduceMotion: false,
+    });
+    return strokes;
+  };
+
+  renderStep1(0.2);
+  const cards = hangar.uiBoxes.avatarCards;
+  assert.equal(cards.length, 8);
+
+  // Sweeping across Leo (#1) and Maya (#2) within 0.02s before settling on Fox/Rusty (#4):
+  hangar.hover(cards[1]!.x + 20, cards[1]!.y + 20);
+  hangar.update(0.02);
+  hangar.hover(cards[2]!.x + 20, cards[2]!.y + 20);
+  hangar.update(0.02);
+  hangar.hover(cards[4]!.x + 20, cards[4]!.y + 20);
+  assert.equal(spokenCalls.length, 0, 'rapid cursor sweep does not spam TTS before 0.08s settle');
+  assert.equal(hangar.activeTagline?.pilot, 'fox');
+  assert.equal(hangar.activeTagline?.text, PILOT_BY_ID.fox.taglines[0].text);
+
+  hangar.update(0.09);
+  assert.equal(spokenCalls.length, 1, 'settling on Rusty speaks exactly once');
+  assert.deepEqual(spokenCalls[0], { pilot: 'fox', text: PILOT_BY_ID.fox.taglines[0].text });
+
+  // Leaving the card and hovering Rusty again cycles to tagline #2, then #3, then wraps back to #1:
+  hangar.hover(2, 2);
+  hangar.hover(cards[4]!.x + 20, cards[4]!.y + 20);
+  hangar.update(0.09);
+  assert.equal(spokenCalls.at(-1)?.text, PILOT_BY_ID.fox.taglines[1].text);
+
+  hangar.hover(2, 2);
+  hangar.hover(cards[4]!.x + 20, cards[4]!.y + 20);
+  hangar.update(0.09);
+  assert.equal(spokenCalls.at(-1)?.text, PILOT_BY_ID.fox.taglines[2].text);
+
+  hangar.hover(2, 2);
+  hangar.hover(cards[4]!.x + 20, cards[4]!.y + 20);
+  hangar.update(0.09);
+  assert.equal(spokenCalls.at(-1)?.text, PILOT_BY_ID.fox.taglines[0].text);
+
+  // Keyboard arrow navigation speaks the newly focused pilot immediately without waiting 0.08s:
+  const countBeforeArrow = spokenCalls.length;
+  hangar.command('ArrowRight'); // fox (#4) -> cat (#5)
+  assert.equal(spokenCalls.length, countBeforeArrow + 1);
+  assert.equal(spokenCalls.at(-1)?.pilot, 'cat');
+  renderStep1(0.8);
+});
+
+test('interactive hangar easter eggs: KeyB / PARTY full-squad dance party, clickable cadets, and doorway space traffic', () => {
+  const spokenByCadets: Array<{ pilot: string; text: string }> = [];
+  const hangar = new Hangar(() => {}, {
+    initialLoadout: { pilot: 'nova', theme: 'solar', ship: 'starhawk' },
+    hasSavedLoadout: false,
+    reduceMotion: false,
+    scenarioSeed: 4242,
+    onPilotVoice: (pilot, text) => spokenByCadets.push({ pilot, text }),
+  });
+
+  // Advance to Step 3 (`ship`) so the full 3D hangar, `PARTY · B` button, and clickable cadets are open:
+  hangar.update(HANGAR_STAGE_GRACE + 0.05);
+  hangar.typeKey('1'); // Nova
+  hangar.update(HANGAR_STAGE_GRACE + 0.05);
+  hangar.typeKey('1'); // Solar Gold
+  hangar.update(HANGAR_STAGE_GRACE + 0.05);
+  assert.equal(hangar.stage, 'ship');
+
+  // Verify `partyBtn`, `navBtn`, and `quickFlyBtn` are >= 44px and non-overlapping from 320px phones to 1440px desktops:
+  for (const [vw, vh] of [
+    [320, 568],
+    [390, 844],
+    [680, 500],
+    [1280, 800],
+    [1440, 900],
+  ] as const) {
+    const { ctx, ink } = makeRecordingCanvas(vw, vh);
+    hangar.render({
+      ctx,
+      ink,
+      w: vw,
+      h: vh,
+      inset: { top: 0, right: 0, bottom: 0, left: 0 },
+      time: 1.5,
+      touch: vw < 500,
+      reduceMotion: false,
+    });
+    const { navBtn, partyBtn, quickFlyBtn } = hangar.uiBoxes;
+    assert.ok(navBtn && partyBtn && quickFlyBtn, `all 3 action buttons exist on Step 3 at ${vw}x${vh}`);
+    assert.ok(partyBtn!.w >= 44 && partyBtn!.h >= 44, `partyBtn >= 44x44 at ${vw}x${vh}`);
+    assert.ok(navBtn!.x + navBtn!.w <= partyBtn!.x, `navBtn and partyBtn do not overlap at ${vw}x${vh}`);
+    assert.ok(partyBtn!.x + partyBtn!.w <= quickFlyBtn!.x, `partyBtn and quickFlyBtn do not overlap at ${vw}x${vh}`);
+  }
+
+  // Render on 1280x800 and tap a squadmate on the hangar floor:
+  const { ctx: baseCtx, ink: baseInk, strokes: prePartyStrokes } = makeRecordingCanvas(1280, 800);
+  hangar.render({
+    ctx: baseCtx,
+    ink: baseInk,
+    w: 1280,
+    h: 800,
+    inset: { top: 0, right: 0, bottom: 0, left: 0 },
+    time: 2.0,
+    touch: false,
+    reduceMotion: false,
+  });
+  const cadets = hangar.uiBoxes.cadetTargets;
+  assert.ok(cadets.length >= 5, `projected clickable cadet targets (${cadets.length})`);
+  const targetCadet = cadets[0]!;
+  assert.equal(hangar.pick(targetCadet.x + targetCadet.w / 2, targetCadet.y + targetCadet.h / 2), true);
+  assert.equal(hangar.stage, 'ship', 'tapping a cadet does not accidentally board a ship');
+  assert.equal(spokenByCadets.at(-1)?.pilot, targetCadet.id, 'tapped cadet speaks their signature line');
+
+  // Trigger Full-Squad Dance Party via `PARTY · B` button AND `KeyB`:
+  const partyBtn = hangar.uiBoxes.partyBtn!;
+  assert.equal(hangar.dancePartyActive, false);
+  assert.equal(hangar.pick(partyBtn.x + partyBtn.w / 2, partyBtn.y + partyBtn.h / 2), true);
+  assert.equal(hangar.dancePartyActive, true, 'clicking PARTY button starts the full-squad dance party');
+
+  const { ctx: partyCtx, ink: partyInk, strokes: partyStrokes } = makeRecordingCanvas(1280, 800);
+  hangar.render({
+    ctx: partyCtx,
+    ink: partyInk,
+    w: 1280,
+    h: 800,
+    inset: { top: 0, right: 0, bottom: 0, left: 0 },
+    time: 2.4,
+    touch: false,
+    reduceMotion: false,
+  });
+  const preSegs = prePartyStrokes.reduce((s, r) => s + r.lines, 0);
+  const partySegs = partyStrokes.reduce((s, r) => s + r.lines, 0);
+  assert.ok(partySegs > preSegs + 40, 'dance party adds spinning 3D disco ball, floor beams, and musical notes');
+
+  // Pressing `KeyB` toggles the party off cleanly; pressing `b` turns it back on:
+  assert.equal(hangar.command('KeyB'), true);
+  assert.equal(hangar.dancePartyActive, false);
+  assert.equal(hangar.wantsKey('b'), true);
+  hangar.typeKey('b');
+  assert.equal(hangar.dancePartyActive, true);
+});
+
+test('personalised radio greeting, cockpit bobblehead, takeoff flyby, orbital ring station, and ship cameos', () => {
+  // 1. Personalised Flight Command greeting + cockpit bobblehead + classmate takeoff flyby in `Intro`:
+  const store = createMemoryStorage();
+  saveLoadout({ pilot: 'fox', theme: 'plasma', ship: 'bastion' }, store);
+  const radioLines: string[] = [];
+  const intro = new Intro(
+    false,
+    () => {},
+    {
+      say: (text) => {
+        radioLines.push(text);
+        return true;
+      },
+      busy: () => false,
+    },
+    { storage: store },
+  );
+  // Skip boarding straight into cockpit briefing:
+  intro.advance();
+  for (let i = 0; i < 12; i++) intro.update(0.1, false);
+  assert.equal(intro.phase, 'brief');
+  assert.equal(
+    radioLines[0],
+    'COMMAND TO RUSTY IN THE BASTION. WELCOME ABOARD!',
+    'Flight Command greets chosen pilot and ship by name',
+  );
+
+  // Cockpit renders Rusty's 3D dashboard bobblehead in Rusty's signature orange/gold colours:
+  {
+    const { ctx, ink, strokes } = makeRecordingCanvas(1280, 800);
+    intro.renderCockpit({
+      ctx,
+      ink,
+      w: 1280,
+      h: 800,
+      inset: { top: 0, right: 0, bottom: 0, left: 0 },
+      time: 1.2,
+      touch: false,
+    });
+    const colors = new Set(strokes.map((s) => s.color));
+    assert.ok(colors.has(PILOT_BY_ID.fox.colors.base), 'cockpit bobblehead draws chosen pilot head mesh');
+  }
+
+  // Launching triggers classmate 2-ship formation flyby out the windscreen:
+  intro.launch();
+  for (let i = 0; i < 12; i++) intro.update(0.1, false);
+  assert.equal(intro.phase, 'launch');
+  {
+    const { ctx, ink, strokes } = makeRecordingCanvas(1280, 800);
+    intro.renderGround({
+      ctx,
+      ink,
+      w: 1280,
+      h: 800,
+      inset: { top: 0, right: 0, bottom: 0, left: 0 },
+      time: 2.5,
+      touch: false,
+    });
+    const colors = new Set(strokes.map((s) => s.color));
+    assert.ok(colors.has(PINK) && colors.has(NEON.cyan), 'classmate wingmen streak overhead during takeoff roll');
+  }
+
+  // 2. Distant orbital Space Pilot School 3D ring station in `Backdrop`:
+  const backdrop = new Backdrop();
+  backdrop.resize(1280, 800);
+  const bodies = (backdrop as unknown as { bodies: Array<{ kind: string; alpha: number; x: number }> }).bodies;
+  const station = bodies.find((b) => b.kind === 'station');
+  assert.ok(station, 'Backdrop spawns the 3D octagonal ring station');
+  assert.ok(station!.alpha <= 0.2, 'ring station stays super dim so it never competes with enemies');
+  assert.ok(station!.x <= 1280 * 0.22 || station!.x >= 1280 * 0.78, 'ring station stays near left/right screen margins');
+  {
+    const { ctx, strokes } = makeRecordingCanvas(1280, 800);
+    backdrop.update(0.5, 1);
+    backdrop.render(ctx, 12, 0);
+    assert.ok(strokes.length >= 3, 'Backdrop renders planets, station, moons and rocks cleanly');
+  }
+
+  // 3. Homepage `heroCameos` with Swift & Bastion mixed into school, refuel, looper & constellation:
+  {
+    const { ctx, strokes } = makeRecordingCanvas(1280, 800);
+    const cameos = heroCameos(ctx);
+    cameos.layout(1280, 800, [[440, 220, 840, 560]], false);
+    for (let step = 0; step < 240; step++) {
+      cameos.frame(0.25, 0, 0, []);
+    }
+    const totalLines = strokes.reduce((sum, s) => sum + s.lines, 0);
+    assert.ok(totalLines > 200, `heroCameos draws rich starfield cameos over 60s (lines=${totalLines})`);
+  }
 });

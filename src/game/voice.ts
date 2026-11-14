@@ -11,6 +11,8 @@
  * line that arrives late is worse than one that is missed.
  */
 
+import { PILOT_BY_ID, PILOT_IDS, type PilotId } from './loadout';
+
 export type Speaker = 'commander' | 'boss' | 'pilot';
 
 /** How each speaker sounds, and who may talk over whom (a higher `rank` wins). */
@@ -99,11 +101,58 @@ export function castVoices(voices: readonly VoiceLike[], language = 'en-GB'): Re
   return { commander, boss, pilot };
 }
 
+/**
+ * Pick an on-device English voice for one of the eight playable pilots according to their `voice.pool`
+ * (`'light' | 'mid' | 'deep'`), spreading pilots deterministically across matching device voices when
+ * more than one is installed. Returns `null` when the device lists voices and none are local English,
+ * or `undefined` when the browser has not listed its voices yet (use default voice with custom pitch/rate).
+ */
+export function pickPilotVoice(
+  voices: readonly VoiceLike[],
+  pilotId: PilotId,
+  language = 'en-GB',
+): VoiceLike | null | undefined {
+  if (!voices.length) return undefined;
+  const english = voices.filter((v) => v.localService && /^en(?:[-_]|$)/i.test(v.lang) && !NOVELTY.test(v.name));
+  if (!english.length) return null;
+
+  const spec = PILOT_BY_ID[pilotId];
+  const idx = Math.max(0, PILOT_IDS.indexOf(pilotId));
+  const want = /^en(?:[-_]|$)/i.test(language) ? language.toLowerCase().replace('_', '-') : 'en-gb';
+  const sorted = [
+    ...english.filter((v) => v.lang.toLowerCase().replace('_', '-') === want),
+    ...english.filter((v) => v.lang.toLowerCase().replace('_', '-') !== want),
+  ];
+
+  const lightPool = sorted.filter((v) => LIGHTER.test(v.name));
+  const deepPool = sorted.filter((v) => DEEPER.test(v.name));
+  const midPool = sorted.filter((v) => !LIGHTER.test(v.name) && !DEEPER.test(v.name));
+
+  let candidates: VoiceLike[];
+  if (spec.voice.pool === 'light') {
+    candidates = lightPool.length ? lightPool : midPool.length ? midPool : sorted;
+  } else if (spec.voice.pool === 'deep') {
+    candidates = deepPool.length ? deepPool : midPool.length ? midPool : sorted;
+  } else {
+    candidates = midPool.length ? midPool : lightPool.length ? lightPool : sorted;
+  }
+  return candidates[idx % candidates.length] ?? sorted[0]!;
+}
+
 export class Voice {
   private on = true;
   private cast: Record<Speaker, VoiceLike | null> | null | undefined;
+  private activePilot: PilotId | null = null;
   /** The line being spoken, who is speaking it, whether the browser has begun it, and when to stop waiting for it to finish. */
-  private current: { utterance: UtteranceLike; who: Speaker; line: string; rank: number; until: number; started: boolean } | null = null;
+  private current: {
+    utterance: UtteranceLike;
+    who: Speaker;
+    pilotId?: PilotId;
+    line: string;
+    rank: number;
+    until: number;
+    started: boolean;
+  } | null = null;
   /** The browser has spoken for this page at least once, which is the proof that it will. */
   private heard = false;
   /** How many times `unlock` has tried, so a browser that never reports a line starting is not asked for ever. */
@@ -146,6 +195,11 @@ export class Voice {
     if (!on) this.hush();
   }
 
+  /** Set which playable pilot is flying so in-game `say('pilot', ...)` lines use their custom voice. */
+  setPilot(pilotId: PilotId | null): void {
+    this.activePilot = pilotId;
+  }
+
   /**
    * Some browsers (Safari, and every browser on an iPhone) only let a page speak once it has started speaking
    * from inside a key press or a tap. The game calls this from each of those until the browser has spoken:
@@ -161,7 +215,8 @@ export class Voice {
       if (waiting && !waiting.started && this.now() < waiting.until) {
         engine.cancel();
         this.current = null;
-        this.say(waiting.who, waiting.line);
+        if (waiting.pilotId) this.sayPilot(waiting.pilotId, waiting.line);
+        else this.say(waiting.who, waiting.line);
         return;
       }
       if (waiting) return;
@@ -186,10 +241,66 @@ export class Voice {
   }
 
   /**
+   * Say a line in a specific playable pilot's custom on-device voice (`pitch`, `rate`, and voice pool).
+   * Used when hovering/previewing pilots in the hangar and for in-flight pilot callouts.
+   */
+  sayPilot(pilotId: PilotId, text: string): boolean {
+    const engine = this.engine;
+    if (!this.on || !engine) return false;
+    const line = spoken(text);
+    if (!line) return false;
+    const rank = CAST.pilot.rank;
+    if (this.busy && this.current!.rank > rank) return false;
+    try {
+      const voices = engine.getVoices();
+      const picked = pickPilotVoice(voices, pilotId, this.language);
+      if (picked === null) return false;
+      if (this.current || engine.speaking || engine.pending) engine.cancel();
+      const spec = PILOT_BY_ID[pilotId].voice;
+      const utterance = this.make(line);
+      if (picked) {
+        utterance.voice = picked;
+        utterance.lang = picked.lang;
+      } else {
+        utterance.lang = /^en(?:[-_]|$)/i.test(this.language) ? this.language : 'en-GB';
+      }
+      utterance.pitch = spec.pitch;
+      utterance.rate = spec.rate;
+      utterance.volume = VOLUME;
+      const done = (): void => {
+        if (this.current?.utterance === utterance) this.current = null;
+      };
+      utterance.onstart = () => {
+        this.heard = true;
+        if (this.current?.utterance === utterance) this.current.started = true;
+      };
+      utterance.onend = done;
+      utterance.onerror = done;
+      this.current = {
+        utterance,
+        who: 'pilot',
+        pilotId,
+        line,
+        rank,
+        until: this.now() + longest(line, spec.rate),
+        started: false,
+      };
+      engine.speak(utterance);
+      return true;
+    } catch {
+      this.current = null;
+      return false;
+    }
+  }
+
+  /**
    * Say a line. Returns whether it is being said: false when speech is off or the device has no suitable
    * voice, or when someone who matters more is still talking.
    */
   say(who: Speaker, text: string): boolean {
+    if (who === 'pilot' && this.activePilot) {
+      return this.sayPilot(this.activePilot, text);
+    }
     const engine = this.engine;
     if (!this.on || !engine) return false;
     // (A line being said again by `unlock` is already in its spoken form; doing it twice changes nothing.)

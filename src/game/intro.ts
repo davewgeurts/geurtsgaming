@@ -13,15 +13,18 @@
  *   stars of the top-down game; the cockpit drops away and the ship itself rises into view.
  */
 import { renderAvatarFrame, type Mood } from './avatar';
-import { BASE_BG as BASE, BLUE, NEON, SAND, box3d, clamp, rand, smooth, type Ink } from './core';
+import { BASE_BG as BASE, BLUE, NEON, PINK, SAND, box3d, clamp, lerp, rand, smooth, type Ink } from './core';
 import { fitTo, traceText, wrapText } from './font';
 import { HANGAR_PICKER_SCRIPT, HANGAR_SCRIPT, Hangar, type HangarCue } from './hangar';
 import { BRIEFING } from './lines';
 import {
   DEFAULT_LOADOUT,
+  PILOT_BY_ID,
+  SHIP_BY_ID,
   THEME_BY_ID,
   loadSavedLoadout,
   saveLoadout,
+  type PilotId,
   type PilotLoadout,
   type StorageLike,
 } from './loadout';
@@ -111,13 +114,21 @@ export class Intro {
   private wished = false;
   private warned = false;
   private boomed = false;
+  private bobbleX = 0;
+  private bobbleVx = 0;
+  private bobbleY = 0;
+  private bobbleVy = 0;
   private readonly blocks: Block[] = [];
   private readonly hills: number[] = Array.from({ length: 31 }, (_, i) => (i % 2 ? rand(0.45, 1) : rand(0.1, 0.5)));
 
   constructor(
     private readonly reduceMotion: boolean,
     private readonly cue: (cue: IntroCue) => void,
-    private readonly radio?: { say(text: string): boolean; busy(): boolean },
+    private readonly radio?: {
+      say(text: string): boolean;
+      busy(): boolean;
+      sayPilot?(pilot: PilotId, text: string): boolean;
+    },
     opts?: IntroOptions,
   ) {
     this.storage = opts?.storage;
@@ -137,6 +148,9 @@ export class Intro {
           reduceMotion,
           onCommitLoadout: (chosen) => this.commitLoadout(chosen),
           onAnnounce: this.onAnnounce,
+          onPilotVoice: (pilot, text) => {
+            this.radio?.sayPilot?.(pilot, text);
+          },
         })
       : null;
     this.phase = this.hangar ? 'hangar' : 'brief';
@@ -184,6 +198,9 @@ export class Intro {
         reduceMotion: this.reduceMotion,
         onCommitLoadout: (chosen) => this.commitLoadout(chosen),
         onAnnounce: this.onAnnounce,
+        onPilotVoice: (pilot, text) => {
+          this.radio?.sayPilot?.(pilot, text);
+        },
       });
     } else {
       this.hangar.done = false;
@@ -191,6 +208,10 @@ export class Intro {
     }
     this.phase = 'hangar';
     this.t = 0;
+    this.line = -1;
+    this.said = '';
+    this.saidAge = 0;
+    this.rest = 0;
   }
 
   /** Commit the currently focused pilot, theme and ship in the hangar picker and start boarding immediately. */
@@ -263,11 +284,25 @@ export class Intro {
     this.voiced = this.radio?.say(text) ?? false;
   }
 
+  private briefingLine(index: number, touch: boolean): string {
+    const lines = BRIEFING[touch ? 'touch' : 'keys'];
+    if (index === 0) {
+      const pilot = PILOT_BY_ID[this.loadout.pilot].name;
+      const ship = SHIP_BY_ID[this.loadout.ship].name;
+      return `COMMAND TO ${pilot} IN THE ${ship}. WELCOME ABOARD!`;
+    }
+    return lines[index]!;
+  }
+
   /** The pilot has asked to go. */
   launch(): void {
     if (this.phase !== 'brief') return;
     this.phase = 'launch';
     this.t = 0;
+    if (!this.reduceMotion) {
+      this.bobbleVy += 28;
+      this.bobbleVx += 18;
+    }
     this.say(BRIEFING.engines);
     this.cue('liftoff');
     if (this.reduceMotion) this.skip();
@@ -282,6 +317,29 @@ export class Intro {
     this.say(BRIEFING.luck);
   }
 
+  private stepBobble(dt: number): void {
+    if (this.reduceMotion) {
+      this.bobbleX = 0;
+      this.bobbleY = 0;
+      this.bobbleVx = 0;
+      this.bobbleVy = 0;
+      return;
+    }
+    const step = Math.min(dt, 0.05);
+    const launching = this.phase === 'launch';
+    const sonic = launching ? smooth((this.t - T_SONIC) / SONIC) : 0;
+    const driveX = launching
+      ? Math.sin(this.t * 27) * (2.6 + sonic * 3.8) + sonic * 3.2
+      : Math.sin(this.t * 3.2) * 1.1;
+    const driveY = launching
+      ? Math.cos(this.t * 33) * (1.8 + sonic * 2.4) + sonic * 2.6
+      : Math.cos(this.t * 6.4) * 0.45;
+    this.bobbleVx += ((driveX - this.bobbleX) * 135 - this.bobbleVx * 7.2) * step;
+    this.bobbleVy += ((driveY - this.bobbleY) * 150 - this.bobbleVy * 7.8) * step;
+    this.bobbleX = clamp(this.bobbleX + this.bobbleVx * step, -9, 9);
+    this.bobbleY = clamp(this.bobbleY + this.bobbleVy * step, -5, 6);
+  }
+
   update(dt: number, touch: boolean): void {
     this.t += dt;
     if (this.phase === 'hangar' && this.hangar) {
@@ -290,9 +348,11 @@ export class Intro {
         this.loadout = { ...this.hangar.loadout };
         this.phase = 'brief';
         this.t = 0;
+        this.line = -1;
       }
       return;
     }
+    this.stepBobble(dt);
     this.saidAge += dt;
     if (this.phase === 'brief') {
       const lines = BRIEFING[touch ? 'touch' : 'keys'];
@@ -301,7 +361,7 @@ export class Intro {
       const spoken = this.voiced ? this.rest > BREATH : this.saidAge > this.said.length / TYPE_RATE + LINE_HOLD;
       if (this.line < 0 || (spoken && this.line < lines.length - 1)) {
         this.line += 1;
-        this.say(lines[this.line]!);
+        this.say(this.briefingLine(this.line, touch));
       }
       return;
     }
@@ -527,6 +587,72 @@ export class Intro {
         }
       });
     }
+
+    // Classmate 2-ship formation streaking overhead down the runway & pulling up into the stars during take-off!
+    if (this.phase === 'launch' && !this.reduceMotion && this.t > 0.1 && this.t < T_SONIC + 0.8) {
+      this.renderClassmateFlyby(ink, seg, solid);
+    }
+  }
+
+  private renderClassmateFlyby(
+    ink: Ink,
+    seg: (ax: number, ay: number, az: number, bx: number, by: number, bz: number) => void,
+    solid: number,
+  ): void {
+    const u = clamp((this.t - 0.1) / 4.2, 0, 1);
+    const fade = Math.min(1, u * 6, (1 - u) * 3.5) * Math.max(0.35, solid);
+    if (fade <= 0.02) return;
+
+    const wingmen = [
+      { side: -1, lag: 0, col: CYAN, trailCol: SAND },
+      { side: 1, lag: 0.08, col: PINK, trailCol: YELLOW },
+    ] as const;
+
+    for (const wm of wingmen) {
+      const wu = clamp(u - wm.lag, 0, 1);
+      if (wu <= 0) continue;
+      const climb = wu * wu;
+      const wx = wm.side * (8.5 + wu * 14);
+      const wy = this.camY + 7.5 + climb * 72;
+      const wz = this.camZ + 22 + wu * 270;
+      const pitchUp = climb * 0.58;
+      const bank = wm.side * (0.18 + wu * 0.25);
+      const cb = Math.cos(bank);
+      const sb = Math.sin(bank);
+      const cp = Math.cos(pitchUp);
+      const sp = Math.sin(pitchUp);
+      const J = (lx: number, ly: number, lz: number): [number, number, number] => {
+        const rx = lx * cb - ly * sb;
+        const ry = lx * sb + ly * cb;
+        return [wx + rx, wy + ry * cp + lz * sp, wz - ry * sp + lz * cp];
+      };
+      const jetSeg = (ax: number, ay: number, az: number, bx: number, by: number, bz: number): void => {
+        const [x0, y0, z0] = J(ax, ay, az);
+        const [x1, y1, z1] = J(bx, by, bz);
+        seg(x0, y0, z0, x1, y1, z1);
+      };
+
+      // Low-poly 3D delta classmate fighter:
+      ink(wm.col, 0.92 * fade, 1.5, () => {
+        jetSeg(0, 0, 4.2, -3.1, -0.15, -2.4);
+        jetSeg(0, 0, 4.2, 3.1, -0.15, -2.4);
+        jetSeg(-3.1, -0.15, -2.4, 0, 0.2, -1.6);
+        jetSeg(3.1, -0.15, -2.4, 0, 0.2, -1.6);
+        jetSeg(0, 0, 4.2, 0, 0.85, -1.8);
+        jetSeg(0, 0.85, -1.8, 0, 0.2, -2.6);
+        jetSeg(-1.1, 0.1, -2.1, -1.35, 0.95, -2.7);
+        jetSeg(1.1, 0.1, -2.1, 1.35, 0.95, -2.7);
+      });
+      // Twin glowing engine contrails:
+      ink(wm.trailCol, 0.55 * fade, 1.2, () => {
+        const tailLen = lerp(8, 34, wu);
+        for (const ts of [-2.85, 2.85]) {
+          const [tx0, ty0, tz0] = J(ts, -0.15, -2.5);
+          const [tx1, ty1, tz1] = J(ts, -0.35, -2.5 - tailLen);
+          seg(tx0, ty0, tz0, tx1, ty1, tz1);
+        }
+      }, false);
+    }
   }
 
   // ----------------------------------------------------------- the cockpit
@@ -623,6 +749,7 @@ export class Intro {
       ctx.moveTo(w * 0.16 + ox + 6, top + 7);
       ctx.lineTo(w * 0.84 + ox - 6, top + 7);
     }, false);
+    this.renderDashboardBobblehead(f, top, ox, fade);
 
     const wide = w >= 720;
     const left = Math.max(inset.left + 14, w * (wide ? 0.07 : 0.045)) + ox;
@@ -679,6 +806,73 @@ export class Intro {
         ctx.lineTo(rx + Math.cos(time * 2.4) * 24, ry + Math.sin(time * 2.4) * 24);
       }, false);
     }
+  }
+
+  private renderDashboardBobblehead(f: IntroFrame, coamingY: number, ox: number, fade: number): void {
+    if (fade <= 0.05) return;
+    const { ctx, ink, w, h, time } = f;
+    const theme = THEME_BY_ID[this.loadout.theme];
+    const pilotSpec = PILOT_BY_ID[this.loadout.pilot];
+    const box = clamp(this.dash(h) * 0.3, 30, 44);
+    const anchorX = clamp(w * 0.68, Math.min(w * 0.76, w / 2 + 88), w * 0.8) + ox;
+    const baseY = coamingY;
+    const springH = Math.max(8, 10 - this.bobbleY * 0.55);
+    const headCx = anchorX + this.bobbleX;
+    const neckY = baseY - springH;
+
+    // Magnetic dashboard pedestal + 4-coil wireframe spring on the coaming:
+    ink(theme.accent, 0.85 * fade, 1.3, () => {
+      ctx.moveTo(anchorX - 9, baseY);
+      ctx.lineTo(anchorX - 7, baseY - 3);
+      ctx.lineTo(anchorX + 7, baseY - 3);
+      ctx.lineTo(anchorX + 9, baseY);
+      const coils = 4;
+      ctx.moveTo(anchorX, baseY - 3);
+      for (let i = 1; i <= coils; i++) {
+        const u = i / (coils + 1);
+        const side = i % 2 === 0 ? -1 : 1;
+        ctx.lineTo(lerp(anchorX, headCx, u) + side * 4.2, lerp(baseY - 3, neckY, u));
+      }
+      ctx.lineTo(headCx, neckY);
+    }, false);
+
+    const launching = this.phase === 'launch';
+    const mood: Mood =
+      launching && this.t > T_SONIC
+        ? 'fierce'
+        : launching
+          ? 'laugh'
+          : 'happy';
+    const yaw = this.reduceMotion
+      ? -0.2
+      : -0.18 + this.bobbleX * 0.045 + Math.sin(time * 2.1) * 0.08;
+    const pitch = this.reduceMotion
+      ? 0.04
+      : clamp(0.03 - this.bobbleY * 0.035, -0.22, 0.22);
+
+    renderAvatarFrame({
+      ctx,
+      ink,
+      who: pilotSpec.id,
+      x: headCx - box / 2,
+      y: neckY - box * 0.86,
+      box,
+      yaw,
+      pitch,
+      mood,
+      time,
+      cutRatio: 0,
+      cyRatio: 0.52,
+      sizeRatio: 0.34,
+      fade,
+      headColor: pilotSpec.colors.base,
+      headAlpha: 0.9,
+      headWidth: 1.25,
+      faceColor: pilotSpec.colors.face,
+      faceWidth: 1.55,
+      frameAlpha: 0,
+      frameGlow: false,
+    });
   }
 
   private renderCommander(f: IntroFrame, x: number, y: number, box: number): void {

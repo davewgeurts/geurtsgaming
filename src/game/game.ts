@@ -417,6 +417,7 @@ export class Game {
     this.resize();
     this.shipScale = 1.15 * this.scale;
     this.voice.setEnabled(this.sound.enabled);
+    this.voice.setPilot(this.loadout.pilot);
 
     if (this.coop) {
       this.intro = null;
@@ -432,10 +433,12 @@ export class Game {
         {
           say: (text) => this.voice.say('commander', text),
           busy: () => this.voice.busy,
+          sayPilot: (pilot, text) => this.voice.sayPilot(pilot, text),
         },
         {
           onLoadoutChange: (next) => {
             this.loadout = { ...next };
+            this.voice.setPilot(this.loadout.pilot);
             this.hull = this.maxHull;
           },
           onAnnounce: (msg) => {
@@ -445,6 +448,7 @@ export class Game {
         },
       );
       this.loadout = { ...this.intro.loadout };
+      this.voice.setPilot(this.loadout.pilot);
       this.hull = this.maxHull;
       this.ship.x = this.homeX;
       this.ship.y = this.h + 80;
@@ -573,10 +577,12 @@ export class Game {
         {
           say: (text) => this.voice.say('commander', text),
           busy: () => this.voice.busy,
+          sayPilot: (pilot, text) => this.voice.sayPilot(pilot, text),
         },
         {
           onLoadoutChange: (next) => {
             this.loadout = { ...next };
+            this.voice.setPilot(this.loadout.pilot);
             this.hull = this.maxHull;
           },
           onAnnounce: (msg) => this.opts.onStatus?.(msg),
@@ -585,6 +591,7 @@ export class Game {
     }
     this.intro.openCustomizer();
     this.loadout = { ...this.intro.loadout };
+    this.voice.setPilot(this.loadout.pilot);
     this.hull = this.maxHull;
     this.ship.x = this.homeX;
     this.ship.y = this.h + 80;

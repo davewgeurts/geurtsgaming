@@ -5,7 +5,7 @@
  */
 import type { PilotId } from './loadout';
 
-export type Mood = 'calm' | 'worried' | 'happy' | 'hurt' | 'laugh' | 'talk' | 'out';
+export type Mood = 'calm' | 'worried' | 'happy' | 'hurt' | 'laugh' | 'talk' | 'out' | 'wink' | 'fierce';
 export type HeadTone = 'base' | 'accent' | 'trim';
 export type P3 = readonly [number, number, number];
 
@@ -68,6 +68,8 @@ export const crossEye = (x: number, y: number, r: number): AvatarLine[] => [
 function earLift(mood: Mood, time: number): { perk: number; splay: number } {
   const twitch = time % 5.1 < 0.18 ? Math.sin(time * 38) * 0.05 : 0;
   if (mood === 'happy' || mood === 'laugh') return { perk: 0.12 + twitch, splay: -0.05 };
+  if (mood === 'wink') return { perk: 0.14 + twitch, splay: -0.03 };
+  if (mood === 'fierce') return { perk: -0.08, splay: -0.1 };
   if (mood === 'worried' || mood === 'hurt') return { perk: -0.2, splay: 0.18 };
   if (mood === 'out') return { perk: -0.26, splay: 0.22 };
   if (mood === 'talk') return { perk: 0.04 + Math.sin(time * 9) * 0.04, splay: 0 };
@@ -239,6 +241,33 @@ function pilotEyes(ex: number, ey: number, mood: Mood, time: number, lashes = fa
     lines.push(...crossEye(-ex, ey, 0.11), ...crossEye(ex, ey, 0.11));
     return lines;
   }
+  if (mood === 'wink') {
+    // Left eye wide & bright; right eye winks shut in a cheeky chevron!
+    const tall = 0.095;
+    lines.push(flatLine([[-ex - 0.12, ey], [-ex, ey - tall], [-ex + 0.12, ey], [-ex, ey + tall]], true));
+    if (catSlit) lines.push(flatLine([[-ex, ey - tall * 0.68], [-ex, ey + tall * 0.68]]));
+    if (lashes) lines.push(flatLine([[-ex - 0.09, ey - tall * 0.5], [-ex - 0.18, ey - tall * 1.15]]));
+    lines.push(flatLine([[ex + 0.14, ey - 0.07], [ex - 0.1, ey + 0.01], [ex + 0.14, ey + 0.08]]));
+    return lines;
+  }
+  if (mood === 'fierce') {
+    // Determined narrowed eyes with angled upper lid
+    lines.push(
+      ...bothSides(
+        flatLine(
+          [
+            [ex - 0.13, ey - 0.01],
+            [ex + 0.13, ey - 0.08],
+            [ex + 0.11, ey + 0.07],
+            [ex - 0.09, ey + 0.07],
+          ],
+          true,
+        ),
+      ),
+    );
+    if (catSlit) lines.push(...bothSides(flatLine([[ex, ey - 0.03], [ex, ey + 0.06]])));
+    return lines;
+  }
   if (mood === 'happy' || mood === 'laugh') {
     lines.push(...bothSides(flatLine([[ex - 0.14, ey + 0.05], [ex, ey - 0.1], [ex + 0.14, ey + 0.05]])));
     return lines;
@@ -263,6 +292,17 @@ function pilotEyes(ex: number, ey: number, mood: Mood, time: number, lashes = fa
 }
 
 function humanMouth(my: number, mood: Mood, time: number): AvatarLine[] {
+  if (mood === 'wink') {
+    // Asymmetrical sly smirk kicked up on the winking side
+    return [flatLine([[-0.18, my + 0.03], [0.02, my + 0.04], [0.22, my - 0.06], [0.28, my - 0.13]])];
+  }
+  if (mood === 'fierce') {
+    // Determined gritted game-face grin
+    return [
+      flatLine([[-0.24, my - 0.04], [0.24, my - 0.04], [0.2, my + 0.08], [-0.2, my + 0.08]], true),
+      flatLine([[-0.21, my + 0.02], [0.21, my + 0.02]]),
+    ];
+  }
   if (mood === 'happy' || mood === 'laugh') {
     const deep = mood === 'laugh' ? 0.16 + 0.08 * Math.abs(Math.sin(time * 12)) : 0.13;
     return [flatLine([[-0.3, my - 0.08], [0.3, my - 0.08], [0.18, my + deep], [-0.18, my + deep]], true)];
@@ -286,11 +326,18 @@ function humanMouth(my: number, mood: Mood, time: number): AvatarLine[] {
 export function buildPlayableFace(id: PilotId, mood: Mood, time: number): AvatarLine[] {
   const FRONT = AVATAR_FRONT;
   const worriedBrows = (ex: number, ey: number): AvatarLine[] =>
-    mood === 'hurt' || mood === 'worried'
-      ? bothSides(flatLine([[ex + 0.17, ey - 0.2], [ex - 0.12, ey - 0.31]]))
-      : mood === 'happy' || mood === 'laugh'
-        ? bothSides(flatLine([[ex - 0.13, ey - 0.22], [ex, ey - 0.26], [ex + 0.14, ey - 0.2]]))
-        : [];
+    mood === 'fierce'
+      ? bothSides(flatLine([[ex + 0.19, ey - 0.28], [ex - 0.15, ey - 0.11]]))
+      : mood === 'wink'
+        ? [
+            flatLine([[-ex - 0.14, ey - 0.2], [-ex + 0.13, ey - 0.23]]),
+            flatLine([[ex - 0.13, ey - 0.27], [ex + 0.02, ey - 0.32], [ex + 0.16, ey - 0.24]]),
+          ]
+        : mood === 'hurt' || mood === 'worried'
+          ? bothSides(flatLine([[ex + 0.17, ey - 0.2], [ex - 0.12, ey - 0.31]]))
+          : mood === 'happy' || mood === 'laugh'
+            ? bothSides(flatLine([[ex - 0.13, ey - 0.22], [ex, ey - 0.26], [ex + 0.14, ey - 0.2]]))
+            : [];
 
   if (id === 'nova' || id === 'maya') {
     const ex = 0.33;
@@ -331,6 +378,30 @@ export function buildPlayableFace(id: PilotId, mood: Mood, time: number): Avatar
         pts: [[-0.24, my - 0.04, FRONT + 0.08], [0, my - 0.08, FRONT + 0.12], [0.24, my - 0.04, FRONT + 0.08], [0, my + gape, FRONT + 0.06]],
         closed: true,
       });
+    } else if (mood === 'wink') {
+      lines.push({
+        pts: [
+          [-0.22, my + 0.02, FRONT + 0.06],
+          [-0.08, my + 0.06, FRONT + 0.08],
+          [0, my - 0.01, FRONT + 0.1],
+          [0.14, my + 0.04, FRONT + 0.08],
+          [0.3, my - 0.1, FRONT + 0.06],
+        ],
+      });
+    } else if (mood === 'fierce') {
+      lines.push(
+        {
+          pts: [
+            [-0.26, my + 0.06, FRONT + 0.06],
+            [-0.14, my - 0.02, FRONT + 0.08],
+            [0, my + 0.05, FRONT + 0.1],
+            [0.14, my - 0.02, FRONT + 0.08],
+            [0.26, my + 0.06, FRONT + 0.06],
+          ],
+        },
+        { pts: [[-0.17, my, FRONT + 0.08], [-0.14, my + 0.1, FRONT + 0.08]] },
+        { pts: [[0.17, my, FRONT + 0.08], [0.14, my + 0.1, FRONT + 0.08]] },
+      );
     } else if (mood === 'happy') {
       lines.push({
         pts: [[-0.28, my - 0.04, FRONT + 0.06], [-0.13, my + 0.08, FRONT + 0.08], [0, my - 0.02, FRONT + 0.1], [0.13, my + 0.08, FRONT + 0.08], [0.28, my - 0.04, FRONT + 0.06]],
@@ -355,9 +426,13 @@ export function buildPlayableFace(id: PilotId, mood: Mood, time: number): Avatar
       ? 0.06 + 0.12 * Math.abs(Math.sin(time * 12))
       : mood === 'laugh'
         ? 0.14 + 0.08 * Math.abs(Math.sin(time * 13))
-        : mood === 'worried' || mood === 'hurt'
-          ? 0.09
-          : 0;
+        : mood === 'fierce'
+          ? 0.11
+          : mood === 'wink'
+            ? 0.04
+            : mood === 'worried' || mood === 'hurt'
+              ? 0.09
+              : 0;
   return [
     ...pilotEyes(ex, ey, mood, time, false, false),
     ...worriedBrows(ex, ey),
