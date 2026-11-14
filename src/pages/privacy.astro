@@ -1,6 +1,6 @@
 ---
 import TrustPage from '../components/TrustPage.astro';
-import { trust } from '../data/trust';
+import { coopShown, trust } from '../data/trust';
 ---
 
 <TrustPage
@@ -15,6 +15,12 @@ import { trust } from '../data/trust';
       <li><strong>No accounts.</strong> We never ask for a name, an email address, a birthday or a photo.</li>
       <li><strong>The grade question stays in the game.</strong> The demo asks what grade you are in so the questions fit. The answer is used for that visit only. It is not saved and it is not sent anywhere.</li>
       <li><strong>No ads, and nothing sold.</strong> We do not show advertising here, and we do not sell or share information about the people who play.</li>
+      {coopShown && (
+        <li>
+          <strong>Squad rooms forget everything when they close.</strong> Flying with friends uses a six-character room
+          code and your made-up callsign, with no accounts and no chat.
+        </li>
+      )}
       <li><strong>Visits are counted.</strong> We use Google Analytics to see how many people visit, with its advertising features switched off.</li>
     </ul>
   </div>
@@ -38,7 +44,9 @@ import { trust } from '../data/trust';
   <p>
     Before the first challenge the demo asks which grades you are in (kindergarten to 2, 3 to 5, or 6 and up).
     That choice sets how hard the sums and typing lines are and how long you get. It is held in the game while
-    the page is open and is gone when you close it. It is never written to your device and never leaves it.
+    the page is open and is gone when you close it. It is never written to your device and never leaves it.{coopShown && (
+      ' When you fly with friends, each player chooses on their own screen, and the room is told only how well a challenge went — never which grade was picked or what was typed.'
+    )}
   </p>
 
   <h3>What the demo keeps on your device</h3>
@@ -64,6 +72,41 @@ import { trust } from '../data/trust';
     about two minutes after they leave. A finished game's score, wave and callsign may also be sent for the Top 10 board.
   </p>
 
+  {coopShown && (
+    <Fragment>
+      <h3>Flying with friends</h3>
+      <p>
+        When you press <em>Fly with friends</em> or open an invite link, up to four players share a temporary squad
+        room using a six-character code (such as 2YC-D44). So that a brief Wi-Fi drop or a reloaded page does not lose
+        your place, your browser keeps a few temporary items in that tab only, and deletes all of them as soon as you
+        close the tab:
+      </p>
+      <ul>
+        <li>
+          an invite room code from a shared link (and, during playtests, a preview switch), taken out of the page
+          address before Google Analytics runs and cleared once the lobby reads the invite;
+        </li>
+        <li>
+          a random number for that tab, which room and role (host or guest) the tab is in, and a one-room seat pass
+          that holds your seat for {trust.coop.reconnectGraceSeconds} seconds if your connection drops;
+        </li>
+        <li>
+          on the host's tab only, the squad's current wave, score, rescued count and session number so a brief page
+          reload keeps the flight going.
+        </li>
+      </ul>
+      <p>
+        While you are in a squad room, your browser connects to our relay at <code>{trust.coop.relayHost}</code> and
+        sends the room code, that tab's random number (kept inside that room only as a one-way scrambled tag so a
+        removed tab cannot walk straight back in), your made-up callsign, where your ship is steering and firing, and
+        how a challenge went. Your hangar pilot and colour choices stay on your own device; squad ships use fixed seat
+        colours instead. The relay strips any free text so a room can never carry chat, and deletes everything about
+        the room as soon as the host closes it, everyone leaves for {trust.coop.reconnectGraceSeconds} seconds, a lobby
+        waits unused for {trust.coop.lobbyTimeoutMinutes} minutes, or a flight reaches {trust.coop.maxRoomHours} hours.
+      </p>
+    </Fragment>
+  )}
+
   <h3>Voices</h3>
   <p>
     The commander, the boss and the pilot speak using the voices built in to your own device. The words are
@@ -81,12 +124,19 @@ import { trust } from '../data/trust';
     <li>nothing it collects is used to personalise advertising;</li>
     <li>the only cookies it sets belong to this site, and they are deleted when you close your browser.</li>
   </ul>
-  <p>We use these numbers to improve the site. We do not use them to build a profile of anyone.</p>
+  <p>
+    We use these numbers to improve the site. We do not use them to build a profile of anyone.{coopShown && (
+      ' Invite room codes in shared links are removed from the page address before Google Analytics runs, so room codes are never sent to Google.'
+    )}
+  </p>
 
   <h2>The companies that help us run the site</h2>
   <p>
-    GitHub hosts the pages and Amazon Web Services runs the game server. Like any website, both receive your
-    internet address in order to send you the page. We do not record it or connect it to anything else.
+    {coopShown ? (
+      'GitHub hosts the pages, Amazon Web Services runs the game server and fronts the squad relay, and Cloudflare runs the temporary squad rooms for Fly with friends. Like any website, they receive your internet address in order to send data back to your browser. We do not record it or connect it to anything else.'
+    ) : (
+      'GitHub hosts the pages and Amazon Web Services runs the game server. Like any website, both receive your internet address in order to send you the page. We do not record it or connect it to anything else.'
+    )}
   </p>
 
   <h2>Children's privacy</h2>

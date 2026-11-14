@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 
-import { INVITE_STORAGE_KEY } from '../src/game/coop-client';
+import { INVITE_STORAGE_KEY, detectRelayEndpoints } from '../src/game/coop-client';
 import {
   COOP_PREVIEW_STORAGE_KEY,
   isCoopButtonUnlocked,
@@ -12,6 +12,8 @@ import {
   parseCoopModeAttr,
   resolveCoopMode,
 } from '../src/game/coop-mode';
+import { soc2Shown, trust } from '../src/data/trust';
+import { LOBBY_TIMEOUT_MS, RECONNECT_GRACE_MS, ROOM_MAX_LIFETIME_MS } from '../relay/room.mjs';
 import worker, { hashRateKey, inspectRateMapKeys } from '../relay/worker.mjs';
 
 class MemoryStorage {
@@ -149,4 +151,71 @@ test('Relay deploy workflow, wrangler.toml observability-off, and salted Worker 
     assert.match(key, /^[0-9a-f]{16}$/, `rate key "${key}" is a 16-char hex hash, never a raw IP`);
     assert.equal(key.includes(testIp), false);
   }
+});
+
+async function listSourceFiles(dirUrl: URL): Promise<URL[]> {
+  const entries = await readdir(dirUrl, { withFileTypes: true });
+  const files: URL[] = [];
+  for (const entry of entries) {
+    const child = new URL(entry.name + (entry.isDirectory() ? '/' : ''), dirUrl);
+    if (entry.isDirectory()) {
+      files.push(...(await listSourceFiles(child)));
+    } else if (/\.(ts|astro)$/.test(entry.name)) {
+      files.push(child);
+    }
+  }
+  return files;
+}
+
+test('trust.ts, privacy.astro, and security.astro match exact Co-op relay timings and every gg_coop_* storage key', async () => {
+  // 1. SOC 2 stays untouched until Dave supplies auditor & period
+  assert.equal(soc2Shown, false);
+  assert.equal(trust.soc2.auditor, null);
+  assert.equal(trust.soc2.period, null);
+
+  // 2. trust.coop matches exact constants in coop-client.ts & relay/room.mjs
+  const prodRelay = detectRelayEndpoints({
+    protocol: 'https:',
+    hostname: 'geurtsgaming.com',
+    port: '',
+    host: 'geurtsgaming.com',
+    origin: 'https://geurtsgaming.com',
+  } as Location);
+  assert.equal(prodRelay.wsBase, `wss://${trust.coop.relayHost}`);
+  assert.equal(trust.coop.reconnectGraceSeconds * 1_000, RECONNECT_GRACE_MS);
+  assert.equal(trust.coop.lobbyTimeoutMinutes * 60_000, LOBBY_TIMEOUT_MS);
+  assert.equal(trust.coop.maxRoomHours * 3_600_000, ROOM_MAX_LIFETIME_MS);
+
+  // 3. Every gg_coop_* identifier anywhere in src/ is accounted for in trust.coop.sessionKeys, and NEVER in localStorage
+  const srcFiles = await listSourceFiles(new URL('../src/', import.meta.url));
+  const foundCoopKeys = new Set<string>();
+  for (const fileUrl of srcFiles) {
+    const text = await readFile(fileUrl, 'utf8');
+    for (const m of text.matchAll(/['"`](gg_coop_[a-z0-9_]+)/g)) {
+      foundCoopKeys.add(m[1]!);
+    }
+    assert.equal(
+      /localStorage\.(?:getItem|setItem|removeItem)\([^)]*gg_coop_/.test(text),
+      false,
+      `${fileUrl.pathname} never writes gg_coop_* to localStorage`,
+    );
+  }
+  for (const key of foundCoopKeys) {
+    assert.ok(
+      trust.coop.sessionKeys.includes(key as never),
+      `Co-op sessionStorage key "${key}" is listed in trust.coop.sessionKeys`,
+    );
+  }
+
+  // 4. privacy.astro & security.astro gate Co-op/Cloudflare copy on coopShown while keeping solo 5-item list intact
+  const [privacySrc, securitySrc] = await Promise.all([
+    readFile(new URL('../src/pages/privacy.astro', import.meta.url), 'utf8'),
+    readFile(new URL('../src/pages/security.astro', import.meta.url), 'utf8'),
+  ]);
+  assert.ok(privacySrc.includes('coopShown'), 'privacy.astro gates Co-op disclosure on coopShown');
+  assert.ok(privacySrc.includes('Flying with friends'), 'privacy.astro has Flying with friends section');
+  assert.ok(privacySrc.includes('Cloudflare'), 'privacy.astro names Cloudflare when Co-op is enabled');
+  assert.ok(privacySrc.includes('trust.coop.relayHost'), 'privacy.astro interpolates relayHost from trust.ts');
+  assert.ok(securitySrc.includes('coopShown'), 'security.astro gates Co-op relay bullet on coopShown');
+  assert.ok(securitySrc.includes('Cloudflare'), 'security.astro names Cloudflare rooms when Co-op is enabled');
 });

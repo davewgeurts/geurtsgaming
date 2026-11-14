@@ -1,3 +1,5 @@
+import { COOP_PREVIEW_STORAGE_KEY, isCoopDisclosed, resolveCoopMode } from '../game/coop-mode';
+
 /**
  * Facts the privacy, security and AI pages are written from. Keep these true: the pages say only what is
  * here and what the code does. A field left `null` leaves its sentence off the page rather than guessing.
@@ -17,10 +19,34 @@ export const trust = {
     auditor: null as string | null,
     period: null as string | null,
   },
+  /**
+   * Facts for "Fly with friends" (Co-op), shown on `/privacy/` and `/security/` whenever Co-op is
+   * enabled (`playtest` or `on`). Keep these in lockstep with `coop-client.ts`, `coop-lobby.ts`,
+   * `coop-flight.ts`, `coop-mode.ts` and `relay/room.mjs`.
+   */
+  coop: {
+    relayHost: 'relay.geurtsgaming.com',
+    reconnectGraceSeconds: 30,
+    lobbyTimeoutMinutes: 10,
+    maxRoomHours: 2,
+    /** Exact `sessionStorage` keys/prefixes Co-op uses inside a single browser tab (never `localStorage`). */
+    sessionKeys: [
+      'gg_coop_invite',
+      COOP_PREVIEW_STORAGE_KEY,
+      'gg_coop_cid',
+      'gg_coop_active',
+      'gg_coop_token_',
+      'gg_coop_host_state_',
+      'gg_coop_host_session',
+    ],
+  },
 } as const;
 
 /** Whether the site may say that GeurtsGaming has a SOC 2 report: only once the report's details are filled in above. */
 export const soc2Shown = Boolean(trust.soc2.auditor && trust.soc2.period);
+
+/** Whether Co-op ("Fly with friends") is active (`playtest` or `on`) and disclosed on `/privacy/` & `/security/`. */
+export const coopShown = isCoopDisclosed(resolveCoopMode());
 
 export const trustPages = [
   { href: '/privacy/', label: 'Privacy' },

@@ -23,8 +23,18 @@ export interface CoopEnvLike {
   DEV?: unknown;
 }
 
+function defaultEnv(): CoopEnvLike {
+  const metaEnv = (import.meta as ImportMeta & { env?: CoopEnvLike }).env;
+  const procEnv = typeof process !== 'undefined' ? process.env : undefined;
+  return {
+    PUBLIC_COOP_MODE: metaEnv?.PUBLIC_COOP_MODE ?? procEnv?.PUBLIC_COOP_MODE,
+    PUBLIC_COOP_ENABLED: metaEnv?.PUBLIC_COOP_ENABLED ?? procEnv?.PUBLIC_COOP_ENABLED,
+    DEV: metaEnv?.DEV === true && procEnv?.NODE_ENV !== 'production',
+  };
+}
+
 export function resolveCoopMode(env?: CoopEnvLike): CoopMode {
-  const e = env ?? (import.meta as unknown as { env?: CoopEnvLike }).env ?? {};
+  const e = env ?? defaultEnv();
 
   const raw = typeof e.PUBLIC_COOP_MODE === 'string' ? e.PUBLIC_COOP_MODE.trim().toLowerCase() : '';
   if (raw === 'on' || raw === 'true' || raw === '1') return 'on';
