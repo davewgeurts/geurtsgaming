@@ -725,9 +725,10 @@ test('SnapshotInterpolator rides out 250ms network stalls without snap-jumps and
   assert.equal(fxIt256.consumeNewFx().length, 1, 'exact 256-FX wrap across gap still plays next FX');
 });
 
-test('Round 13 (4.3), Round 15 (5.12): snapshot protocol version 3 rejects other versions and names which side is out of date', () => {
-  assert.equal(COOP_PROTOCOL_VERSION, 3);
-  assert.equal(SNAP_PROTOCOL_VERSION, 3);
+test('Round 13 (4.3), Round 15 (5.12): snapshot protocol version 4 rejects other versions and names which side is out of date', () => {
+  // Version 4 (Round 15 batch 2 review): 14-byte pointer input frames, which a version 3 host reads as nothing.
+  assert.equal(COOP_PROTOCOL_VERSION, 4);
+  assert.equal(SNAP_PROTOCOL_VERSION, 4);
 
   const valid = encodeWorldSnapshot({
     session: 9,
@@ -750,10 +751,10 @@ test('Round 13 (4.3), Round 15 (5.12): snapshot protocol version 3 rejects other
     items: [],
     fx: [],
   });
-  assert.equal(valid.byteLength, 26, 'minimum v3 snapshot header is 26 bytes');
+  assert.equal(valid.byteLength, 26, 'minimum v3+ snapshot header is 26 bytes');
   // A version 2 page reads the two version bits, sees 3 instead of its own 2, and asks its player to refresh.
   assert.equal(valid[1]! & 0x03, 3, 'the two old version bits hold 3, meaning "the version is in the next byte"');
-  assert.equal(valid[2], 3, 'the version byte holds 3');
+  assert.equal(valid[2], 4, 'the version byte holds 4');
   assert.equal(isSnapshotVersionMismatch(valid), false);
   assert.ok(decodeWorldSnapshot(valid));
 
@@ -765,11 +766,15 @@ test('Round 13 (4.3), Round 15 (5.12): snapshot protocol version 3 rejects other
     assert.equal(isSnapshotVersionMismatch(mutated), true, `version ${oldVer} is flagged as version mismatch`);
     assert.equal(getSnapshotVersionMismatch(mutated), 'older', `version ${oldVer} is older`);
   }
-  // Later versions keep 3 in the bits and change the version byte.
+  // Other versions keep 3 in the bits and change the version byte: a version 3 host (no pointer destinations) is older.
+  const v3 = new Uint8Array(valid);
+  v3[2] = 3;
+  assert.equal(decodeWorldSnapshot(v3), null, 'version 3 is rejected by decoder');
+  assert.equal(getSnapshotVersionMismatch(v3), 'older', 'version 3 is older');
   const future = new Uint8Array(valid);
-  future[2] = 4;
-  assert.equal(decodeWorldSnapshot(future), null, 'version 4 is rejected by decoder');
-  assert.equal(getSnapshotVersionMismatch(future), 'newer', 'version 4 is newer');
+  future[2] = 5;
+  assert.equal(decodeWorldSnapshot(future), null, 'version 5 is rejected by decoder');
+  assert.equal(getSnapshotVersionMismatch(future), 'newer', 'version 5 is newer');
   assert.equal(getSnapshotVersionMismatch(valid), null);
   const v0Mutated = new Uint8Array(valid);
   v0Mutated[1] = v0Mutated[1]! & ~0x03;

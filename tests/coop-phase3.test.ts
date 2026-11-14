@@ -2320,3 +2320,26 @@ test('Round 15 (5.11): a number key pressed before a grade or upgrade can be pic
   assert.deepEqual(played, ['slip']);
   assert.equal(offerQ.stage, 'offer');
 });
+
+test("Round 15 review (b2r 5): if the host's \"question closed\" is lost, a guest's picker closes on its own and it can fire again", async () => {
+  setCoopTabGrade(null);
+  const sq = await createLiveSquad({ guestCount: 1 });
+  const hc = sq.hostClient;
+  const realEvent = hc.sendEvent.bind(hc);
+  hc.sendEvent = (ev) => (ev.kind === 'challenge-closed' ? true : realEvent(ev)); // every close is lost
+  const p1 = bombOnGuest(sq);
+  await sq.tickSquad(60 * 2);
+  const gd = sq.guestDirs[0]!;
+  assert.equal(quizOf(gd)?.stage, 'grade', 'the guest is on the grade picker');
+  // Nobody picks: the host closes the question at 12 s (nothing lost), but the guest never hears it.
+  let closedAt: number | null = null;
+  for (let i = 0; i < 60 * 20 && closedAt === null; i++) {
+    await sq.tickSquad(1);
+    if (quizOf(gd)?.stage !== 'grade') closedAt = (i + 120) / 60;
+  }
+  assert.equal(p1.alive, true, 'nothing was lost');
+  assert.ok(closedAt !== null && closedAt < 15, `the picker closed after ${closedAt?.toFixed(1)} s`);
+  assert.equal(gd.quiz.isInteractive(), false, 'and no longer stops the guest firing');
+  sq.cleanup();
+  setCoopTabGrade(null);
+});

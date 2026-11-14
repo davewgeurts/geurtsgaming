@@ -7,11 +7,12 @@
 import type { Grade } from './fireworks';
 
 /**
- * 3: input frames may carry the guest's send time (10 bytes) and a pointer's destination (14 bytes), the PICKING input
- * flag and the answering bit, and the snapshot header carries the version in its own byte. Bump it whenever either
- * frame changes shape or meaning.
+ * 3: input frames may carry the guest's send time (10 bytes), the PICKING input flag and the answering bit, and the
+ * snapshot header carries the version in its own byte. 4: input frames may also carry a pointer's destination (14
+ * bytes), which a version 3 host cannot read. Bump it whenever either frame changes shape or meaning: only snapshots
+ * carry it, so a guest finds out which side to refresh.
  */
-export const COOP_PROTOCOL_VERSION = 3;
+export const COOP_PROTOCOL_VERSION = 4;
 
 /** Unambiguous 31-symbol room code alphabet (`0/O/1/I/L` omitted) — matches `relay/room.mjs`. */
 export const COOP_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';

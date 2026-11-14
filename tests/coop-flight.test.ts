@@ -22,7 +22,7 @@ import {
   decodeWorldSnapshot,
   encodeWorldSnapshot,
 } from '../src/game/coop-protocol';
-import { COOP_SEAT_COLORS, type CoopErrorMessage, type CoopLobbyState, type CoopPublicSeat } from '../src/game/coop-types';
+import { COOP_PROTOCOL_VERSION, COOP_SEAT_COLORS, type CoopErrorMessage, type CoopLobbyState, type CoopPublicSeat } from '../src/game/coop-types';
 import { KINDS, makeEnemy, type Enemy } from '../src/game/enemies';
 import { makeProblem } from '../src/game/maths';
 import { ALERT_LEAD, SetPieces, type SetPieceEnv } from '../src/game/setpieces';
@@ -937,6 +937,8 @@ test('Guest own-ship prediction has 0.0px lag/drift under 60±40ms jitter, and S
   wireQueue.length = 0;
 
   for (let k = 0; k < 10; k++) {
+    // The host's snapshots still reach the guest (their acknowledgements tell it its taps are getting through).
+    for (const pkt of wireQueue.splice(0)) if (!pkt.toHost) binarySinks.guest?.(pkt.bytes);
     guestDir.queueArenaTap(384, 307, guestWorld);
     guestDir.step(dt, dt, guestWorld, idleCtrl);
     const tapPkt = wireQueue.pop()!;
@@ -1683,13 +1685,13 @@ test('Round 14 (3.1, 3.2, 4.1, 4.2, 4.3, Sec 5): smooth Host copy under 60±40ms
     const v1 = new Uint8Array(baseBytes);
     v1[1] = (v1[1]! & ~0x03) | 1;
     // From version 3 the two old bits always hold 3 and the version is the next byte (Round 15, 5.12).
-    const v4 = new Uint8Array(baseBytes);
-    v4[2] = 4;
+    const vNext = new Uint8Array(baseBytes);
+    vNext[2] = COOP_PROTOCOL_VERSION + 1;
 
     olderPair.binarySinks.guest?.(v1);
     olderPair.binarySinks.guest?.(v1);
-    newerPair.binarySinks.guest?.(v4);
-    newerPair.binarySinks.guest?.(v4);
+    newerPair.binarySinks.guest?.(vNext);
+    newerPair.binarySinks.guest?.(vNext);
 
     assert.equal(olderMsgs[0], "The host's game is out of date. Ask the host to refresh.");
     assert.equal(newerMsgs[0], 'This game was updated. Refresh to rejoin.');
@@ -2113,21 +2115,26 @@ test('Round 15 follow-up (b2 1): host and guest agree where a mouse- or thumb-st
   }
 });
 
-test('Round 15 follow-up (b2 2): a stalled download does not throttle a guest that can still send', () => {
+test('Round 15 follow-up (b2 2): through a stalled download the guest keeps sending, and is back to full rate after', () => {
   const pair = createDirectPair();
   let stallUntil = -1;
   pair.setDelays(() => 40, () => (pair.clockMs < stallUntil ? stallUntil - pair.clockMs + 40 : 40));
   const keys = (t: number): CoopLocalControlInput => ({ across: Math.floor(t) % 2 === 0 ? 1 : -1, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 });
   for (let f = 0; f < 120; f++) stepPairR15(pair, keys(f / 60));
-  let sent = 0;
+  const sentAt: number[] = [];
   const realSend = pair.guestClient.sendBinary.bind(pair.guestClient);
   pair.guestClient.sendBinary = (bytes: Uint8Array) => {
-    sent += 1;
+    sentAt.push(pair.clockMs);
     return realSend(bytes);
   };
-  stallUntil = pair.clockMs + 1200; // nothing reaches the guest for 1.2 s; its own uploads are fine
-  for (let f = 0; f < 72; f++) stepPairR15(pair, keys(2 + f / 60));
-  assert.ok(sent >= 22, `${sent} inputs sent in 1.2 s`);
+  const from = pair.clockMs;
+  stallUntil = from + 1200; // nothing reaches the guest for 1.2 s; its own uploads are fine (it cannot know that)
+  for (let f = 0; f < 72 + 90; f++) stepPairR15(pair, keys(2 + f / 60));
+  const during = sentAt.filter((t) => t < from + 1200).length;
+  const after = sentAt.filter((t) => t >= from + 1500 && t < from + 2500).length;
+  // Full rate for 0.3 s, then one a quarter second until 12 are unacknowledged: the host still hears where it goes.
+  assert.ok(during >= 8, `${during} inputs sent during the 1.2 s stall`);
+  assert.ok(after >= 18, `${after} inputs sent in the second after it (full rate again)`);
   pair.dispose();
 });
 
@@ -2180,12 +2187,17 @@ test("Round 15 follow-up (b2 4): when the host's link drops and returns, the bul
   hostEmit('onConnectionChange', false);
   hostEmit('onWelcome', {});
   let worst = 0;
+  let worstGap = 0;
   for (let f = 0; f < 180; f++) {
     stepPairR15(pair, idleCtrl);
     const lead = it.ackHostOffsetMs;
     if (lead !== null) worst = Math.max(worst, Math.abs(lead - before));
+    const gap = leadGapR15(pair);
+    if (gap !== null && f > 20) worstGap = Math.max(worstGap, Math.abs(gap));
   }
   assert.ok(worst <= 60, `the lead was off by ${worst.toFixed(0)} ms after the return`);
+  // Round 15 review (b2r 3): both sides spent their skip on the same acknowledgement, so they agree again.
+  assert.ok(worstGap <= 12, `the host's copy of the lead was ${worstGap.toFixed(1)} ms off the guest's after the return`);
   pair.dispose();
 });
 
@@ -2419,5 +2431,141 @@ test('Round 15 (batch 4): 150 ms away, a bullet the guest flies under has still 
     }
   }
   assert.ok(checked, 'the bullet reached the guest');
+  pair.dispose();
+});
+
+// -----------------------------------------------------------------------------------------------------------------
+// Round 15 batch 2 review (of e6225ed): each test fails on 512476f.
+// -----------------------------------------------------------------------------------------------------------------
+
+/** The host's mirror of seat 1's lead minus the guest's own (same units while the test clock stays under 65.5 s). */
+function leadGapR15(pair: PairR15): number | null {
+  const host = (pair.hostDir as unknown as { mirrorLead: Array<{ avg: { value: number | null } }> }).mirrorLead[1]!.avg.value;
+  const guest = (pair.guestDir.interpolator as unknown as { ackHostOffsetMs: number | null }).ackHostOffsetMs;
+  return host === null || guest === null ? null : host - guest;
+}
+
+test('Round 15 review (b2r 1): after a stall both ways, the relay never sees more than 35 inputs in a second', async () => {
+  const { GUEST_MAX_MESSAGES_PER_SEC } = await import('../relay/room.mjs');
+  for (const stallMs of [1500, 4500]) {
+    const pair = createDirectPair();
+    const rnd = seededR15(stallMs);
+    let from = Infinity;
+    let until = -Infinity;
+    // Anything sent either way during the stall arrives when it ends, in order, together.
+    const d = () => {
+      const base = 20 + rnd() * 80;
+      return pair.clockMs >= from && pair.clockMs < until ? until - pair.clockMs + base : base;
+    };
+    pair.setDelays(d, d);
+    const arrivals: number[] = [];
+    const deliver = pair.binarySinks.host!;
+    pair.binarySinks.host = (bytes: Uint8Array) => {
+      arrivals.push(pair.clockMs);
+      deliver(bytes);
+    };
+    const steer = (t: number): CoopLocalControlInput => {
+      const k = Math.floor(t / 0.12) % 3;
+      return { across: k === 0 ? -1 : k === 1 ? 1 : 0, down: 0, firing: false, touching: false, touchX: 0, touchY: 0 };
+    };
+    let f = 0;
+    for (; f < 180; f++) stepPairR15(pair, steer(f / 60));
+    from = pair.clockMs;
+    until = from + stallMs;
+    const end = f + Math.round(((stallMs + 2500) / 1000) * 60);
+    for (; f < end; f++) stepPairR15(pair, steer(f / 60));
+    let busiest = 0;
+    for (let i = 0, j = 0; i < arrivals.length; i++) {
+      while (arrivals[i]! - arrivals[j]! >= 1000) j += 1;
+      busiest = Math.max(busiest, i - j + 1);
+    }
+    const afterward = arrivals.filter((t) => t >= until + 500 && t < until + 1500).length;
+    assert.ok(busiest <= GUEST_MAX_MESSAGES_PER_SEC, `${stallMs} ms stall: busiest second at the relay ${busiest} inputs`);
+    assert.ok(afterward >= 15, `${stallMs} ms stall: ${afterward} inputs in the second after it`);
+    pair.dispose();
+  }
+});
+
+test('Round 15 review (b2r 1): inputs lost outright do not stop a guest for good', () => {
+  const pair = createDirectPair();
+  delaysR15(pair, 'j60', 61);
+  for (let f = 0; f < 180; f++) stepPairR15(pair, idleCtrl);
+  const toHost = pair.binarySinks.host!;
+  const lostUntil = pair.clockMs + 1500;
+  pair.binarySinks.host = (b: Uint8Array) => {
+    if (pair.clockMs >= lostUntil) toHost(b);
+  };
+  let received = 0;
+  const deliver = pair.binarySinks.host;
+  pair.binarySinks.host = (b: Uint8Array) => {
+    if (pair.clockMs >= lostUntil + 1500) received += 1;
+    deliver(b);
+  };
+  for (let f = 0; f < 60 * 4.5; f++) stepPairR15(pair, idleCtrl);
+  assert.ok(received >= 15, `${received} inputs reached the host in the 1.5 s after 1.5 s from the link's return`);
+  pair.dispose();
+});
+
+test("Round 15 review (b2r 2): after a guest's socket drops and comes back, the host's copy of its lead matches the guest's", () => {
+  for (const seed of [71, 72, 73, 74, 75, 76, 77, 78]) {
+    const pair = createDirectPair();
+    delaysR15(pair, 'j60', seed);
+    for (let f = 0; f < 300; f++) stepPairR15(pair, idleCtrl);
+    // The guest's socket is down for 0.8 s: nothing gets through either way, and the relay tells both sides.
+    const guestEmit = (pair.guestClient as unknown as { emit: (k: string, ...a: unknown[]) => void }).emit.bind(pair.guestClient);
+    const lobby = (connected: boolean) =>
+      pair.lobbySinks.host?.({
+        code: 'JITR77',
+        formattedCode: 'JIT-R77',
+        hostConnected: true,
+        tvMode: false,
+        locked: true,
+        seats: [
+          { seat: 0, callsign: 'NOVA-1', ready: true, isHost: true, connected: true },
+          { seat: 1, callsign: 'STAR-2', ready: true, isHost: false, connected },
+        ],
+      });
+    const downFrom = pair.clockMs;
+    const down = () => pair.clockMs >= downFrom && pair.clockMs < downFrom + 800;
+    const realHostSend = pair.hostClient.sendBinary.bind(pair.hostClient);
+    pair.hostClient.sendBinary = (b: Uint8Array) => (down() ? true : realHostSend(b));
+    const realGuestSend = pair.guestClient.sendBinary.bind(pair.guestClient);
+    pair.guestClient.sendBinary = (b: Uint8Array) => (down() ? true : realGuestSend(b));
+    guestEmit('onConnectionChange', false);
+    lobby(false);
+    for (let f = 0; f < 48; f++) stepPairR15(pair, idleCtrl);
+    guestEmit('onConnectionChange', true);
+    guestEmit('onWelcome', {});
+    lobby(true);
+    let worst = 0;
+    for (let f = 0; f < 150; f++) {
+      stepPairR15(pair, idleCtrl);
+      const gap = leadGapR15(pair);
+      if (gap !== null && f > 20) worst = Math.max(worst, Math.abs(gap));
+    }
+    // Without any drop the two differ by 3-4 ms (the host counts each snapshot as it sends it, the guest as it gets it);
+    // before this fix, 18-62 ms.
+    assert.ok(worst <= 12, `seed ${seed}: the host's copy of the lead was ${worst.toFixed(1)} ms off the guest's`);
+    pair.dispose();
+  }
+});
+
+test("Round 15 review (b2r 4): a new run after the guest's clock passes 65.5 s keeps the host's copy of its lead", () => {
+  const pair = createDirectPair();
+  delaysR15(pair, 'j60', 81);
+  pair.advanceClock(62_000); // the guest's page has been open a while
+  for (let f = 0; f < 60 * 7; f++) stepPairR15(pair, idleCtrl); // its clock passes 65,536 ms
+  const m = (pair.hostDir as unknown as { mirrorLead: Array<{ avg: { count: number } }> }).mirrorLead[1]!;
+  const countBefore = m.avg.count;
+  pair.hostDir.resetSquadForNewRun(); // the host relaunches; the guest keeps its lead, and the host its copy
+  let worst = 0;
+  for (let f = 0; f < 150; f++) {
+    stepPairR15(pair, idleCtrl);
+    const host = (pair.hostDir as unknown as { mirrorLead: Array<{ avg: { value: number | null } }> }).mirrorLead[1]!.avg.value;
+    const guest = (pair.guestDir.interpolator as unknown as { ackHostOffsetMs: number | null }).ackHostOffsetMs;
+    if (host !== null && guest !== null) worst = Math.max(worst, Math.abs(((host - guest) % 65536 + 65536 + 32768) % 65536 - 32768));
+  }
+  assert.ok(m.avg.count > countBefore, `the copy kept counting (${countBefore} -> ${m.avg.count})`);
+  assert.ok(worst <= 6, `the host's copy was ${worst.toFixed(1)} ms off the guest's lead`);
   pair.dispose();
 });

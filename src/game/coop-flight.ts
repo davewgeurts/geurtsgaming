@@ -187,6 +187,8 @@ const FOLLOW_MAX_SPEED = 1140;
 interface GuestTrack {
   /** Unwrapped send time of the newest sample, in the guest's ms (null before the first). */
   sendFull: number | null;
+  /** When (this host's clock) `sendFull` came in: 16-bit send times unwrap against `sendFull` plus the time since. */
+  sendFullAtMs: number;
   /** Smallest (arrival - send) seen, creeping up slowly: the base one-way delay plus the clock difference. */
   offsetMinMs: number | null;
   lastArrivalMs: number;
@@ -199,7 +201,7 @@ interface GuestTrack {
 }
 
 function freshTrack(): GuestTrack {
-  return { sendFull: null, offsetMinMs: null, lastArrivalMs: 0, jitterMs: 0, samples: [], timedBySender: false };
+  return { sendFull: null, sendFullAtMs: 0, offsetMinMs: null, lastArrivalMs: 0, jitterMs: 0, samples: [], timedBySender: false };
 }
 const HOST_STATE_PREFIX = 'gg_coop_host_state_';
 const FX_RETENTION_SEC = 0.24;
@@ -427,15 +429,16 @@ export class CoopFlightDirector {
   /** Host: the host's own link dropped, and has come back (the next host step asks every open question again). */
   private hostLinkDropped = false;
   private hostLinkReturned = false;
+  private guestLinkDropped = false;
   /** Answers that came in while the host was paused: nothing changes during a pause, so they wait for play to resume. */
   private answersWhilePaused: CoopAnswerMessage[] = [];
   /** Host: game.ts ends each frame with endHostFrame, so the periodic snapshot waits for it (`hostSnapDue`). */
   private hostFrameEnds = false;
   private hostSnapDue = false;
   /** Guest: when the newest snapshot came, the acknowledgement it carried, and since when none has moved on. */
-  private lastSnapAtMs = -Infinity;
   private lastSnapAckSeq: number | null = null;
-  private ackStallSinceMs: number | null = null;
+  /** When a snapshot last acknowledged an input it had not before (see `deliveryThrottle`). */
+  private ackProgressAtMs: number | null = null;
   /** Guest: where the ship is heading while steering by pointer or deck (null otherwise), and whether that is still. */
   private guestDest: { x: number; y: number; movedAt: number; still: boolean } | null = null;
   /** A press on a deck card's row, picked if it is released on that row soon enough (a tap, not a landing thumb). */
@@ -574,13 +577,24 @@ export class CoopFlightDirector {
       onEvent: (msg: CoopEventMessage) => this.handleHostEvent(msg),
       onAnswer: (msg: CoopAnswerMessage) => this.handleWireAnswer(msg),
       onConnectionChange: (connected: boolean) => {
-        if (this.isHost && !connected) this.hostLinkDropped = true;
+        if (!connected) {
+          if (this.isHost) this.hostLinkDropped = true;
+          else this.guestLinkDropped = true;
+        }
       },
       onWelcome: () => {
         // The relay welcomes the host again once its link is back and routing.
         if (this.isHost && this.hostLinkDropped) {
           this.hostLinkDropped = false;
           this.hostLinkReturned = true;
+        }
+        if (!this.isHost && this.guestLinkDropped) {
+          // This guest's own link is back. The host starts its mirror of our lead afresh (handleLobbyUpdate), so
+          // we do too, and both skip the same first new acknowledgement. Sends lost with the old socket are no
+          // longer waited for.
+          this.guestLinkDropped = false;
+          this.interpolator.setAckHostOffset(null);
+          this.ackProgressAtMs = null;
         }
       },
       onHostReconnecting: (graceMs: number) => {
@@ -2043,15 +2057,8 @@ export class CoopFlightDirector {
     if (snap.hostElapsedMs !== undefined && Number.isFinite(snap.hostElapsedMs) && this.client.seat >= 0) {
       const wireMe = snap.ships.find((sh) => sh.seat === this.client.seat);
       if (wireMe) {
-        // Snapshots that keep coming without acknowledging anything new mean our uploads are stuck (see
-        // upstreamStalledThrottle); a snapshot that does, or none at all, means they are not.
-        const snapNowMs = this.nowFn();
-        this.lastSnapAtMs = snapNowMs;
-        if (wireMe.ackSeq === this.lastSnapAckSeq && wireMe.ackSeq !== this.inputSeq) {
-          this.ackStallSinceMs ??= snapNowMs;
-        } else {
-          this.ackStallSinceMs = null;
-        }
+        // A newly acknowledged input means our uploads are getting through (see deliveryThrottle).
+        if (wireMe.ackSeq !== this.lastSnapAckSeq) this.ackProgressAtMs = this.nowFn();
         this.lastSnapAckSeq = wireMe.ackSeq;
         const hist = this.predHistory[wireMe.ackSeq & 0xff];
         // During an upstream stall every snapshot repeats the same ack while host time runs on; feeding those
@@ -2562,13 +2569,14 @@ export class CoopFlightDirector {
       (localCtrl.down < 0 ? 16 : 0) |
       (localCtrl.down > 0 ? 32 : 0);
     const discreteChanged = discreteMask !== this.lastSentDiscreteMask;
-    if (this.guestPendingTap !== null) {
+    if (this.guestPendingTap !== null && !this.deliveryThrottle(nowMs, true)) {
       this.inputAccumSec = Math.min(this.inputAccumSec, 0.017);
       this.lastSentDiscreteMask = discreteMask;
       this.guestSendTimesMs.push(nowMs);
       this.sendGuestInputFrame(me, localCtrl, nowMs);
     } else if (
-      !this.upstreamStalledThrottle(nowMs) &&
+      this.guestPendingTap === null &&
+      !this.deliveryThrottle(nowMs, false) &&
       // Every send costs a full interval of `inputAccumSec`, so the rate stays near 20 a second; a change may borrow
       // past a full window of 20 (at most about 21 in a second) instead of waiting for the oldest send to age out.
       ((this.inputAccumSec >= COOP_INPUT_INTERVAL_SEC && this.guestSendTimesMs.length < 20) ||
@@ -2650,6 +2658,7 @@ export class CoopFlightDirector {
       p.ackSeq = s.ackSeq;
       if (s.seat === mySeat) {
         const wireAnswering = Boolean((authMe ?? s).answering);
+        if (!wireAnswering) this.quiz.hostShowsNotAnswering(this.layout.useThumbDeck, this.quizHooks(world));
         p.answering = s.alive && (wireAnswering || (!this.guestParked && this.quiz.isInteractive()));
         this.resendUnconfirmedAnswer(wireAnswering);
       } else {
@@ -3485,12 +3494,22 @@ export class CoopFlightDirector {
    * relay's 35-a-second limit drops. A stalled download or a slow link is not an upload stall: snapshots stop, or
    * acknowledgements keep moving. Taps are never held back.
    */
-  private upstreamStalledThrottle(nowMs: number): boolean {
-    if (this.ackStallSinceMs === null || nowMs - this.lastSnapAtMs > 300 || nowMs - this.ackStallSinceMs < 500) {
+  /**
+   * Guest: hold sends back while none is getting through. With no input acknowledged for 300 ms the link is stalled
+   * one way or both, which a guest cannot tell apart, and everything sent meanwhile may reach the relay at once when it
+   * comes back: the relay drops what goes past 35 in a second (fresh inputs, taps, answers) and cuts a guest off past
+   * 90. So send one every quarter second (a tap at once), and none while 12 are unacknowledged: a burst of at most 12,
+   * plus at most 20 more in that second. Acknowledgements come with every snapshot while the link works, at any delay.
+   */
+  private deliveryThrottle(nowMs: number, urgent: boolean): boolean {
+    if (this.ackProgressAtMs === null || this.lastSnapAckSeq === null || nowMs - this.ackProgressAtMs < 300) {
       return false;
     }
     const lastSent = this.guestSendTimesMs[this.guestSendTimesMs.length - 1];
-    return lastSent !== undefined && nowMs - lastSent < 200;
+    // At 12 still one a second, so a batch lost outright (a dropped socket) cannot stop this guest for good.
+    if (((this.inputSeq - this.lastSnapAckSeq) & 0xff) >= 12) return lastSent !== undefined && nowMs - lastSent < 1000;
+    if (urgent) return false;
+    return lastSent !== undefined && nowMs - lastSent < 250;
   }
 
   /**
@@ -3498,7 +3517,13 @@ export class CoopFlightDirector {
    * its bullet lead, so the host keeps its mirror of it (`keepLead`).
    */
   private resetGuestTiming(seat: CoopSeatIndex, keepLead = false): void {
+    const old = this.tracks[seat]!;
     this.tracks[seat] = freshTrack();
+    if (keepLead) {
+      // The kept lead is in this seat's unwrapped send-time units: keep unwrapping in the same span.
+      this.tracks[seat]!.sendFull = old.sendFull;
+      this.tracks[seat]!.sendFullAtMs = old.sendFullAtMs;
+    }
     this.tapQueue[seat]!.length = 0;
     this.ackSendFull[seat] = null;
     if (!keepLead) this.resetMirrorLead(seat);
@@ -3508,6 +3533,8 @@ export class CoopFlightDirector {
   private resetMirrorLead(seat: CoopSeatIndex): void {
     const m = this.mirrorLead[seat]!;
     m.avg = freshLeadAverage();
+    // Forget the last acknowledgement: snapshots sent while a link was down never reached the guest, so to it the
+    // next one is new, and both skip it. (When the guest had seen it after all, the two can differ by one sample.)
     m.ackSeq = null;
     m.primed = false;
   }
@@ -3515,8 +3542,11 @@ export class CoopFlightDirector {
   /** Host: an input's send time in the seat's track's unwrapped guest ms (null for an 8-byte frame without one). */
   private senderTimeOf(seat: CoopSeatIndex, input: CoopGuestInput): number | null {
     if (typeof input.sendMs !== 'number' || !Number.isFinite(input.sendMs)) return null;
-    const ref = this.tracks[seat]!.sendFull;
-    if (ref === null) return input.sendMs;
+    const tr = this.tracks[seat]!;
+    if (tr.sendFull === null) return input.sendMs;
+    // Where the guest's clock should be now: then a gap of any length between inputs (a pause, a summary screen, a
+    // new run) still unwraps to the right 65.5 s span. Only a jump of over 32 s against that would not.
+    const ref = tr.sendFull + Math.max(0, this.nowFn() - tr.sendFullAtMs);
     const low = ((ref % 65536) + 65536) % 65536;
     const delta = (input.sendMs - low + 65536) % 65536;
     return delta < 32768 ? ref + delta : ref - (65536 - delta);
@@ -3531,13 +3561,16 @@ export class CoopFlightDirector {
       if (seat === this.client.seat) continue;
       const sent = this.ackSendFull[seat];
       const m = this.mirrorLead[seat]!;
-      if (sent === null || ship.ackSeq === m.ackSeq) continue;
+      // A seat whose socket is down gets none of these snapshots, so its lead takes no sample from them either.
+      if (ship.ackSeq === m.ackSeq || !this.pilots[seat]!.connected) continue;
+      // Count each new acknowledgement as the guest does (lastCalibAckSeq), and spend the skip after a reset on the same
+      // one, even when its send time is not known here (just after a reconnect): the guest skips it all the same.
       m.ackSeq = ship.ackSeq;
       if (!m.primed) {
         m.primed = true;
         continue;
       }
-      updateLeadAverage(m.avg, hostMs - sent);
+      if (sent !== null) updateLeadAverage(m.avg, hostMs - sent);
     }
   }
 
@@ -3560,6 +3593,7 @@ export class CoopFlightDirector {
     tr.jitterMs += (clamp(raw - tr.offsetMinMs, 0, 150) - tr.jitterMs) * 0.1;
     tr.lastArrivalMs = arrival;
     tr.sendFull = full;
+    tr.sendFullAtMs = arrival;
     const hasDest = typeof input.destX === 'number' && typeof input.destY === 'number';
     tr.samples.push(
       hasDest ? { s: full, x, y, dx: clampArenaShipX(input.destX!), dy: clampArenaShipY(input.destY!) } : { s: full, x, y },

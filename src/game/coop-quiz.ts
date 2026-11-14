@@ -467,6 +467,16 @@ export class CoopLocalQuizController {
   }
 
   /** The grade picker ran out: nothing is lost, and it comes back with the next question. */
+  /**
+   * The host's snapshots show this pilot no longer answering. Past the picker's own window that means the host closed
+   * the question: if its message to say so was lost, close the picker here rather than wait out the fallback (picks
+   * are refused by then anyway, and an open picker stops this pilot firing).
+   */
+  hostShowsNotAnswering(useThumbDeck: boolean, hooks: CoopQuizHooks): void {
+    const st = this.active;
+    if (st?.stage === 'grade' && st.age >= COOP_GRADE_PICK_SEC + 1) this.showNoLevelPicked(st.next.id, useThumbDeck, hooks);
+  }
+
   private showNoLevelPicked(id: number, useThumbDeck: boolean, hooks: CoopQuizHooks): void {
     this.handledIds.add(id);
     this.active = {
