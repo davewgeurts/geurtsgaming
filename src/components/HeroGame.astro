@@ -3,6 +3,9 @@
  * Launch button for the hero arcade game, plus the full-screen overlay it plays in (with its Pause, Sound and Exit buttons).
  * The game code (src/game/) is only downloaded when someone presses the button.
  */
+import { resolveCoopMode } from '../game/coop-mode';
+
+const coopMode = resolveCoopMode();
 ---
 <div class="launch-slot">
   <div class="launch-actions">
@@ -16,16 +19,18 @@
         <span class="launch-hint">Fly · Type · Solve</span>
       </span>
     </button>
-    <button class="coop-launch" type="button" data-coop-launch aria-haspopup="dialog">
-      <svg class="coop-launch-ships" viewBox="0 0 36 28" width="28" height="22" aria-hidden="true">
-        <path d="M11 3 L14 11 L20 21 L14 19 L13 23 L9 23 L8 19 L2 21 L8 11 Z" />
-        <path d="M25 6 L27.5 12.5 L33 21 L27.5 19.5 L26.5 23 L23.5 23 L22.5 19.5 L17 21 L22.5 12.5 Z" />
-      </svg>
-      <span class="coop-launch-text">
-        <span class="coop-launch-label">Fly with friends</span>
-        <span class="coop-launch-hint">2–4 Pilots · QR or Code</span>
-      </span>
-    </button>
+    {coopMode !== 'off' && (
+      <button class="coop-launch" type="button" data-coop-launch hidden={coopMode === 'playtest'} aria-haspopup="dialog">
+        <svg class="coop-launch-ships" viewBox="0 0 36 28" width="28" height="22" aria-hidden="true">
+          <path d="M11 3 L14 11 L20 21 L14 19 L13 23 L9 23 L8 19 L2 21 L8 11 Z" />
+          <path d="M25 6 L27.5 12.5 L33 21 L27.5 19.5 L26.5 23 L23.5 23 L22.5 19.5 L17 21 L22.5 12.5 Z" />
+        </svg>
+        <span class="coop-launch-text">
+          <span class="coop-launch-label">Fly with friends</span>
+          <span class="coop-launch-hint">2–4 Pilots · QR or Code</span>
+        </span>
+      </button>
+    )}
   </div>
   <div class="squad-pill" data-squad-pill>
     <span class="squad-dot" aria-hidden="true"></span>
@@ -86,9 +91,11 @@
   <p class="visually-hidden" aria-live="polite" data-game-status></p>
 </div>
 
-<div class="coop-modal" data-coop-overlay hidden role="dialog" aria-modal="true" aria-labelledby="coop-modal-title" tabindex="-1">
-  <div class="coop-dialog" data-coop-panel tabindex="-1"></div>
-</div>
+{coopMode !== 'off' && (
+  <div class="coop-modal" data-coop-overlay hidden role="dialog" aria-modal="true" aria-labelledby="coop-modal-title" tabindex="-1">
+    <div class="coop-dialog" data-coop-panel tabindex="-1"></div>
+  </div>
+)}
 
 <style>
   /* The hero's headline act: a neon-framed button on a line of its own above the other buttons. */
@@ -1231,47 +1238,72 @@
       }
     };
 
-    coopLaunch?.addEventListener('click', () => {
-      void openCoopModal();
-    });
+    const coopMode =
+      document.documentElement.dataset.coopMode === 'on'
+        ? 'on'
+        : document.documentElement.dataset.coopMode === 'playtest'
+          ? 'playtest'
+          : 'off';
 
-    coopOverlay?.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && coopModal?.controller.snapshot().screen === 'choose') {
-        e.preventDefault();
-        closeCoopModal();
-      }
-    });
+    if (coopMode !== 'off') {
+      coopLaunch?.addEventListener('click', () => {
+        void openCoopModal();
+      });
 
-    // Zero-cost invite/session check: only downloads Co-op bundle on initial load when
-    // arriving via `?j=ABCDEF` QR/invite link (stashed in `gg_coop_invite` / `window.__ggInvite`
-    // by Base.astro before Google Analytics runs) or refreshing an active Co-op lobby tab!
-    try {
-      const win = window as Window & { __ggInvite?: string };
-      let hasInvite = Boolean(win.__ggInvite) || new URLSearchParams(location.search).has('j');
-      let hasSavedSession = false;
+      coopOverlay?.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && coopModal?.controller.snapshot().screen === 'choose') {
+          e.preventDefault();
+          closeCoopModal();
+        }
+      });
+
+      // Zero-cost invite/session check: only downloads Co-op bundle on initial load when
+      // arriving via `?j=ABCDEF` QR/invite link (stashed in `gg_coop_invite` / `window.__ggInvite`
+      // by Base.astro before Google Analytics runs) or refreshing an active Co-op lobby tab!
       try {
-        hasInvite = hasInvite || sessionStorage.getItem('gg_coop_invite') !== null;
-        hasSavedSession = Boolean(sessionStorage.getItem('gg_coop_active'));
+        const win = window as Window & { __ggInvite?: string; __ggCoopPreview?: boolean };
+        const params = new URLSearchParams(location.search);
+        let hasInvite = Boolean(win.__ggInvite) || params.has('j');
+        let hasSavedSession = false;
+        let hasPreviewFlag = Boolean(win.__ggCoopPreview) || params.get('coop') === '1';
+        try {
+          hasInvite = hasInvite || sessionStorage.getItem('gg_coop_invite') !== null;
+          hasSavedSession = Boolean(sessionStorage.getItem('gg_coop_active'));
+          hasPreviewFlag = hasPreviewFlag || sessionStorage.getItem('gg_coop_preview') === '1';
+        } catch {
+          /* storage blocked; window.__ggInvite / __ggCoopPreview fallback still works */
+        }
+
+        const unlocked = coopMode === 'on' || hasPreviewFlag || hasInvite || hasSavedSession;
+        if (unlocked && coopLaunch) {
+          coopLaunch.hidden = false;
+          if (coopMode === 'playtest') {
+            try {
+              sessionStorage.setItem('gg_coop_preview', '1');
+            } catch {
+              /* ignore restricted storage */
+            }
+          }
+        }
+
+        if (unlocked && (hasInvite || hasSavedSession)) {
+          void Promise.all([import('../game/coop-client'), import('../game/coop-lobby')]).then(
+            ([{ consumePendingInviteCode }, { loadActiveCoopSession }]) => {
+              const inviteCode = consumePendingInviteCode();
+              if (inviteCode) {
+                void openCoopModal(inviteCode, 'guest');
+                return;
+              }
+              const resumed = loadActiveCoopSession();
+              if (resumed) {
+                void openCoopModal(resumed.code, resumed.role);
+              }
+            },
+          );
+        }
       } catch {
-        /* storage blocked; window.__ggInvite fallback still works */
+        /* ignore restricted storage environments */
       }
-      if (hasInvite || hasSavedSession) {
-        void Promise.all([import('../game/coop-client'), import('../game/coop-lobby')]).then(
-          ([{ consumePendingInviteCode }, { loadActiveCoopSession }]) => {
-            const inviteCode = consumePendingInviteCode();
-            if (inviteCode) {
-              void openCoopModal(inviteCode, 'guest');
-              return;
-            }
-            const resumed = loadActiveCoopSession();
-            if (resumed) {
-              void openCoopModal(resumed.code, resumed.role);
-            }
-          },
-        );
-      }
-    } catch {
-      /* ignore restricted storage environments */
     }
   }
 </script>
