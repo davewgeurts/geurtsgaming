@@ -12,7 +12,7 @@ import type { Box } from './hud';
 const GAME_KEYS = new Set([
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
   'KeyW', 'KeyA', 'KeyS', 'KeyD',
-  'Space', 'Enter', 'KeyP', 'KeyL', 'KeyC',
+  'Space', 'Enter', 'KeyP', 'KeyL', 'KeyC', 'KeyH',
 ]);
 
 /** Keys that would scroll the page behind the game; swallowed while it is open. */
@@ -48,6 +48,15 @@ export interface InputHost {
   touched(): void;
   /** A click or tap that picked nothing: resume, launch, or try again. */
   press(): void;
+  /** Optional physical-to-logical arena coordinate mapper (used in Co-op `3:4` arena mode). */
+  mapPoint?(x: number, y: number): { x: number; y: number };
+  /** Optional custom pointer handlers (used by `CoopThumbDeck` on portrait phones). */
+  pointerDown?(pointerId: number, x: number, y: number, touch: boolean): boolean;
+  pointerMove?(pointerId: number, x: number, y: number): boolean;
+  pointerUp?(pointerId: number): boolean;
+  pointerDrop?(): void;
+  /** Allow specific focused HTML `<button>` controls (strictly the Co-op Leave confirmation sheet) to receive `Space`. */
+  allowButtonSpace?: (target: EventTarget | null) => boolean;
 }
 
 /** The part of a canvas this needs: somewhere to listen, and where it is on the page. */
@@ -131,6 +140,7 @@ export class Input {
   drop(): void {
     this.keys.clear();
     this.touchId = null;
+    this.host.pointerDrop?.();
   }
 
   /** Measure where the canvas is in the window. */
@@ -153,9 +163,9 @@ export class Input {
       e.preventDefault();
       return;
     }
-    // Enter still activates a focused button (Exit). Space always belongs to the game,
-    // so tabbing to Exit and then firing cannot end a run by accident.
-    if (code === 'Enter' && onButton(e)) return;
+    // Enter still activates a focused button (Exit). Space always belongs to the game on in-game buttons,
+    // so tabbing to Exit/Pause/Sound and firing cannot act on the button by accident; only Leave-sheet buttons keep Space.
+    if ((code === 'Enter' || (code === 'Space' && this.host.allowButtonSpace?.(e.target))) && onButton(e)) return;
 
     // A key that answers the open question goes to the question. It is matched on the character, not the
     // physical key, so a line can be typed on any keyboard layout. Everything else (arrow keys, and any
@@ -179,8 +189,8 @@ export class Input {
 
   private onKeyUp = (event: Event): void => {
     const e = event as KeyboardEvent;
-    // A button is clicked when Space is released on it; see onKeyDown for why that is blocked.
-    if (e.code === 'Space' && onButton(e)) e.preventDefault();
+    // A button is clicked when Space is released on it; block that except on the Co-op Leave sheet's own buttons.
+    if (e.code === 'Space' && !this.host.allowButtonSpace?.(e.target) && onButton(e)) e.preventDefault();
     this.keys.delete(e.code);
   };
 
@@ -191,8 +201,20 @@ export class Input {
     if (!touch && e.button !== 0) return;
     this.host.wake();
     this.measure();
+    const rawX = e.clientX - this.origin.x;
+    const rawY = e.clientY - this.origin.y;
+    if (this.host.pointerDown?.(e.pointerId, rawX, rawY, touch)) {
+      if (touch) this.mode = 'touch';
+      try {
+        this.surface.setPointerCapture?.(e.pointerId);
+      } catch {
+        /* capture is a nicety, not a requirement */
+      }
+      return;
+    }
+    const pt = this.host.mapPoint ? this.host.mapPoint(rawX, rawY) : { x: rawX, y: rawY };
     // A click or tap on an upgrade, an answer or a boss's little ship picks it, and is not a steering touch.
-    if (this.host.pick(e.clientX - this.origin.x, e.clientY - this.origin.y)) {
+    if (this.host.pick(pt.x, pt.y)) {
       if (touch) this.mode = 'touch';
       return;
     }
@@ -212,16 +234,29 @@ export class Input {
 
   private onPointerMove = (event: Event): void => {
     const e = event as PointerEvent;
+    if (this.host.pointerMove?.(e.pointerId, e.clientX - this.origin.x, e.clientY - this.origin.y)) {
+      return;
+    }
     if (e.pointerId === this.touchId) this.track(e);
   };
 
   private onPointerUp = (event: Event): void => {
-    if ((event as PointerEvent).pointerId === this.touchId) this.touchId = null;
+    const pid = (event as PointerEvent).pointerId;
+    this.host.pointerUp?.(pid);
+    if (pid === this.touchId) this.touchId = null;
   };
 
   /** The ship rides a little above the finger so the finger does not cover it. */
   private track(e: PointerEvent): void {
-    this.touch.x = e.clientX - this.origin.x;
-    this.touch.y = e.clientY - this.origin.y - FINGER_LIFT;
+    const rawX = e.clientX - this.origin.x;
+    const rawY = e.clientY - this.origin.y;
+    if (this.host.mapPoint) {
+      const pt = this.host.mapPoint(rawX, rawY);
+      this.touch.x = pt.x;
+      this.touch.y = pt.y - FINGER_LIFT;
+    } else {
+      this.touch.x = rawX;
+      this.touch.y = rawY - FINGER_LIFT;
+    }
   }
 }

@@ -51,6 +51,8 @@ const MAX_SCORE_BURST = 4_500;
 const MAX_SCORE_PER_SEC = 900;
 const ALLOWED_ORIGIN_RE =
   /^https:\/\/(?:www\.)?(?:geurtsgaming\.com|exponentialblissmanifesto\.com|theloneliestday\.com)$|^http:\/\/(?:localhost|127\.0\.0\.1|[a-z0-9-]+\.localdev)(?::\d+)?$/i;
+const LOCAL_LAN_ORIGIN_RE =
+  /^http:\/\/(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?::\d+)?$/i;
 const scoreRateByIp = new Map();
 
 
@@ -310,6 +312,10 @@ function updateRunLedger(prevRun, flight, nowMs) {
 /**
  * Decide whether a `/score` submission should be shadowbanned ("Mirage #1"): shown at Rank #1
  * to the submitter alone while never touching the shared Top 10 leaderboard.
+ *
+ * Designed for a 0% false-positive rate on honest kids (even if school Wi-Fi drops `/presence`
+ * heartbeats mid-run), triggering strictly on un-keyed bot scripts, observed mid-run tampering,
+ * or mathematically impossible scores/souls for the wave reached.
  */
 function isSuspectScoreSubmission(room, sid, rawScore, rawWave, rawFreed, runId, nowMs) {
   if (
@@ -324,32 +330,40 @@ function isSuspectScoreSubmission(room, sid, rawScore, rawWave, rawFreed, runId,
     return true;
   }
 
-  const ledger = sid ? room.runLedgers.get(sid) : undefined;
-  const hasSession = Boolean(sid && (room.knownSessions.has(sid) || room.activeSouls.has(sid)));
-  if (!hasSession && !ledger) {
-    // Cold API call with no active browser presence session.
+  // Real browser clients always mint a `pilot-*` session ID; raw curl scripts without one are shadowbanned.
+  if (!sid || !sid.startsWith('pilot-')) {
     return true;
   }
 
+  const ledger = room.runLedgers.get(sid);
+  const hasSession = room.knownSessions.has(sid) || room.activeSouls.has(sid);
+
   if (ledger) {
     if (ledger.bad) return true;
-    if (runId && ledger.id && runId !== ledger.id) return true;
-    const dtSec = Math.max(0.5, (nowMs - ledger.t) / 1_000);
-    const totalSec = Math.max(0.5, (nowMs - ledger.t0) / 1_000);
-    if (rawWave > ledger.w + 1) return true;
-    if (rawWave >= 2 && totalSec < (rawWave - 1) * MIN_SECONDS_PER_CLEARED_WAVE) return true;
-    if (rawScore - ledger.s > MAX_SCORE_BURST + dtSec * MAX_SCORE_PER_SEC) return true;
+    if (!runId || !ledger.id || runId === ledger.id) {
+      const dtSec = Math.max(1, (nowMs - ledger.t) / 1_000);
+      const totalSec = Math.max(1, (nowMs - ledger.t0) / 1_000);
+      if (rawWave > ledger.w + Math.floor(dtSec / MIN_SECONDS_PER_CLEARED_WAVE) + 1) return true;
+      if (rawWave >= 2 && totalSec < (rawWave - 1) * MIN_SECONDS_PER_CLEARED_WAVE) return true;
+      if (rawScore - ledger.s > MAX_SCORE_BURST + dtSec * MAX_SCORE_PER_SEC * 2) return true;
+    }
     return false;
   }
 
-  // No flight heartbeat arrived yet: only plausible if the pilot died right at the start of Wave 1.
-  return rawWave !== 1 || rawScore > 3_500;
+  // If Wi-Fi dropped heartbeats or a Lambda cold-started mid-run (`!ledger`), allow normal-sized
+  // scores so an honest child is never shadowbanned, while catching cold high-score injections.
+  if (!hasSession && rawScore > 8_500 * rawWave) {
+    return true;
+  }
+  return false;
 }
 
 function isAllowedOrigin(event) {
   const origin = event.headers?.origin || event.headers?.Origin || '';
   if (!origin) return true;
-  return ALLOWED_ORIGIN_RE.test(String(origin).trim());
+  const trimmed = String(origin).trim();
+  if (ALLOWED_ORIGIN_RE.test(trimmed)) return true;
+  return !SHOULD_USE_DDB && LOCAL_LAN_ORIGIN_RE.test(trimmed);
 }
 
 function parseJsonBody(rawBody) {

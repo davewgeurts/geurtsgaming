@@ -15,10 +15,24 @@
  */
 import { NEON, PINK, SAND, pick, rand } from '../game/core';
 import { traceText } from '../game/font';
-import { DROGUE, FRIEND, MARK_STAR, PERSON_OUT, PERSON_UP, SHIP, TANKER, segments, trace, type Shape } from '../game/shapes';
+import {
+  DROGUE,
+  FRIEND,
+  MARK_STAR,
+  PERSON_OUT,
+  PERSON_UP,
+  SHIP,
+  SHIP_BASTION,
+  SHIP_SWIFT,
+  TANKER,
+  segments,
+  trace,
+  type Shape,
+} from '../game/shapes';
 import type { Rect } from './hero-scene';
 
 const LIME = NEON.lime;
+const PLAYER_SHIPS: readonly Shape[] = [SHIP, SHIP_SWIFT, SHIP_BASTION];
 const QUARTER = Math.PI / 2;
 /** How close to the copy something may come before it has faded right out, and the px over which it fades. */
 const NEAR = 14;
@@ -139,7 +153,7 @@ export function heroCameos(ctx: CanvasRenderingContext2D) {
 
   // ---------------------------------------------------------------- the cast
 
-  /** Flight school: a leader, and a line of learners who more or less keep up. */
+  /** Flight school: a leader, and a line of learners (including Swift and Bastion!) who more or less keep up. */
   function school(): Cameo {
     const dir = Math.random() < 0.5 ? -1 : 1;
     const s = size * rand(0.85, 1);
@@ -149,11 +163,15 @@ export function heroCameos(ctx: CanvasRenderingContext2D) {
     const reach = (learners + 2) * 20 * s;
     let x = dir > 0 ? -30 : w + 30;
     const seed = rand(0, 9);
+    const leadShape = pick(PLAYER_SHIPS);
+    const learnerShapes = Array.from({ length: learners }, (_, idx) =>
+      idx % 3 === 0 ? SHIP_SWIFT : idx % 3 === 1 ? SHIP_BASTION : FRIEND,
+    );
     return (dt, dx, dy) => {
       x += dir * speed * dt * hurry(x, y0, dir * reach);
       const t = clock + seed;
       const wave = (i: number) => Math.sin(t * 1.6 - i * 0.7) * 5 * s;
-      draw(SHIP, x + dx, y0 + wave(0) + dy, 0.62 * s, dir * QUARTER, SAND, 1);
+      draw(leadShape, x + dx, y0 + wave(0) + dy, 0.62 * s, dir * QUARTER, SAND, 1);
       flame(x + dx, y0 + wave(0) + dy, 0.62 * s, dir, PINK, 0.8);
       for (let i = 1; i <= learners; i++) {
         // The last in line drifts back, notices, and scoots to catch up; then does it again.
@@ -161,7 +179,9 @@ export function heroCameos(ctx: CanvasRenderingContext2D) {
         const lx = x - dir * (10 + i * 17) * s - dir * lag;
         // Learners wobble more than their teacher.
         const ly = y0 + wave(i) * 1.5 + Math.sin(t * 3.1 + i * 2) * 1.5 * s;
-        draw(FRIEND, lx + dx, ly + dy, 0.34 * s, dir * QUARTER + Math.sin(t * 2.3 + i) * 0.18, LIME, 0.9);
+        const lShape = learnerShapes[i - 1]!;
+        const lScale = (lShape === FRIEND ? 0.34 : 0.38) * s;
+        draw(lShape, lx + dx, ly + dy, lScale, dir * QUARTER + Math.sin(t * 2.3 + i) * 0.18, LIME, 0.9);
       }
       return dir > 0 ? x - reach < w + 30 : x + reach > -30;
     };
@@ -175,6 +195,7 @@ export function heroCameos(ctx: CanvasRenderingContext2D) {
     const speed = rand(22, 30);
     let x = dir > 0 ? -40 : w + 40;
     const seed = rand(0, 9);
+    const customer = pick(PLAYER_SHIPS);
     return (dt, dx, dy) => {
       x += dir * speed * dt * hurry(x, y0, dir * 70 * s);
       const t = clock + seed;
@@ -201,7 +222,7 @@ export function heroCameos(ctx: CanvasRenderingContext2D) {
           ctx.lineTo(px + 1, py);
         }
       });
-      draw(SHIP, sx + dx, sy + dy, 0.55 * s, dir * QUARTER, SAND, 1);
+      draw(customer, sx + dx, sy + dy, 0.55 * s, dir * QUARTER, SAND, 1);
       return dir > 0 ? sx < w + 40 : sx > -40;
     };
   }
@@ -235,6 +256,7 @@ export function heroCameos(ctx: CanvasRenderingContext2D) {
     const y0 = lane();
     const speed = rand(70, 95);
     const radius = rand(20, 28) * s;
+    const craft = pick(PLAYER_SHIPS);
     // The loop happens out in the open, a little way in from the edge it came from.
     const loopAt = dir > 0 ? rand(0.08, 0.2) * w : rand(0.8, 0.92) * w;
     let x = dir > 0 ? -20 : w + 20;
@@ -262,7 +284,7 @@ export function heroCameos(ctx: CanvasRenderingContext2D) {
           else ctx.lineTo(trail[i]! + dx, trail[i + 1]! + dy);
         }
       });
-      draw(SHIP, x + dx, y + dy, 0.55 * s, heading, SAND, 1);
+      draw(craft, x + dx, y + dy, 0.55 * s, heading, SAND, 1);
       return dir > 0 ? x < w + 30 : x > -30;
     };
   }
@@ -300,7 +322,12 @@ export function heroCameos(ctx: CanvasRenderingContext2D) {
     if (!spot) return null;
     const [x0, y0] = spot;
     const roll = Math.random();
-    const segs: Seg[] = roll < 0.2 ? segments(SHIP, x0, y0, 3.4 * size, rand(-0.3, 0.3)) : roll < 0.32 ? segments(MARK_STAR, x0, y0, 5 * size, 0) : glyphSegments(pick(GLYPHS), x0, y0, cap);
+    const segs: Seg[] =
+      roll < 0.24
+        ? segments(pick(PLAYER_SHIPS), x0, y0, 3.4 * size, rand(-0.3, 0.3))
+        : roll < 0.35
+          ? segments(MARK_STAR, x0, y0, 5 * size, 0)
+          : glyphSegments(pick(GLYPHS), x0, y0, cap);
     // Its stars are the ends of its lines, each counted once.
     const stars: number[] = [];
     for (const [x1, y1, x2, y2] of segs) {

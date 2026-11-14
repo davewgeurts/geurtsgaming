@@ -3,6 +3,7 @@ import '../styles/global.css';
 import { Font } from 'astro:assets';
 import Nav from '../components/Nav.astro';
 import Footer from '../components/Footer.astro';
+import { resolveCoopMode } from '../game/coop-mode';
 
 interface Props {
   title?: string;
@@ -12,6 +13,7 @@ interface Props {
   noindex?: boolean;
 }
 const site = 'GeurtsGaming';
+const coopMode = resolveCoopMode();
 const {
   title,
   description = 'GeurtsGaming makes educational and fun games for kids and teenagers — including Cool Typing Games and Earl vs. The Mutants.',
@@ -24,10 +26,34 @@ const ogImage = new URL(image, Astro.site ?? 'https://geurtsgaming.com');
 ---
 
 <!doctype html>
-<html lang="en">
+<html lang="en" data-coop-mode={coopMode}>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!--
+      Strip Co-op invite room codes (`?j=ABCDEF`) and playtest flags (`?coop=1`) from the address
+      BEFORE Google Analytics runs, stashing them in `sessionStorage` only when Co-op is enabled.
+    -->
+    <script is:inline>
+      (() => {
+        try {
+          const mode = typeof document !== 'undefined' ? (document.documentElement.dataset.coopMode || 'on') : 'on';
+          const u = new URL(location.href);
+          const j = u.searchParams.get('j');
+          const p = u.searchParams.get('coop');
+          if (j === null && p === null) return;
+          if (j !== null && mode !== 'off') {
+            try { sessionStorage.setItem('gg_coop_invite', j); } catch { window.__ggInvite = j; }
+          }
+          if (p === '1' && mode === 'playtest') {
+            try { sessionStorage.setItem('gg_coop_preview', '1'); } catch { window.__ggCoopPreview = true; }
+          }
+          u.searchParams.delete('j');
+          u.searchParams.delete('coop');
+          history.replaceState(history.state, '', u.pathname + u.search + u.hash);
+        } catch {}
+      })();
+    </script>
     <title>{fullTitle}</title>
     <meta name="description" content={description} />
     {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}

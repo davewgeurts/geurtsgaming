@@ -5,7 +5,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createField, gapAt, updateField, type Field, type FieldEnv } from '../src/game/asteroids';
+import { createField, createSeededRng, gapAt, updateField, type Field, type FieldEnv } from '../src/game/asteroids';
 import { clamp } from '../src/game/core';
 
 const SCREENS = [[1440, 900], [390, 844], [844, 390], [320, 568]] as const;
@@ -105,4 +105,51 @@ test('later fields are faster and narrower, and none lasts too long', () => {
       assert.ok(f.seconds < 20, `${w}x${h} wave ${wave}: ${f.seconds.toFixed(1)} s`);
     }
   }
+});
+
+test('seeded asteroid fields produce bit-identical rocks, lanes, bombs, prizes, and rock IDs across peers', () => {
+  const baseEnv: FieldEnv = { w: 768, h: 1024, left: 0, right: 0, scale: 1, pace: 1, wave: 3, seed: 0x1234abcd };
+  const hostField = createField({ ...baseEnv });
+  const guestField = createField({ ...baseEnv });
+
+  assert.equal(hostField.seed, 0x1234abcd);
+  assert.equal(hostField.bends, guestField.bends);
+  assert.equal(hostField.turn, guestField.turn);
+  assert.equal(hostField.rocks.length, guestField.rocks.length);
+  assert.deepEqual(hostField.bombs, guestField.bombs);
+  assert.deepEqual(hostField.prizes, guestField.prizes);
+  assert.deepEqual(hostField.signs, guestField.signs);
+  assert.deepEqual(hostField.rocks, guestField.rocks);
+  assert.deepEqual(
+    hostField.rocks.map((r) => r.id),
+    hostField.rocks.map((_, idx) => idx),
+    'rocks carry stable sequential IDs 0..n-1',
+  );
+
+  const otherField = createField({ ...baseEnv, seed: 0x99887766 });
+  assert.notDeepEqual(
+    hostField.rocks.slice(0, 8).map((r) => [r.x, r.d, r.r]),
+    otherField.rocks.slice(0, 8).map((r) => [r.x, r.d, r.r]),
+  );
+
+  const rngA = createSeededRng(42);
+  const rngB = createSeededRng(42);
+  for (let i = 0; i < 32; i++) {
+    assert.equal(rngA(), rngB());
+  }
+});
+
+test('all asteroid rock IDs across waves 1..30 stay strictly within the 512-bit Co-op broken-rock bitmap', () => {
+  let maxRockId = 0;
+  for (let wave = 1; wave <= 30; wave++) {
+    for (let s = 1; s <= 12; s++) {
+      const seed = ((wave * 2654435761) ^ (s * 2246822519)) >>> 0 || 1;
+      const field = createField({ w: 768, h: 1024, left: 0, right: 0, scale: 1, pace: 1, wave, seed });
+      for (const r of field.rocks) {
+        if (r.id > maxRockId) maxRockId = r.id;
+        assert.ok(r.id < 512, `wave ${wave} seed ${seed} rock.id=${r.id} exceeds 512-bit bitmap`);
+      }
+    }
+  }
+  assert.ok(maxRockId > 200 && maxRockId < 512, `expected realistic max rock.id in (200, 512), got ${maxRockId}`);
 });

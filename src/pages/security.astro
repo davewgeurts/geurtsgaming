@@ -1,6 +1,6 @@
 ---
 import TrustPage from '../components/TrustPage.astro';
-import { soc2Shown, trust } from '../data/trust';
+import { coopShown, soc2Shown, trust } from '../data/trust';
 
 const { type, auditor, period } = trust.soc2;
 ---
@@ -47,7 +47,12 @@ const { type, auditor, period } = trust.soc2;
     <li><strong>No accounts, passwords or payments.</strong> There is nothing to log in to and nothing to buy here, so there are no passwords or card numbers for anyone to steal.</li>
     <li><strong>Encrypted connections.</strong> Every page is delivered over HTTPS. A request made without it is sent to the secure address.</li>
     <li><strong>Plain pages.</strong> The site is a set of ready-made pages. There is no database behind them.</li>
-    <li><strong>A small game server.</strong> The arcade demo's server holds only game information (a random pilot number, a made-up callsign, scores and ship positions) and forgets a pilot about two minutes after they leave.</li>
+    <li>
+      <strong>A small game server.</strong> The arcade demo's server holds only game information (a random pilot
+      number, a made-up callsign, scores and ship positions) and forgets a pilot about two minutes after they leave.{coopShown && (
+        ' Squad rooms for Fly with friends run in temporary Cloudflare rooms behind Amazon CloudFront; they strip any free text and delete their room state when the room closes.'
+      )}
+    </li>
     <li><strong>No advertising networks.</strong> The pages load their fonts and code from this site. The one outside service is Google Analytics, set up as the <a href="/privacy/">privacy page</a> describes.</li>
     <li><strong>Checked before it goes live.</strong> Every change is checked automatically for mistakes before it is published, and the arcade demo's rules are covered by automated tests.</li>
     <li><strong>Open to inspection.</strong> The site's code is public on <a href="https://github.com/davewgeurts/geurtsgaming" target="_blank" rel="noopener">GitHub</a>, so anyone can see exactly what it does.</li>

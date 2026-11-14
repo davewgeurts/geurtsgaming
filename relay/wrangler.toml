@@ -1,0 +1,37 @@
+name = "gg-relay"
+main = "worker.mjs"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+# Keep Worker invocation & IP logging off so /privacy/'s zero-IP-logging promise stays true.
+[observability]
+enabled = false
+
+[vars]
+RELAY_ENV = "production"
+
+[[durable_objects.bindings]]
+name = "COOP_ROOMS"
+class_name = "CoopRoomDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CoopRoomDO"]
+
+[env.staging]
+name = "gg-relay-staging"
+workers_dev = true
+
+[env.staging.observability]
+enabled = false
+
+[env.staging.vars]
+RELAY_ENV = "staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "COOP_ROOMS"
+class_name = "CoopRoomDO"
+
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["CoopRoomDO"]

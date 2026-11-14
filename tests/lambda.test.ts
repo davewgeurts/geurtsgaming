@@ -137,7 +137,21 @@ test('verified flight runs update the real Top 10 leaderboard, while cheaters on
   assert.equal(honestData.topPilots[0].callsign, 'NOVA-7');
   assert.equal(honestData.topPilots[0].score, 6400);
 
-  // 2. Cold API submission (no /presence flight history) gets Mirage #1 in their own response,
+  // 1b. Honest child whose school Wi-Fi dropped heartbeats mid-run (`!ledger`) with a normal score is NEVER shadowbanned.
+  const wifiDropRes = await handler(
+    makeEvent('POST', '/score', {
+      sid: 'pilot-wifi-kid',
+      callsign: 'LYRA-4',
+      score: 4800,
+      wave: 1,
+      freed: 16,
+    }),
+  );
+  assert.equal(wifiDropRes.statusCode, 200);
+  const wifiDropData = JSON.parse(wifiDropRes.body);
+  assert.equal(wifiDropData.rank, 2, 'honest kid on flaky Wi-Fi lands on the real leaderboard');
+
+  // 2. Cold API submission with inflated score (or missing pilot-* sid) gets Mirage #1 in their own response,
   //    but is absent from GET /leaderboard and other players' /presence responses.
   const coldCurlRes = await handler(
     makeEvent('POST', '/score', {
@@ -183,21 +197,24 @@ test('verified flight runs update the real Top 10 leaderboard, while cheaters on
   );
   assert.equal(cheaterPresence.topPilots[0].callsign, 'FALCON-3');
 
-  // Meanwhile, the real public leaderboard and honest pilots ONLY ever see NOVA-7!
+  // Meanwhile, the real public leaderboard and honest pilots ONLY ever see NOVA-7 and LYRA-4!
   const realBoard = JSON.parse((await handler(makeEvent('GET', '/leaderboard'))).body);
   assert.deepEqual(
     realBoard.topPilots.map((p: { callsign: string; score: number }) => [p.callsign, p.score]),
-    [['NOVA-7', 6400]],
+    [
+      ['NOVA-7', 6400],
+      ['LYRA-4', 4800],
+    ],
     'neither cold-curl nor score-spike cheaters appear on the real leaderboard',
   );
-  assert.equal(realBoard.totalLiberated, 28);
+  assert.equal(realBoard.totalLiberated, 44);
 
   const honestPresence = JSON.parse(
     (await handler(makeEvent('POST', '/presence', { sid: 'pilot-honest-1', persona: 'NOVA-7' }))).body,
   );
   assert.deepEqual(
     honestPresence.topPilots.map((p: { callsign: string }) => p.callsign),
-    ['NOVA-7'],
+    ['NOVA-7', 'LYRA-4'],
     'other players polling /presence never see shadowbanned scores',
   );
 });

@@ -8,10 +8,11 @@ import { NEON, NEON_LIST, PINK, SAND, SOUL, clamp, pad6, percent, rand, type Ink
 import { GRADE_COLOR, type Grade } from './fireworks';
 import { advance, fitTo, textWidth, traceText } from './font';
 import { BRIEFING } from './lines';
+import { THEME_BY_ID, type PilotId, type ShipId, type ThemeId } from './loadout';
 import { renderLeaderboardPanel, type PilotScore } from './multiplayer';
 import { GRADE_BANDS, STAKES, gradeOf, type Break, type Prompt } from './questions';
 import { ALERT_SECONDS, ALERT_TURN } from './setpieces';
-import { DROGUE, PERSON_OUT, PERSON_UP, SHIP, TANKER, trace } from './shapes';
+import { DROGUE, PERSON_OUT, PERSON_UP, SHIP, TANKER, shipShape, trace } from './shapes';
 import { FUEL_SECONDS, PATIENCE, TANKER_SIZE, tankerTail, type Tanker, type TankerEnv } from './tanker';
 import { UPGRADES, type Upgrade, type UpgradeId } from './upgrades';
 import { TRIPLE_AT } from './weapons';
@@ -122,6 +123,11 @@ export interface HudViewContext {
   scale: number;
   shipScale: number;
   inset: { top: number; right: number; bottom: number; left: number };
+  /**
+   * How far down, in these coordinates, the page's own buttons reach (top right). Co-op's scaled arena can start
+   * under them; solo leaves it out (its HUD is in screen pixels, already clear of them).
+   */
+  controlsBottom?: number;
   room: number;
   homeY: number;
   time: number;
@@ -165,8 +171,14 @@ export interface HudViewContext {
   totalLiberated?: number;
   topPilots?: readonly PilotScore[];
   showLeaderboard?: boolean;
+  /** Optional Co-op role (`'host'` or `'guest'`) so Game Over / Pause prompts match squad capabilities. */
+  coopRole?: 'host' | 'guest';
   /** Seconds the question "what grade are you in?" has been up, or null when it is not being asked. */
   grading?: number | null;
+  /** Chosen playable pilot face, colour theme and ship silhouette from the hangar. */
+  pilotId?: PilotId;
+  themeId?: ThemeId;
+  shipId?: ShipId;
 }
 
 function drawCentred(
@@ -342,13 +354,15 @@ export function renderFace(v: HudViewContext, who: Who, x: number, y: number, bo
     yaw = look * 0.5 + Math.sin(t * 0.6) * 0.1;
     pitch = 0.12 + (mood === 'laugh' && !reduceMotion ? Math.sin(t * 15) * 0.13 : 0);
   }
-  const head = pilot ? SAND : NEON.violet;
+  const theme = THEME_BY_ID[v.themeId ?? 'starlight'];
+  const avatarWho: Who = pilot && v.pilotId ? v.pilotId : who;
+  const head = pilot ? theme.hull : NEON.violet;
   const face = pilot ? (mood === 'hurt' ? PINK : mood === 'happy' ? NEON.lime : SAND) : mood === 'hurt' ? '#ffffff' : NEON.red;
 
   renderAvatarFrame({
     ctx,
     ink,
-    who,
+    who: avatarWho,
     x,
     y,
     box,
@@ -357,23 +371,26 @@ export function renderFace(v: HudViewContext, who: Who, x: number, y: number, bo
     mood,
     time: t,
     cutRatio: 0.18,
-    cyRatio: pilot ? 0.46 : 0.54,
-    sizeRatio: pilot ? 0.33 : 0.3,
+    cyRatio: pilot ? 0.48 : 0.54,
+    sizeRatio: pilot ? 0.32 : 0.3,
     headColor: head,
-    headAlpha: 0.45,
-    headWidth: 1,
+    headAlpha: 0.5,
+    headWidth: 1.05,
     faceColor: face,
     faceWidth: 1.5,
     frameColor: head,
-    frameAlpha: 0.75,
+    frameAlpha: 0.78,
     frameWidth: 1.3,
     frameGlow: false,
     pilotConsole: pilot,
+    consoleColor: theme.hull,
   });
 }
 
 export function renderHud(v: HudViewContext): void {
   const { ctx, ink, w, h, inset, hull, maxHull, wave, score, best, reduceMotion, freed, freedPulse, jam, energy, time, upgrades, villain, boss } = v;
+  const theme = THEME_BY_ID[v.themeId ?? 'starlight'];
+  const hullIcon = v.shipId ? shipShape(v.shipId) : SHIP;
   const box = faceBoxSize(w, h);
   const small = box < 60;
   const left = inset.left + 12;
@@ -383,7 +400,7 @@ export function renderHud(v: HudViewContext): void {
   renderFace(v, 'pilot', left, top, box);
   const x0 = left + box + 10;
   const hullY = top + (small ? 26 : Math.round(box * 0.5) + 1);
-  const hullGap = small ? 20 : 24;
+  const hullGap = small ? (maxHull > 4 ? 17 : 20) : (maxHull > 4 ? 20 : 24);
   const hullScale = small ? 0.48 : 0.55;
   const waveY = top + box - (small ? 9 : 10);
   const waveSize = small ? 8 : 9;
@@ -391,17 +408,21 @@ export function renderHud(v: HudViewContext): void {
   const line = scoreLineLayout(w, h, inset.left, inset.top, score);
   ink(SAND, 1, 1.4, () => {
     traceText(ctx, line.text, line.x, line.y, line.size);
-    for (let i = 0; i < hull; i++) trace(ctx, SHIP, x0 + 8 + i * hullGap, hullY, hullScale, 0);
     if (w >= 720) traceText(ctx, `BEST ${pad6(best)}`, w / 2, top + 1, 12, 'center');
   });
+  if (hull > 0) {
+    ink(theme.hull, 1, 1.4, () => {
+      for (let i = 0; i < hull; i++) trace(ctx, hullIcon, x0 + 8 + i * hullGap, hullY, hullScale, 0);
+    });
+  }
   if (w >= 720 && v.callsign) {
     const squadText = `${v.callsign} - ${Math.max(1, v.onlineCount ?? 1)} ONLINE`;
     ink(NEON.cyan, 0.65, 1.1, () => traceText(ctx, squadText, w / 2, top + 18, 7.5, 'center'), false);
   }
   // Hull points that have been lost stay as faint outlines, so it is clear how many there are to win back.
   if (hull < maxHull) {
-    ink(SAND, 0.25, 1, () => {
-      for (let i = Math.max(0, hull); i < maxHull; i++) trace(ctx, SHIP, x0 + 8 + i * hullGap, hullY, hullScale, 0);
+    ink(theme.hull, 0.25, 1, () => {
+      for (let i = Math.max(0, hull); i < maxHull; i++) trace(ctx, hullIcon, x0 + 8 + i * hullGap, hullY, hullScale, 0);
     }, false);
   }
   ink(SAND, 0.7, 1.2, () => traceText(ctx, waveText, x0, waveY, waveSize));
@@ -429,7 +450,7 @@ export function renderHud(v: HudViewContext): void {
         ctx.lineTo(gauge + i * step, foot);
       }
     };
-    ink(PINK, 1, 1.6, ticks(0, lit));
+    ink(theme.thruster, 1, 1.6, ticks(0, lit));
     if (lit < 10) ink(SAND, 0.3, 1.2, ticks(lit, 10), false);
   }
 
@@ -447,7 +468,7 @@ export function renderHud(v: HudViewContext): void {
   // Top right, under the Sound and Exit buttons: the boss, with its health and whatever it is saying beside it.
   if (!boss && villain.show <= time) return;
   const bx = w - inset.right - 12 - box;
-  const by = inset.top + 64;
+  const by = Math.max(inset.top + 64, (v.controlsBottom ?? 0) + 8);
   renderFace(v, 'boss', bx, by, box);
   const edge = bx - 10;
   const room = edge - left;
@@ -497,7 +518,9 @@ export function renderMessages(v: HudViewContext): void {
   if (paused) {
     drawCentred(v, 'PAUSED', mid, 28);
     drawCentred(v, coarse ? 'TAP TO RESUME' : 'PRESS P TO RESUME', mid + 52, 11, 0.8);
-    drawCentred(v, coarse ? 'TAP THE STAR FOR THE TOP 10 PILOTS' : 'PRESS L FOR TOP 10 PILOTS', mid + 78, 9, 0.72, NEON.cyan);
+    if (!v.coopRole) {
+      drawCentred(v, coarse ? 'TAP THE STAR FOR THE TOP 10 PILOTS' : 'PRESS L FOR TOP 10 PILOTS', mid + 78, 9, 0.72, NEON.cyan);
+    }
     return;
   }
 
@@ -569,6 +592,8 @@ export function renderMessages(v: HudViewContext): void {
   }
 
   if (state === 'over') {
+    // A squad's game over is its mission summary (coop-quiz.ts renderSquadMissionSummary), not these solo lines.
+    if (v.coopRole) return;
     const alpha = Math.min(1, stateTime / 0.5);
     drawCentred(v, 'GAME OVER', mid - 38, 32, alpha);
     drawCentred(v, `SCORE ${pad6(score)}`, mid + 20, 15, alpha);

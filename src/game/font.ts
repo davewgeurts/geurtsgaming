@@ -64,6 +64,11 @@ const GLYPHS = new Map<string, number[][]>(
 );
 
 /** Distance in px from the start of one character to the start of the next, at the given cap height. */
+/** Whether the line font can draw `ch` (a space always can). Anything else comes out as a blank. */
+export function hasGlyph(ch: string): boolean {
+  return ch === ' ' || GLYPHS.has(ch.toUpperCase());
+}
+
 export function advance(size: number): number {
   return ADVANCE * (size / CELL_HEIGHT);
 }

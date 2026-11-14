@@ -24,6 +24,10 @@ jobs:
         uses: withastro/action@v5
         with:
           node-version: 24
+        env:
+          # Keep "Fly with friends" hidden on main ('off') until the relay is live,
+          # switch to 'playtest' (?coop=1 / ?j=ABCDEF) for family testing, then 'on' for everyone.
+          PUBLIC_COOP_MODE: ${{ vars.PUBLIC_COOP_MODE || 'off' }}
 
   deploy:
     needs: build

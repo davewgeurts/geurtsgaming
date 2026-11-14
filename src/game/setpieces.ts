@@ -6,7 +6,7 @@
  * Nothing here draws or touches the page: what the game should do about each thing that happens (a sound,
  * some points, a line for a screen reader) is asked of it through `SetPieceEnv`.
  */
-import { createField, updateField, type Field, type FieldEnv, type Rock } from './asteroids';
+import { createField, randomFieldSeed, updateField, type Field, type FieldEnv, type Rock } from './asteroids';
 import type { Mood } from './avatar';
 import { NEON, PEBBLE, ROCK, SAND, percent } from './core';
 import { BRIEFING } from './lines';
@@ -74,6 +74,12 @@ export interface SetPieceEnv {
   bomb(x: number, y: number, ride: number): void;
   /** Put a power-up into the asteroid field. `last` is the one at the far end of the hard way: the big prize. */
   capsule(x: number, y: number, ride: number, last: boolean): void;
+  /** When true, generates deterministic seeded asteroid fields and fires co-op set-piece hooks. */
+  seeded?: boolean;
+  onTankerStart?(wave: number): void;
+  onFieldAlarm?(wave: number, seed: number): void;
+  onFieldStart?(wave: number, seed: number): void;
+  onRockBroken?(rock: Rock): void;
 }
 
 export class SetPieces {
@@ -85,6 +91,8 @@ export class SetPieces {
   tanker: Tanker | null = null;
   /** The asteroid field, the rocks of it that are on screen, and how many times it has hit the ship. */
   field: Field | null = null;
+  fieldSeed: number | null = null;
+  readonly brokenRockIds: number[] = [];
   readonly near: Rock[] = [];
   fieldHits = 0;
   /** Seconds the commander's asteroid warning has been up, or null when it is not. */
@@ -99,6 +107,8 @@ export class SetPieces {
   plan(stops: Stop[]): void {
     this.tanker = null;
     this.field = null;
+    this.fieldSeed = null;
+    this.brokenRockIds.length = 0;
     this.near.length = 0;
     this.alert = null;
     this.due = null;
@@ -178,7 +188,7 @@ export class SetPieces {
     return fuel;
   }
 
-  private fieldEnv(env: SetPieceEnv): FieldEnv {
+  private fieldEnv(env: SetPieceEnv, seed?: number): FieldEnv {
     const rocks = this.rockEnv;
     rocks.w = env.w;
     rocks.h = env.h;
@@ -187,6 +197,7 @@ export class SetPieces {
     rocks.scale = env.scale;
     rocks.pace = env.pace;
     rocks.wave = env.wave;
+    rocks.seed = seed;
     return rocks;
   }
 
@@ -194,6 +205,7 @@ export class SetPieces {
     this.tanker = createTanker(env.wave, this.tankerEnv(env));
     env.play('tanker');
     env.say(`A fuel ship has arrived. Fly up behind it, catch the end of its fuel line with the nose of the ship, and stay hooked on for ${FUEL_SECONDS} seconds. It will not hold still.`);
+    env.onTankerStart?.(env.wave);
   }
 
   /** Fly the fuel ship, and pay out its fuel: energy for as long as the line is on, and a bonus for a full tank. */
@@ -237,6 +249,8 @@ export class SetPieces {
   /** The flight commander bursts in, worried: asteroids ahead. The field itself sets off a moment later. */
   private raiseAlarm(env: SetPieceEnv): void {
     this.alert = 0;
+    this.fieldSeed = env.seeded ? randomFieldSeed() : null;
+    this.brokenRockIds.length = 0;
     env.play('alarm');
     env.radio(BRIEFING.asteroids.join(' '));
     env.feel('worried', ALERT_TURN + 1);
@@ -245,15 +259,25 @@ export class SetPieces {
       'The easy way is wide and has bombs in it, which ask a question if touched. The hard way is narrow and has power-ups instead. ' +
       'Little rocks break in one shot; the rest take many.',
     );
+    if (this.fieldSeed !== null) {
+      env.onFieldAlarm?.(env.wave, this.fieldSeed);
+    }
   }
 
   private startField(env: SetPieceEnv): void {
-    const f = createField(this.fieldEnv(env));
+    if (env.seeded && this.fieldSeed === null) {
+      this.fieldSeed = randomFieldSeed();
+    }
+    const f = createField(this.fieldEnv(env, this.fieldSeed ?? undefined));
     this.field = f;
     this.fieldHits = 0;
+    this.brokenRockIds.length = 0;
     for (const b of f.bombs) env.bomb(b.x, f.front - b.d, f.speed);
     // The hard way's power-ups: boosts, and at the far end the big prize.
     f.prizes.forEach((p, i) => env.capsule(p.x, f.front - p.d, f.speed, i === f.prizes.length - 1));
+    if (this.fieldSeed !== null) {
+      env.onFieldStart?.(env.wave, this.fieldSeed);
+    }
   }
 
   /** Run the warning and then the asteroid field. */
@@ -270,7 +294,7 @@ export class SetPieces {
     }
     const f = this.field;
     if (!f) return;
-    updateField(f, dt, real, this.fieldEnv(env));
+    updateField(f, dt, real, this.fieldEnv(env, f.seed));
     if (f.rocks.some((rock) => rock.dead)) f.rocks = f.rocks.filter((rock) => !rock.dead);
     // Only the rocks on screen are drawn or can be hit.
     this.near.length = 0;
@@ -280,6 +304,8 @@ export class SetPieces {
     }
     if (!f.done) return;
     this.field = null;
+    this.fieldSeed = null;
+    this.brokenRockIds.length = 0;
     this.near.length = 0;
     if (!env.playing) return;
     const clean = this.fieldHits === 0;
@@ -323,9 +349,88 @@ export class SetPieces {
   breakRock(rock: Rock, env: SetPieceEnv): void {
     if (rock.dead || !this.field) return;
     rock.dead = true;
+    this.brokenRockIds.push(rock.id);
     env.award(rock.tough ? ROCK_POINTS : PEBBLE_POINTS);
     env.burst(rock.shape, rock.x, this.field.front - rock.d, rock.rot, rock.tough ? ROCK : PEBBLE);
     env.play('boom');
+    env.onRockBroken?.(rock);
+  }
+
+  /** Break a rock by deterministic `Rock.id` on a co-op Guest (playing burst + boom if still present). */
+  breakRockById(rockId: number, env: SetPieceEnv): void {
+    const f = this.field;
+    if (!f) return;
+    const rock = f.rocks.find((r) => r.id === rockId && !r.dead);
+    if (!rock) return;
+    rock.dead = true;
+    this.brokenRockIds.push(rock.id);
+    env.burst(rock.shape, rock.x, f.front - rock.d, rock.rot, rock.tough ? ROCK : PEBBLE);
+    env.play('boom');
+  }
+
+  /** Trigger the Flight Commander's asteroid warning on a co-op Guest with the Host's chosen seed. */
+  startSyncedFieldAlarm(seed: number, env: SetPieceEnv): void {
+    this.fieldSeed = seed >>> 0;
+    this.brokenRockIds.length = 0;
+    this.alert = 0;
+    env.play('alarm');
+    env.radio(BRIEFING.asteroids.join(' '));
+    env.feel('worried', ALERT_TURN + 1);
+  }
+
+  /**
+   * Synchronize a co-op Guest's asteroid belt with the Host's authoritative seed, front position,
+   * warning clock, and already-broken rock IDs (used both during flight and on mid-field reconnect).
+   */
+  syncFieldState(
+    wave: number,
+    seed: number,
+    front: number | null,
+    alert: number | null,
+    brokenIds: readonly number[],
+    env: SetPieceEnv,
+  ): void {
+    const cleanSeed = seed >>> 0;
+    const cleanWave = Number.isFinite(wave) ? Math.max(1, Math.min(99, Math.round(wave))) : 1;
+    const cleanAlert =
+      alert === null || !Number.isFinite(alert) ? null : Math.max(0, Math.min(20, alert));
+    this.fieldSeed = cleanSeed;
+    this.alert = cleanAlert;
+    if (front === null || !Number.isFinite(front)) {
+      this.field = null;
+      this.near.length = 0;
+      return;
+    }
+    const cleanFront = Math.max(-2000, Math.min(40000, front));
+    if (!this.field || this.field.seed !== cleanSeed) {
+      const fEnv = this.fieldEnv(env, cleanSeed);
+      fEnv.wave = cleanWave;
+      this.field = createField(fEnv);
+      this.fieldHits = 0;
+    }
+    this.field.front = cleanFront;
+    if (brokenIds.length > 0) {
+      const deadSet = new Set(brokenIds);
+      for (const rock of this.field.rocks) {
+        if (deadSet.has(rock.id)) rock.dead = true;
+      }
+      if (this.field.rocks.some((r) => r.dead)) {
+        this.field.rocks = this.field.rocks.filter((r) => !r.dead);
+      }
+    }
+    this.refreshNearRocks(env.h);
+  }
+
+  /** Recompute `this.near` from `this.field.front` for Guest rendering without spawning Host pickups. */
+  refreshNearRocks(viewH: number): void {
+    this.near.length = 0;
+    const f = this.field;
+    if (!f) return;
+    for (const rock of f.rocks) {
+      if (rock.dead) continue;
+      const y = f.front - rock.d;
+      if (y > -rock.r - 8 && y < viewH + rock.r + 8) this.near.push(rock);
+    }
   }
 
   /** The ship has flown into a rock: a little one breaks on it, and the field has left its mark. */

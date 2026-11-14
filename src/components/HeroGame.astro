@@ -3,18 +3,35 @@
  * Launch button for the hero arcade game, plus the full-screen overlay it plays in (with its Pause, Sound and Exit buttons).
  * The game code (src/game/) is only downloaded when someone presses the button.
  */
+import { resolveCoopMode } from '../game/coop-mode';
+
+const coopMode = resolveCoopMode();
 ---
 <div class="launch-slot">
-  <button class="launch" type="button" data-game-launch aria-haspopup="dialog">
-    <svg class="launch-ship" viewBox="-16 -19 32 42" width="40" height="52" aria-hidden="true">
-      <path d="M0 -16 L4 -4 L13 10 L5 7 L3 12 L-3 12 L-5 7 L-13 10 L-4 -4 Z M0 -8 L2 -3 L0 1 L-2 -3 Z" />
-      <path class="flame" d="M-3 13 L0 20 L3 13" />
-    </svg>
-    <span class="launch-text">
-      <span class="launch-label">Play the demo</span>
-      <span class="launch-hint">Fly · Type · Solve</span>
-    </span>
-  </button>
+  <div class="launch-actions">
+    <button class="launch" type="button" data-game-launch aria-haspopup="dialog">
+      <svg class="launch-ship" viewBox="-16 -19 32 42" width="40" height="52" aria-hidden="true">
+        <path d="M0 -16 L4 -4 L13 10 L5 7 L3 12 L-3 12 L-5 7 L-13 10 L-4 -4 Z M0 -8 L2 -3 L0 1 L-2 -3 Z" />
+        <path class="flame" d="M-3 13 L0 20 L3 13" />
+      </svg>
+      <span class="launch-text">
+        <span class="launch-label">Play the demo</span>
+        <span class="launch-hint">Fly · Type · Solve</span>
+      </span>
+    </button>
+    {coopMode !== 'off' && (
+      <button class="coop-launch" type="button" data-coop-launch hidden={coopMode === 'playtest'} aria-haspopup="dialog">
+        <svg class="coop-launch-ships" viewBox="0 0 36 28" width="28" height="22" aria-hidden="true">
+          <path d="M11 3 L14 11 L20 21 L14 19 L13 23 L9 23 L8 19 L2 21 L8 11 Z" />
+          <path d="M25 6 L27.5 12.5 L33 21 L27.5 19.5 L26.5 23 L23.5 23 L22.5 19.5 L17 21 L22.5 12.5 Z" />
+        </svg>
+        <span class="coop-launch-text">
+          <span class="coop-launch-label">Fly with friends</span>
+          <span class="coop-launch-hint">2–4 Pilots · QR or Code</span>
+        </span>
+      </button>
+    )}
+  </div>
   <div class="squad-pill" data-squad-pill>
     <span class="squad-dot" aria-hidden="true"></span>
     <span data-squad-online>1 PILOT ONLINE</span>
@@ -26,6 +43,11 @@
 <div class="arcade" data-game-overlay hidden role="dialog" aria-modal="true" aria-label="Arcade demo: fly the ship, shoot the enemies, and type or solve sums to power up" tabindex="-1">
   <canvas class="arcade-canvas"></canvas>
   <div class="arcade-controls">
+    <button class="arcade-btn arcade-icon arcade-hangar" type="button" data-game-hangar hidden aria-label="Hangar: change pilot and ship" aria-pressed="false" title="Hangar (H)">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path d="M12 4 L15.5 10.5 L20 18 L14.5 16 L13.5 19.5 L10.5 19.5 L9.5 16 L4 18 L8.5 10.5 Z M12 8 L13.4 11.2 L12 13.6 L10.6 11.2 Z" />
+      </svg>
+    </button>
     <button class="arcade-btn arcade-icon arcade-ranks" type="button" data-game-ranks aria-label="Top 10 Pilots" aria-pressed="false" title="Top 10 Pilots (L)">
       <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
         <path d="M12 4.5 L14.2 9 L19.2 9.7 L15.6 13.2 L16.5 18.2 L12 15.8 L7.5 18.2 L8.4 13.2 L4.8 9.7 L9.8 9 Z" />
@@ -46,8 +68,34 @@
     </button>
     <button class="arcade-btn" type="button" data-game-exit>Exit</button>
   </div>
+  <div
+    class="coop-leave-confirm"
+    data-coop-leave-confirm
+    hidden
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="coop-leave-title"
+    aria-describedby="coop-leave-desc"
+  >
+    <div class="coop-leave-card">
+      <h2 id="coop-leave-title" class="coop-leave-title">Leave Squad Flight?</h2>
+      <p id="coop-leave-desc" class="coop-leave-desc" data-coop-leave-desc>
+        Leaving gives up your seat in this squad flight.
+      </p>
+      <div class="coop-leave-actions">
+        <button type="button" class="coop-leave-btn coop-leave-stay" data-coop-stay>Stay in Flight</button>
+        <button type="button" class="coop-leave-btn coop-leave-danger" data-coop-confirm-leave>Leave Squad</button>
+      </div>
+    </div>
+  </div>
   <p class="visually-hidden" aria-live="polite" data-game-status></p>
 </div>
+
+{coopMode !== 'off' && (
+  <div class="coop-modal" data-coop-overlay hidden role="dialog" aria-modal="true" aria-labelledby="coop-modal-title" tabindex="-1">
+    <div class="coop-dialog" data-coop-panel tabindex="-1"></div>
+  </div>
+)}
 
 <style>
   /* The hero's headline act: a neon-framed button on a line of its own above the other buttons. */
@@ -58,6 +106,66 @@
     align-items: center;
     justify-content: center;
     gap: 8px;
+  }
+  .launch-actions {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+  }
+  .coop-launch {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    min-height: 54px;
+    padding: 8px 20px;
+    border-radius: 14px;
+    border: 1px solid rgba(66, 245, 255, 0.45);
+    background: rgba(4, 12, 46, 0.78);
+    color: var(--sand);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    box-shadow: 0 0 18px rgba(66, 245, 255, 0.14);
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .coop-launch-ships {
+    flex: none;
+    fill: none;
+    stroke: #42f5ff;
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    filter: drop-shadow(0 0 6px rgba(66, 245, 255, 0.6));
+  }
+  .coop-launch-text { display: grid; gap: 3px; }
+  .coop-launch-label {
+    font-family: var(--font-display);
+    font-size: 0.86rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .coop-launch-hint {
+    font-family: var(--font-display);
+    font-size: 0.56rem;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: #7ef0f7;
+    white-space: nowrap;
+  }
+  .coop-launch:active { transform: scale(0.98); }
+  @media (hover: hover) {
+    .coop-launch:hover {
+      transform: translateY(-2px);
+      border-color: #42f5ff;
+      box-shadow: 0 0 24px rgba(66, 245, 255, 0.3);
+    }
   }
   .squad-pill {
     display: inline-flex;
@@ -191,14 +299,19 @@
   @media (min-width: 641px) and (max-height: 720px) {
     .launch-slot { width: auto; }
     .launch { width: auto; min-height: 52px; padding: 6px 22px 6px 16px; gap: 12px; }
+    .coop-launch { min-height: 48px; padding: 6px 16px; }
     .launch-ship { width: 22px; }
     .launch-label { font-size: 0.95rem; }
-    .launch-hint, .squad-pill { display: none; }
+    .launch-hint, .coop-launch-hint, .squad-pill { display: none; }
   }
   /* Small phones: one line, to leave the rest of the hero its room. */
   @media (max-width: 420px) and (max-height: 700px) {
     .launch { min-height: 56px; }
-    .launch-hint, .squad-pill { display: none; }
+    .coop-launch { width: min(100%, 360px); min-height: 46px; }
+    .launch-hint, .coop-launch-hint, .squad-pill { display: none; }
+  }
+  @media (max-width: 480px) {
+    .coop-launch { width: min(100%, 360px); }
   }
   @property --spin { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
   @keyframes spin { to { --spin: 360deg; } }
@@ -208,6 +321,7 @@
 
   /* While the game is open the ship has "left" the hero and the page behind is frozen. */
   :global(html.game-active) .launch,
+  :global(html.game-active) .coop-launch,
   :global(html.game-active) .squad-pill { visibility: hidden; }
   :global(html.game-active) .launch::before,
   :global(html.game-active) .launch::after { animation: none; }
@@ -278,6 +392,7 @@
     cursor: pointer;
     transition: background 0.15s ease, border-color 0.15s ease;
   }
+  .arcade-btn[hidden] { display: none; }
   /* The icons are drawn like everything else in the game: thin lines, nothing filled. */
   .arcade-icon { min-width: 44px; padding: 0; }
   .arcade-icon svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
@@ -291,6 +406,7 @@
     .arcade-btn { min-width: 44px; padding: 0 10px; letter-spacing: 0.14em; }
     .arcade-icon { padding: 0; }
   }
+  .arcade-hangar[aria-pressed='true'],
   .arcade-ranks[aria-pressed='true'] { color: #42f5ff; border-color: #42f5ff; }
   .arcade-sound .cross { display: none; }
   .arcade-sound[aria-pressed='false'] { color: color-mix(in srgb, var(--sand) 60%, transparent); }
@@ -303,20 +419,433 @@
   @media (prefers-reduced-motion: reduce) {
     .launch-ship, .flame, .launch::before, .launch::after, .squad-dot { animation: none; }
   }
+
+  /* Co-op Leave Confirmation Sheet */
+  .coop-leave-confirm {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    background: rgba(3, 7, 26, 0.82);
+    backdrop-filter: blur(6px);
+  }
+  .coop-leave-confirm[hidden] { display: none; }
+  .coop-leave-card {
+    width: min(100%, 380px);
+    padding: 20px;
+    border-radius: 16px;
+    background: linear-gradient(180deg, rgba(8, 20, 66, 0.98), rgba(4, 10, 36, 0.99));
+    border: 1px solid rgba(66, 245, 255, 0.42);
+    box-shadow: 0 20px 54px rgba(0, 0, 0, 0.65), 0 0 26px rgba(66, 245, 255, 0.16);
+    color: var(--sand);
+    display: grid;
+    gap: 12px;
+    text-align: center;
+  }
+  .coop-leave-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: 1rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #42f5ff;
+  }
+  .coop-leave-desc {
+    margin: 0;
+    font-size: 0.92rem;
+    line-height: 1.45;
+    color: color-mix(in srgb, var(--sand) 90%, #7ef0f7);
+  }
+  .coop-leave-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 4px;
+  }
+  .coop-leave-btn {
+    min-height: 44px;
+    padding: 0 14px;
+    border-radius: 10px;
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .coop-leave-stay {
+    background: rgba(66, 245, 255, 0.16);
+    border: 1px solid #42f5ff;
+    color: #ffffff;
+  }
+  .coop-leave-danger {
+    background: rgba(255, 94, 168, 0.14);
+    border: 1px solid rgba(255, 94, 168, 0.65);
+    color: #ff9ec7;
+  }
+
+  /* Co-op 4-Seat Hangar Modal */
+  .coop-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    display: grid;
+    place-items: center;
+    padding:
+      calc(12px + env(safe-area-inset-top))
+      calc(12px + env(safe-area-inset-right))
+      calc(12px + env(safe-area-inset-bottom))
+      calc(12px + env(safe-area-inset-left));
+    background: rgba(3, 7, 26, 0.88);
+    backdrop-filter: blur(8px);
+    overflow-y: auto;
+    outline: none;
+  }
+  .coop-modal[hidden] { display: none; }
+  .coop-dialog {
+    width: min(100%, 540px);
+    max-height: calc(100dvh - 28px);
+    overflow-y: auto;
+    padding: 20px;
+    border-radius: 18px;
+    background: linear-gradient(180deg, rgba(8, 20, 66, 0.96), rgba(4, 10, 36, 0.98));
+    border: 1px solid rgba(66, 245, 255, 0.38);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.65), 0 0 32px rgba(66, 245, 255, 0.14);
+    color: var(--sand);
+    display: grid;
+    gap: 14px;
+  }
+  .coop-dialog :global(.coop-head) {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .coop-dialog :global(.coop-eyebrow) {
+    margin: 0 0 4px;
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #7ef0f7;
+  }
+  .coop-dialog :global(.coop-title) {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: clamp(1.15rem, 4.5vw, 1.45rem);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .coop-dialog :global(.coop-code-badge) {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 8px;
+    background: rgba(66, 245, 255, 0.14);
+    border: 1px solid rgba(66, 245, 255, 0.55);
+    color: #42f5ff;
+    letter-spacing: 0.18em;
+  }
+  .coop-dialog :global(.coop-icon-btn) {
+    min-width: 40px;
+    min-height: 40px;
+    border-radius: 10px;
+    border: 1px solid rgba(236, 223, 210, 0.35);
+    background: transparent;
+    color: var(--sand);
+    font-size: 1rem;
+    cursor: pointer;
+  }
+  .coop-dialog :global(.coop-choose-grid) {
+    display: grid;
+    gap: 12px;
+  }
+  .coop-dialog :global(.coop-primary-card),
+  .coop-dialog :global(.coop-join-card) {
+    display: grid;
+    gap: 8px;
+    padding: 16px;
+    border-radius: 14px;
+    border: 1px solid rgba(66, 245, 255, 0.35);
+    background: rgba(6, 15, 52, 0.85);
+    color: var(--sand);
+    text-align: left;
+    font: inherit;
+  }
+  .coop-dialog :global(.coop-primary-card) {
+    cursor: pointer;
+    border-color: rgba(155, 255, 77, 0.5);
+    transition: transform 0.12s ease, border-color 0.12s ease;
+  }
+  .coop-dialog :global(.coop-primary-card:hover) {
+    transform: translateY(-1px);
+    border-color: #9bff4d;
+  }
+  .coop-dialog :global(.coop-card-kicker) {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #7ef0f7;
+  }
+  .coop-dialog :global(.coop-card-heading) {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #9bff4d;
+  }
+  .coop-dialog :global(.coop-card-sub) {
+    font-size: 0.86rem;
+    opacity: 0.86;
+    line-height: 1.35;
+  }
+  .coop-dialog :global(.coop-join-row) {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .coop-dialog :global(.coop-code-input) {
+    flex: 1 1 150px;
+    min-width: 0;
+    min-height: 46px;
+    padding: 0 14px;
+    border-radius: 10px;
+    border: 1px solid rgba(66, 245, 255, 0.5);
+    background: rgba(2, 6, 24, 0.9);
+    color: #fff;
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+  .coop-dialog :global(.coop-btn) {
+    min-height: 44px;
+    padding: 0 16px;
+    border-radius: 10px;
+    border: 1px solid rgba(66, 245, 255, 0.55);
+    background: rgba(66, 245, 255, 0.14);
+    color: var(--sand);
+    font-family: var(--font-display);
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .coop-dialog :global(.coop-btn:disabled) {
+    opacity: 0.42;
+    cursor: not-allowed;
+  }
+  .coop-dialog :global(.coop-btn-ghost) {
+    border-color: rgba(236, 223, 210, 0.35);
+    background: transparent;
+  }
+  .coop-dialog :global(.coop-btn-accent) {
+    border-color: #42f5ff;
+    background: rgba(66, 245, 255, 0.24);
+    color: #fff;
+  }
+  .coop-dialog :global(.coop-btn-ready-on),
+  .coop-dialog :global(.coop-btn-launch) {
+    width: 100%;
+    min-height: 48px;
+    border-color: #9bff4d;
+    background: rgba(155, 255, 77, 0.22);
+    color: #eaffd6;
+    font-size: 0.84rem;
+  }
+  .coop-dialog :global(.coop-footer .coop-btn-accent) {
+    width: 100%;
+    min-height: 48px;
+    font-size: 0.84rem;
+  }
+  .coop-dialog :global(.coop-invite-bar) {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border-radius: 12px;
+    background: rgba(2, 8, 30, 0.72);
+    border: 1px solid rgba(126, 240, 247, 0.22);
+  }
+  .coop-dialog :global(.coop-invite-btns) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .coop-dialog :global(.coop-qr-wrap) {
+    display: grid;
+    justify-items: center;
+    gap: 6px;
+  }
+  .coop-dialog :global(.coop-qr-wrap svg) {
+    width: min(168px, 46vw);
+    height: auto;
+    border-radius: 10px;
+  }
+  .coop-dialog :global(.coop-qr-caption) {
+    font-size: 0.76rem;
+    opacity: 0.8;
+  }
+  .coop-dialog :global(.coop-seats-list) {
+    display: grid;
+    gap: 8px;
+  }
+  .coop-dialog :global(.coop-seat) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--seat-color) 45%, transparent);
+    background: rgba(5, 13, 44, 0.82);
+  }
+  .coop-dialog :global(.coop-seat.empty) {
+    opacity: 0.58;
+    border-style: dashed;
+  }
+  .coop-dialog :global(.coop-seat.me) {
+    border-color: var(--seat-color);
+    box-shadow: inset 0 0 14px color-mix(in srgb, var(--seat-color) 18%, transparent);
+  }
+  .coop-dialog :global(.coop-seat-main),
+  .coop-dialog :global(.coop-seat-actions) {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .coop-dialog :global(.coop-seat-num) {
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--seat-color);
+    letter-spacing: 0.1em;
+  }
+  .coop-dialog :global(.coop-seat-ship) {
+    fill: none;
+    stroke: var(--seat-color);
+    stroke-width: 1.7;
+    stroke-linejoin: round;
+  }
+  .coop-dialog :global(.coop-seat-callsign) {
+    font-family: var(--font-display);
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+  }
+  .coop-dialog :global(.coop-seat-empty) {
+    font-size: 0.82rem;
+    opacity: 0.8;
+  }
+  .coop-dialog :global(.coop-pill) {
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-family: var(--font-display);
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+  }
+  .coop-dialog :global(.coop-pill-ok) {
+    background: rgba(52, 211, 153, 0.2);
+    border: 1px solid rgba(52, 211, 153, 0.6);
+    color: #6ee7b7;
+  }
+  .coop-dialog :global(.coop-pill-idle) {
+    background: rgba(251, 191, 36, 0.15);
+    border: 1px solid rgba(251, 191, 36, 0.45);
+    color: #fde68a;
+  }
+  .coop-dialog :global(.coop-pill-warn) {
+    background: rgba(244, 114, 182, 0.2);
+    border: 1px solid rgba(244, 114, 182, 0.6);
+    color: #fbcfe8;
+  }
+  .coop-dialog :global(.coop-mini-btn) {
+    min-height: 32px;
+    padding: 0 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(236, 223, 210, 0.35);
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--sand);
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .coop-dialog :global(.coop-kick-btn) {
+    border-color: rgba(255, 94, 168, 0.55);
+    color: #ff9ec9;
+  }
+  .coop-dialog :global(.coop-alert),
+  .coop-dialog :global(.coop-status-banner),
+  .coop-dialog :global(.coop-launched-banner) {
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-size: 0.86rem;
+    line-height: 1.35;
+  }
+  .coop-dialog :global(.coop-alert-err) {
+    background: rgba(239, 68, 68, 0.18);
+    border: 1px solid rgba(248, 113, 113, 0.55);
+    color: #fecaca;
+  }
+  .coop-dialog :global(.coop-alert-warn),
+  .coop-dialog :global(.coop-alert-info),
+  .coop-dialog :global(.coop-status-banner) {
+    background: rgba(66, 245, 255, 0.12);
+    border: 1px solid rgba(66, 245, 255, 0.4);
+    color: #cffafe;
+  }
+  .coop-dialog :global(.coop-launched-banner) {
+    background: rgba(155, 255, 77, 0.15);
+    border: 1px solid rgba(155, 255, 77, 0.55);
+    color: #ecfccb;
+  }
+  .coop-dialog :global(.coop-footer) {
+    display: grid;
+    gap: 8px;
+  }
+  .coop-dialog :global(.coop-footer-hint) {
+    margin: 0;
+    font-size: 0.8rem;
+    opacity: 0.82;
+    text-align: center;
+  }
 </style>
 
 <script>
   import type { Game } from '../game/game';
+  import type { CoopClient } from '../game/coop-client';
+  import type { CoopLobbyModal } from '../game/coop-lobby';
+  import type { CoopPublicSeat } from '../game/coop-types';
   import type { MultiplayerClient } from '../game/multiplayer';
 
   const launch = document.querySelector<HTMLButtonElement>('[data-game-launch]');
+  const coopLaunch = document.querySelector<HTMLButtonElement>('[data-coop-launch]');
   const overlay = document.querySelector<HTMLElement>('[data-game-overlay]');
+  const coopOverlay = document.querySelector<HTMLElement>('[data-coop-overlay]');
   const canvas = overlay?.querySelector('canvas');
   const exit = overlay?.querySelector<HTMLButtonElement>('[data-game-exit]');
   const sound = overlay?.querySelector<HTMLButtonElement>('[data-game-sound]');
   const pause = overlay?.querySelector<HTMLButtonElement>('[data-game-pause]');
   const ranks = overlay?.querySelector<HTMLButtonElement>('[data-game-ranks]');
+  const hangar = overlay?.querySelector<HTMLButtonElement>('[data-game-hangar]');
   const status = overlay?.querySelector<HTMLElement>('[data-game-status]');
+  const leaveConfirm = overlay?.querySelector<HTMLElement>('[data-coop-leave-confirm]');
+  const leaveDesc = overlay?.querySelector<HTMLElement>('[data-coop-leave-desc]');
+  const stayBtn = overlay?.querySelector<HTMLButtonElement>('[data-coop-stay]');
+  const confirmLeaveBtn = overlay?.querySelector<HTMLButtonElement>('[data-coop-confirm-leave]');
   const squadOnline = document.querySelector<HTMLElement>('[data-squad-online]');
   const squadTop = document.querySelector<HTMLElement>('[data-squad-top]');
   const squadSep = document.querySelector<HTMLElement>('[data-squad-sep]');
@@ -324,13 +853,37 @@
   if (launch && overlay && canvas && exit) {
     // The overlay lives at the end of <body> so the rest of the page can be made inert around it.
     document.body.append(overlay);
+    if (coopOverlay) document.body.append(coopOverlay);
     // Keep the page behind from scrolling without hiding its scrollbar, which would shift the layout.
     overlay.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
     overlay.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
 
     let game: Game | null = null;
+    let coopModal: CoopLobbyModal | null = null;
     let mp: MultiplayerClient | null = null;
     let opening = false;
+    let inCoopGame = false;
+    let inCoopIsHost = false;
+
+    const hideLeaveConfirm = () => {
+      if (!leaveConfirm || leaveConfirm.hidden) return;
+      leaveConfirm.hidden = true;
+      overlay.focus({ preventScroll: true });
+    };
+
+    const openLeaveConfirm = () => {
+      if (!leaveConfirm || !inCoopGame || !game) {
+        close();
+        return;
+      }
+      if (leaveDesc) {
+        leaveDesc.textContent = inCoopIsHost
+          ? 'Leaving as Host closes this squad flight for everyone in the room.'
+          : 'Leaving gives up your seat in this squad flight.';
+      }
+      leaveConfirm.hidden = false;
+      stayBtn?.focus({ preventScroll: true });
+    };
 
     const ensureMultiplayer = async (): Promise<MultiplayerClient> => {
       if (mp) return mp;
@@ -359,20 +912,35 @@
 
     const rest = () =>
       [...document.body.children].filter(
-        (el): el is HTMLElement => el instanceof HTMLElement && el !== overlay && el.tagName !== 'SCRIPT',
+        (el): el is HTMLElement =>
+          el instanceof HTMLElement && el !== overlay && el !== coopOverlay && el.tagName !== 'SCRIPT',
       );
     const announce = (active: boolean) =>
       document.dispatchEvent(new CustomEvent('gg:game', { detail: { active } }));
 
-    const close = (viaBack = false) => {
+    const close = (viaBack = false, fromCoopServerClose = false) => {
       if (!game) return;
+      if (leaveConfirm) leaveConfirm.hidden = true;
+      const wasCoop = inCoopGame;
+      inCoopGame = false;
+      inCoopIsHost = false;
       game.destroy();
       game = null;
+      if (hangar) hangar.hidden = true;
+      if (ranks) ranks.hidden = false;
+      if (pause) pause.hidden = false;
+      if (wasCoop && !fromCoopServerClose) {
+        coopModal?.controller.leaveRoom();
+      }
       overlay.classList.remove('on');
       document.documentElement.classList.remove('game-active');
-      rest().forEach((el) => (el.inert = false));
+      if (!fromCoopServerClose) {
+        rest().forEach((el) => (el.inert = false));
+      }
       announce(false);
-      launch.focus({ preventScroll: true });
+      if (!fromCoopServerClose) {
+        (wasCoop ? (coopLaunch ?? launch) : launch).focus({ preventScroll: true });
+      }
       // Drop the history entry that open() added, unless the Back button has already done so.
       if (!viaBack && history.state?.ggGame) history.back();
       // Hide once the fade has finished, unless the game was reopened in the meantime.
@@ -381,7 +949,7 @@
       }, 600);
     };
 
-    const open = async () => {
+    const open = async (coopSession?: { client: CoopClient; seats: readonly CoopPublicSeat[] }) => {
       if (game || opening) return;
       opening = true;
       // Safari and iPhones only let a page speak if it first does so during a click or tap. The game itself
@@ -396,18 +964,87 @@
         /* no speech, or storage blocked: the game is silent or decides for itself */
       }
       try {
-        const [{ Game }, multiplayer] = await Promise.all([
-          import('../game/game'),
-          ensureMultiplayer(),
-        ]);
+        let GameCtor: typeof Game;
+        let multiplayer: MultiplayerClient;
+        let coopFlightMod: typeof import('../game/coop-flight') | null;
+        try {
+          const [{ Game }, mpInstance, flightMod] = await Promise.all([
+            import('../game/game'),
+            ensureMultiplayer(),
+            coopSession ? import('../game/coop-flight') : Promise.resolve(null),
+          ]);
+          GameCtor = Game;
+          multiplayer = mpInstance;
+          coopFlightMod = flightMod;
+        } catch (error) {
+          console.error('The arcade bundle could not be loaded.', error);
+          if (coopSession && coopOverlay) {
+            coopOverlay.hidden = false;
+            rest().forEach((el) => (el.inert = true));
+            coopModal?.controller.reportError('This game was updated or lost connection. Refresh the page to rejoin.');
+            coopOverlay.focus({ preventScroll: true });
+          } else {
+            overlay.hidden = true;
+            document.documentElement.classList.remove('game-active');
+            rest().forEach((el) => (el.inert = false));
+            announce(false);
+            launch.focus({ preventScroll: true });
+          }
+          return;
+        }
         overlay.hidden = false;
+        if (leaveConfirm) leaveConfirm.hidden = true;
         document.documentElement.classList.add('game-active');
         rest().forEach((el) => (el.inert = true));
         announce(true);
+        if (ranks) ranks.hidden = Boolean(coopSession);
+        if (pause) pause.hidden = Boolean(coopSession && coopSession.client.role !== 'host');
+        let coopDirector: { dispose: () => void } | null = null;
         try {
-          game = new Game(canvas, {
+          inCoopGame = Boolean(coopSession);
+          inCoopIsHost = Boolean(coopSession && coopSession.client.role === 'host');
+          const dir =
+            coopSession && coopFlightMod
+              ? new coopFlightMod.CoopFlightDirector({
+                  client: coopSession.client,
+                  initialSeats: coopSession.seats,
+                  onClosed: () => {
+                    close(false, true);
+                    if (coopOverlay) {
+                      coopOverlay.hidden = false;
+                      rest().forEach((el) => (el.inert = true));
+                      coopOverlay.focus({ preventScroll: true });
+                    }
+                  },
+                  onVersionMismatch: (message) => {
+                    close(false, true);
+                    coopModal?.controller.reportError(message);
+                    if (coopOverlay) {
+                      coopOverlay.hidden = false;
+                      rest().forEach((el) => (el.inert = true));
+                      coopOverlay.focus({ preventScroll: true });
+                    }
+                  },
+                  onStatus: (message) => {
+                    if (status) status.textContent = message;
+                  },
+                })
+              : null;
+          coopDirector = dir;
+          game = new GameCtor(canvas, {
             multiplayer,
-            onExit: () => close(),
+            ...(dir ? { coop: { director: dir } } : {}),
+            onExit: () => {
+              if (!inCoopGame) {
+                close();
+                return;
+              }
+              if (leaveConfirm && !leaveConfirm.hidden) {
+                hideLeaveConfirm();
+              } else {
+                openLeaveConfirm();
+              }
+            },
             onStatus: (message) => {
               if (status) status.textContent = message;
             },
@@ -419,16 +1056,41 @@
             onLeaderboard: (openState) => {
               ranks?.setAttribute('aria-pressed', String(openState));
             },
+            onHangar: (available, active) => {
+              if (!hangar) return;
+              hangar.hidden = !available;
+              hangar.setAttribute('aria-pressed', String(active));
+              hangar.setAttribute(
+                'aria-label',
+                active ? 'Quick Fly with selected pilot and ship' : 'Hangar: change pilot and ship',
+              );
+            },
           });
           pause?.setAttribute('aria-pressed', 'false');
           pause?.setAttribute('aria-label', 'Pause');
           ranks?.setAttribute('aria-pressed', 'false');
         } catch (error) {
           // The game could not start (no canvas support, say): put the page back exactly as it was.
+          coopDirector?.dispose();
+          inCoopGame = false;
+          inCoopIsHost = false;
+          if (leaveConfirm) leaveConfirm.hidden = true;
+          if (hangar) hangar.hidden = true;
+          if (ranks) ranks.hidden = false;
+          if (pause) pause.hidden = false;
           overlay.hidden = true;
           document.documentElement.classList.remove('game-active');
-          rest().forEach((el) => (el.inert = false));
           announce(false);
+          if (coopSession && coopOverlay) {
+            // Give up the seat: a pilot that never moves or answers would hold every break up for the squad.
+            coopModal?.controller.leaveRoom();
+            coopModal?.controller.reportError('Could not start squad flight on this device.');
+            coopOverlay.hidden = false;
+            rest().forEach((el) => (el.inert = true));
+            coopOverlay.focus({ preventScroll: true });
+          } else {
+            rest().forEach((el) => (el.inert = false));
+          }
           console.error('The arcade demo could not start.', error);
           return;
         }
@@ -444,8 +1106,68 @@
       }
     };
 
-    launch.addEventListener('click', open);
-    exit.addEventListener('click', () => close());
+    launch.addEventListener('click', () => {
+      void open();
+    });
+    exit.addEventListener('click', () => {
+      if (inCoopGame) {
+        openLeaveConfirm();
+      } else {
+        close();
+      }
+    });
+    stayBtn?.addEventListener('click', () => {
+      hideLeaveConfirm();
+    });
+    confirmLeaveBtn?.addEventListener('click', () => {
+      if (leaveConfirm) leaveConfirm.hidden = true;
+      close();
+    });
+    leaveConfirm?.addEventListener('pointerdown', (e) => {
+      if (e.target === leaveConfirm || (leaveConfirm.contains(e.target as Node) && e.target !== stayBtn && e.target !== confirmLeaveBtn)) {
+        e.preventDefault();
+        stayBtn?.focus({ preventScroll: true });
+      }
+    });
+    window.addEventListener(
+      'keydown',
+      (e) => {
+        if (!leaveConfirm || leaveConfirm.hidden) return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.code === 'Escape') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          hideLeaveConfirm();
+          return;
+        }
+        if (e.key === 'Tab' && stayBtn && confirmLeaveBtn) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          if (document.activeElement === stayBtn) {
+            confirmLeaveBtn.focus({ preventScroll: true });
+          } else if (document.activeElement === confirmLeaveBtn) {
+            stayBtn.focus({ preventScroll: true });
+          } else {
+            (e.shiftKey ? confirmLeaveBtn : stayBtn).focus({ preventScroll: true });
+          }
+          return;
+        }
+        const onSheetBtn = document.activeElement === stayBtn || document.activeElement === confirmLeaveBtn;
+        if (onSheetBtn && (e.code === 'Enter' || e.code === 'Space')) {
+          if (e.repeat) e.preventDefault();
+          e.stopImmediatePropagation();
+          return;
+        }
+        if (/^F([1-9]|1[0-2])$/.test(e.code)) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      },
+      true,
+    );
+    hangar?.addEventListener('click', () => {
+      game?.openHangarCustomizer();
+      overlay.focus({ preventScroll: true });
+    });
     ranks?.addEventListener('click', () => {
       game?.toggleLeaderboard();
       overlay.focus({ preventScroll: true });
@@ -461,6 +1183,127 @@
       // Hand the keyboard back to the game, so Enter and Space start and steer rather than press this button again.
       overlay.focus({ preventScroll: true });
     });
-    addEventListener('popstate', () => close(true));
+    addEventListener('popstate', () => {
+      if (inCoopGame && game) {
+        history.pushState({ ggGame: true }, '');
+        openLeaveConfirm();
+        return;
+      }
+      close(true);
+    });
+
+    const closeCoopModal = () => {
+      if (!coopOverlay || coopOverlay.hidden) return;
+      coopOverlay.hidden = true;
+      if (!game) {
+        rest().forEach((el) => (el.inert = false));
+      }
+      coopLaunch?.focus({ preventScroll: true });
+    };
+
+    const ensureCoopModal = async (): Promise<CoopLobbyModal | null> => {
+      if (!coopOverlay) return null;
+      if (coopModal) return coopModal;
+      const [{ CoopLobbyModal }, multiplayer] = await Promise.all([
+        import('../game/coop-lobby'),
+        ensureMultiplayer(),
+      ]);
+      coopModal = new CoopLobbyModal({
+        root: coopOverlay,
+        initialCallsign: multiplayer.getCallsign(),
+        onCloseModal: closeCoopModal,
+        onCoopActiveChange: (active) => {
+          multiplayer.setCoopActive(active);
+        },
+        onSquadLaunched: (client, seats) => {
+          if (game || opening) return;
+          if (coopOverlay) coopOverlay.hidden = true;
+          void open({ client, seats });
+        },
+      });
+      return coopModal;
+    };
+
+    const openCoopModal = async (joinCode?: string, role: 'host' | 'guest' = 'guest') => {
+      if (!coopOverlay || game) return;
+      const modal = await ensureCoopModal();
+      if (!modal) return;
+      coopOverlay.hidden = false;
+      rest().forEach((el) => (el.inert = true));
+      coopOverlay.focus({ preventScroll: true });
+      if (joinCode) {
+        modal.openWithJoinCode(joinCode, role);
+      } else {
+        modal.openChoose();
+      }
+    };
+
+    const coopMode =
+      document.documentElement.dataset.coopMode === 'on'
+        ? 'on'
+        : document.documentElement.dataset.coopMode === 'playtest'
+          ? 'playtest'
+          : 'off';
+
+    if (coopMode !== 'off') {
+      coopLaunch?.addEventListener('click', () => {
+        void openCoopModal();
+      });
+
+      coopOverlay?.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && coopModal?.controller.snapshot().screen === 'choose') {
+          e.preventDefault();
+          closeCoopModal();
+        }
+      });
+
+      // Zero-cost invite/session check: only downloads Co-op bundle on initial load when
+      // arriving via `?j=ABCDEF` QR/invite link (stashed in `gg_coop_invite` / `window.__ggInvite`
+      // by Base.astro before Google Analytics runs) or refreshing an active Co-op lobby tab!
+      try {
+        const win = window as Window & { __ggInvite?: string; __ggCoopPreview?: boolean };
+        const params = new URLSearchParams(location.search);
+        let hasInvite = Boolean(win.__ggInvite) || params.has('j');
+        let hasSavedSession = false;
+        let hasPreviewFlag = Boolean(win.__ggCoopPreview) || params.get('coop') === '1';
+        try {
+          hasInvite = hasInvite || sessionStorage.getItem('gg_coop_invite') !== null;
+          hasSavedSession = Boolean(sessionStorage.getItem('gg_coop_active'));
+          hasPreviewFlag = hasPreviewFlag || sessionStorage.getItem('gg_coop_preview') === '1';
+        } catch {
+          /* storage blocked; window.__ggInvite / __ggCoopPreview fallback still works */
+        }
+
+        const unlocked = coopMode === 'on' || hasPreviewFlag || hasInvite || hasSavedSession;
+        if (unlocked && coopLaunch) {
+          coopLaunch.hidden = false;
+          if (coopMode === 'playtest') {
+            try {
+              sessionStorage.setItem('gg_coop_preview', '1');
+            } catch {
+              /* ignore restricted storage */
+            }
+          }
+        }
+
+        if (unlocked && (hasInvite || hasSavedSession)) {
+          void Promise.all([import('../game/coop-client'), import('../game/coop-lobby')]).then(
+            ([{ consumePendingInviteCode }, { loadActiveCoopSession }]) => {
+              const inviteCode = consumePendingInviteCode();
+              if (inviteCode) {
+                void openCoopModal(inviteCode, 'guest');
+                return;
+              }
+              const resumed = loadActiveCoopSession();
+              if (resumed) {
+                void openCoopModal(resumed.code, resumed.role);
+              }
+            },
+          );
+        }
+      } catch {
+        /* ignore restricted storage environments */
+      }
+    }
   }
 </script>

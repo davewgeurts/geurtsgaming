@@ -9,8 +9,32 @@
  *
  * This file lays the field out and moves it. game.ts draws it, and handles what hits what.
  */
-import { int, rand } from './core';
 import { closed, open, type Pt, type Shape } from './shapes';
+
+/** Fast, deterministic 32-bit PRNG (`mulberry32`) so co-op peers lay out identical asteroid belts. */
+export function createSeededRng(seed: number): () => number {
+  let s = seed >>> 0;
+  return (): number => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Fresh non-zero unsigned 32-bit seed for a co-op asteroid belt. */
+export function randomFieldSeed(): number {
+  const raw = Math.floor(Math.random() * 0xffffffff) >>> 0;
+  return raw === 0 ? 0x9e3779b9 : raw;
+}
+
+function rBetween(rng: () => number, min: number, max: number): number {
+  return min + rng() * (max - min);
+}
+
+function rInt(rng: () => number, min: number, max: number): number {
+  return Math.floor(rBetween(rng, min, max + 1));
+}
 
 export interface FieldEnv {
   w: number; h: number;
@@ -18,9 +42,13 @@ export interface FieldEnv {
   left: number; right: number;
   scale: number; pace: number;
   wave: number;
+  /** Optional deterministic seed for co-op asteroid field synchronization. */
+  seed?: number;
 }
 
 export interface Rock {
+  /** Stable index within `Field.rocks` (`0..n-1`) so co-op peers can mark broken rocks by ID. */
+  id: number;
   x: number;
   /** How far back from the front of the field it is. Its place on screen is `front - d`. */
   d: number;
@@ -40,6 +68,8 @@ interface Lane { swing: number; width: number }
 interface Spot { x: number; d: number }
 
 export interface Field {
+  /** Seed used to lay out this belt when created deterministically. */
+  seed?: number;
   rocks: Rock[];
   /** Where the bombs (easy way) and the power-ups (hard way) go. game.ts makes the real things of them. */
   bombs: Spot[];
@@ -94,35 +124,36 @@ function clearOfGaps(f: Field, x: number, d: number, r: number): boolean {
 }
 
 /** A lump of rock: an uneven outline, and on the bigger ones a couple of ridges, so it looks cut, not round. */
-function rockShape(r: number): Shape {
+function rockShape(r: number, rng: () => number): Shape {
   const n = r > 24 ? 9 : r > 14 ? 8 : 6;
-  const turn = rand(0, Math.PI * 2);
+  const turn = rBetween(rng, 0, Math.PI * 2);
   const pts: Pt[] = Array.from({ length: n }, (_, i) => {
-    const a = turn + ((i + rand(-0.22, 0.22)) / n) * Math.PI * 2;
-    const reach = r * rand(0.74, 1.06);
+    const a = turn + ((i + rBetween(rng, -0.22, 0.22)) / n) * Math.PI * 2;
+    const reach = r * rBetween(rng, 0.74, 1.06);
     return [Math.round(Math.cos(a) * reach * 10) / 10, Math.round(Math.sin(a) * reach * 10) / 10] as const;
   });
   const shape = [closed(...pts)];
   if (r > 14) {
-    const hub: Pt = [rand(-0.2, 0.2) * r, rand(-0.2, 0.2) * r];
-    const a = int(0, n - 1);
+    const hub: Pt = [rBetween(rng, -0.2, 0.2) * r, rBetween(rng, -0.2, 0.2) * r];
+    const a = rInt(rng, 0, n - 1);
     shape.push(open(pts[a]!, hub, pts[(a + Math.floor(n / 3) + 1) % n]!));
     if (r > 24) shape.push(open(hub, pts[(a + Math.floor((2 * n) / 3) + 1) % n]!));
   }
   return shape;
 }
 
-function makeRock(x: number, d: number, r: number, tough: boolean): Rock {
+function makeRock(id: number, x: number, d: number, r: number, tough: boolean, rng: () => number): Rock {
   return {
-    x, d, r, tough,
+    id, x, d, r, tough,
     // Little ones go in one shot. The rest can be broken too, but it takes long enough that flying round is quicker.
     hp: !tough ? 1 : r > 24 ? 20 : 8,
-    rot: rand(0, Math.PI * 2), spin: rand(-0.5, 0.5) * (tough ? 0.5 : 1.6),
-    shape: rockShape(r), flash: 0, dead: false,
+    rot: rBetween(rng, 0, Math.PI * 2), spin: rBetween(rng, -0.5, 0.5) * (tough ? 0.5 : 1.6),
+    shape: rockShape(r, rng), flash: 0, dead: false,
   };
 }
 
 export function createField(env: FieldEnv): Field {
+  const rng = env.seed !== undefined ? createSeededRng(env.seed) : Math.random;
   const s = env.scale;
   const k = Math.max(0, env.wave - 1);
   const left = env.left;
@@ -135,7 +166,7 @@ export function createField(env: FieldEnv): Field {
   const reach = Math.max(0, Math.min(170 * s, (right - left) / 2 - narrow / 2 - 26 * s));
   const hard: Lane = { swing: reach, width: narrow };
   const easy: Lane = { swing: Math.max(0, Math.min(reach * 0.58, (right - left) / 2 - wide / 2 - 26 * s)), width: wide };
-  const bends = Math.random() < 0.5 ? 'zigzag' : 'loops';
+  const bends = rng() < 0.5 ? 'zigzag' : 'loops';
   // How hard the hard way is to follow: the sideways speed it asks for, as a share of what the ship can do.
   // (The easy way, swinging less far in the same distance, asks for a little over half of that.)
   const ask = Math.min(0.7, 0.5 + 0.03 * k) * 380 * s;
@@ -143,8 +174,9 @@ export function createField(env: FieldEnv): Field {
   const mouth = 300 * s;
   const swings = Math.min(6, 3 + Math.floor(k / 2));
   const f: Field = {
+    seed: env.seed,
     rocks: [], bombs: [], prizes: [], signs: [], front: -30, speed, bends,
-    mid: (left + right) / 2, period, turn: Math.random() < 0.5 ? -1 : 1, easy, hard,
+    mid: (left + right) / 2, period, turn: rng() < 0.5 ? -1 : 1, easy, hard,
     mouth, length: mouth * 0.6 + (swings * period) / 2 + mouth * 0.5, age: 0, done: false,
   };
 
@@ -155,24 +187,24 @@ export function createField(env: FieldEnv): Field {
   };
   // First the walls: tough rocks lining both sides of each way through, so that they read as ways through.
   for (const lane of [false, true]) {
-    for (let d = 10 * s; d < f.length; d += rand(34, 50) * s) {
+    for (let d = 10 * s; d < f.length; d += rBetween(rng, 34, 50) * s) {
       for (const side of [-1, 1]) {
-        const r = rand(15, 36) * s;
+        const r = rBetween(rng, 15, 36) * s;
         let x = centre(f, d, lane) + side * (widthAt(f, d, lane) / 2 + r + 2);
         for (let tries = 0; tries < 30 && !clearOfGaps(f, x, d, r); tries++) x += side * 6 * s;
         if (x < left - 50 * s || x > right + 50 * s || !clearOfGaps(f, x, d, r) || !fits(x, d, r, 1)) continue;
-        rocks.push(makeRock(x, d, r, true));
+        rocks.push(makeRock(rocks.length, x, d, r, true, rng));
       }
     }
   }
   // Then the rest of the belt, thrown down wherever there is room: a third of it little rocks.
   const tries = Math.round(((right - left + 60 * s) * f.length) / (46 * s * 46 * s));
   for (let i = 0; i < tries; i++) {
-    const little = Math.random() < 0.34;
-    const r = (little ? rand(8.5, 12) : Math.random() < 0.45 ? rand(26, 38) : rand(15, 23)) * s;
-    const x = rand(left - 20 * s, right + 20 * s);
-    const d = rand(0, f.length);
-    if (clearOfGaps(f, x, d, r) && fits(x, d, r)) rocks.push(makeRock(x, d, r, !little));
+    const little = rng() < 0.34;
+    const r = (little ? rBetween(rng, 8.5, 12) : rng() < 0.45 ? rBetween(rng, 26, 38) : rBetween(rng, 15, 23)) * s;
+    const x = rBetween(rng, left - 20 * s, right + 20 * s);
+    const d = rBetween(rng, 0, f.length);
+    if (clearOfGaps(f, x, d, r) && fits(x, d, r)) rocks.push(makeRock(rocks.length, x, d, r, !little, rng));
   }
 
   // What lies in the ways through goes where they run apart, a quarter and three quarters of the way
@@ -188,12 +220,12 @@ export function createField(env: FieldEnv): Field {
   };
   // The easy way: bombs, each to one side.
   for (const at of spread(Math.min(3, 1 + Math.floor(env.wave / 2)))) {
-    const d = at + rand(-0.08, 0.08) * period;
-    f.bombs.push({ x: centre(f, d, false) + (Math.random() < 0.5 ? -1 : 1) * 0.26 * easy.width, d });
+    const d = at + rBetween(rng, -0.08, 0.08) * period;
+    f.bombs.push({ x: centre(f, d, false) + (rng() < 0.5 ? -1 : 1) * 0.26 * easy.width, d });
   }
   // The hard way: power-ups, in the middle of it.
   for (const at of spread(env.wave >= 3 ? 3 : 2)) {
-    const d = at + rand(-0.06, 0.06) * period;
+    const d = at + rBetween(rng, -0.06, 0.06) * period;
     f.prizes.push({ x: centre(f, d, true), d });
   }
   if (apexes.length) {
@@ -204,11 +236,11 @@ export function createField(env: FieldEnv): Field {
   for (const lane of [false, true]) {
     const taken = lane ? f.prizes : f.bombs;
     const width = (lane ? hard : easy).width;
-    for (let d = start + rand(0.2, 0.5) * period; d < f.length - mouth * 0.5; d += rand(0.45, 0.8) * period * (lane ? 0.5 : 1)) {
+    for (let d = start + rBetween(rng, 0.2, 0.5) * period; d < f.length - mouth * 0.5; d += rBetween(rng, 0.45, 0.8) * period * (lane ? 0.5 : 1)) {
       if (taken.some((t) => Math.abs(t.d - d) < 80 * s) || f.signs.some((sign) => Math.abs(sign.d - d) < 50 * s)) continue;
-      const r = rand(8.5, 11) * s;
-      const x = centre(f, d, lane) + rand(-0.3, 0.3) * width;
-      if (fits(x, d, r)) rocks.push(makeRock(x, d, r, false));
+      const r = rBetween(rng, 8.5, 11) * s;
+      const x = centre(f, d, lane) + rBetween(rng, -0.3, 0.3) * width;
+      if (fits(x, d, r)) rocks.push(makeRock(rocks.length, x, d, r, false, rng));
     }
   }
   return f;

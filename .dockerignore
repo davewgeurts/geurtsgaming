@@ -12,3 +12,10 @@ dist
 .env.*
 !.env.example
 logos
+feedbackforagy.md
+lettertoclaude.md
+notesforclaude.md
+samepage.md
+.wrangler
+.dev.vars*
+

@@ -183,6 +183,7 @@ export class MultiplayerClient {
    */
   private serverBoard: 'unknown' | 'ready' | 'shared' = 'unknown';
   private fastPolling = false;
+  private coopActive = false;
   private lastPollMs = 0;
   private pendingPresence: Promise<void> | null = null;
   private runId: string | null = null;
@@ -490,6 +491,24 @@ export class MultiplayerClient {
     this.setFastPolling(false);
   }
 
+  /**
+   * Suppress solo ghost wingmen, solo flight telemetry, and solo Top 10 score submissions
+   * while a Co-op lobby or Co-op mission is active.
+   */
+  setCoopActive(active: boolean): void {
+    if (this.coopActive === active) return;
+    this.coopActive = active;
+    if (active) {
+      this.wingmen.length = 0;
+      this.lasers.length = 0;
+      this.rest();
+    }
+  }
+
+  get isCoopActive(): boolean {
+    return this.coopActive;
+  }
+
   private resetPollInterval(fast: boolean): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
@@ -695,6 +714,7 @@ export class MultiplayerClient {
 
   /** Record a finished run's score locally and submit it to the global Top 10 leaderboard. */
   recordScore(score: number, wave: number, freed: number): number | null {
+    if (this.coopActive) return null;
     const finishedRunId = this.runId;
     this.runId = null;
     this.runWave = 0;
@@ -777,6 +797,13 @@ export class MultiplayerClient {
     },
   ): void {
     this.time += dt;
+    if (this.coopActive) {
+      this.wingmen.length = 0;
+      this.lasers.length = 0;
+      this.flight = null;
+      this.setFastPolling(false);
+      return;
+    }
 
     // Keep the position that goes out with each heartbeat up to date while flying in a wave.
     if (opts.active && opts.w > 0 && opts.h > 0) {

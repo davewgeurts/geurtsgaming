@@ -5,7 +5,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { BRIEFING, TAUNTS } from '../src/game/lines';
-import { Voice, castVoices, spoken, type SpeechEngine, type UtteranceLike, type VoiceLike } from '../src/game/voice';
+import { PILOTS, PILOT_BY_ID, PILOT_IDS } from '../src/game/loadout';
+import { Voice, castVoices, pickPilotVoice, spoken, type SpeechEngine, type UtteranceLike, type VoiceLike } from '../src/game/voice';
 
 const voice = (name: string, lang = 'en-GB', localService = true, isDefault = false): VoiceLike => ({ name, lang, localService, default: isDefault });
 const MAC = [voice('Daniel', 'en-GB', true, true), voice('Samantha', 'en-US'), voice('Karen', 'en-AU'), voice('Fred', 'en-US'), voice('Zarvox', 'en-US'), voice('Thomas', 'fr-FR'), voice('Google UK English Female', 'en-GB', false)];
@@ -202,4 +203,54 @@ test('a browser that will not speak until a key press or tap is asked again at e
   deaf.v.say('boss', 'TICK TOCK!');
   for (let i = 0; i < 20; i++) deaf.v.unlock();
   assert.ok(deaf.said.length <= 5, `${deaf.said.length} attempts`);
+});
+
+test('custom pilot voices: all 8 avatars have local-only voices, distinct pitch/rate tuning, and 3 speakable taglines', () => {
+  for (const p of PILOTS) {
+    assert.equal(p.taglines.length, 3, `${p.id} has 3 signature taglines`);
+    for (const line of p.taglines) {
+      const out = spoken(line.text);
+      assert.ok(out.length >= 5, `${p.id} tagline is speakable: ${line.text}`);
+      assert.equal(
+        out.replace(/[^a-z0-9]/gi, '').toLowerCase(),
+        line.text.replace(/[^a-z0-9]/gi, '').toLowerCase(),
+        `no words lost from ${p.id} tagline: ${line.text}`,
+      );
+    }
+    const chosen = pickPilotVoice(MAC, p.id, 'en-GB');
+    assert.ok(chosen, `${p.id} resolves an on-device English voice`);
+    assert.equal(chosen!.localService, true, `${p.id} never uses a network TTS voice`);
+    assert.notEqual(chosen!.name, 'Zarvox', `${p.id} never picks a novelty voice`);
+    assert.match(chosen!.lang, /^en/);
+  }
+
+  const r = rig();
+  for (const id of PILOT_IDS) {
+    const spec = PILOT_BY_ID[id];
+    assert.ok(r.v.sayPilot(id, spec.taglines[0].text), `sayPilot speaks for ${id}`);
+    const last = r.said.at(-1)!;
+    assert.equal(last.pitch, spec.voice.pitch);
+    assert.equal(last.rate, spec.voice.rate);
+  }
+  // Rapidly hovering multiple pilots cuts in cleanly on previous pilot previews,
+  // while never talking over Flight Command!
+  finish(r);
+  assert.ok(r.v.say('commander', 'COMMAND TO NOVA IN THE STARHAWK. WELCOME ABOARD!'));
+  assert.equal(r.v.sayPilot('fox', 'TOO FAST FOR RADAR!'), false, 'pilot preview never cuts off the commander');
+  finish(r);
+
+  // Selecting a pilot also tunes in-flight `say("pilot", ...)` callouts to that pilot's custom voice:
+  r.v.setPilot('wolf');
+  assert.ok(r.v.say('pilot', 'FULL TANK!'));
+  assert.equal(r.said.at(-1)!.pitch, PILOT_BY_ID.wolf.voice.pitch);
+  assert.equal(r.said.at(-1)!.rate, PILOT_BY_ID.wolf.voice.rate);
+
+  // Unlocking after a muted hover utterance replays that exact pilot's voice:
+  const locked = rig();
+  locked.mute = true;
+  assert.ok(locked.v.sayPilot('owl', 'CALCULATING OPTIMAL VECTOR.'));
+  locked.mute = false;
+  locked.v.unlock();
+  assert.equal(locked.said.at(-1)!.pitch, PILOT_BY_ID.owl.voice.pitch);
+  assert.equal(locked.said.at(-1)!.text, 'calculating optimal vector.');
 });
